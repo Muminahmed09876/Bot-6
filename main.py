@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from pyrogram import Client, filters
 from pyrogram.types import Message, BotCommand, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.enums import ParseMode
+from pyrogram.errors import FloodWait
 from PIL import Image
 from hachoir.parser import createParser
 from hachoir.metadata import extractMetadata
@@ -74,8 +75,8 @@ USER_UPLOAD_LOCKS = {}     # {uid: asyncio.Lock()} - To ensure sequential upload
 ADMIN_ID = int(os.getenv("ADMIN_ID", ""))
 MAX_SIZE = 4 * 1024 * 1024 * 1024
 
-# Updated workers to 1000 as requested
-app = Client("mybot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=1000)
+# Updated workers to 1000 as requested, added sleep_threshold to prevent FloodWait crashes
+app = Client("mybot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=1000, sleep_threshold=86400)
 flask_app = Flask(__name__)
 
 # ---- utilities ----
@@ -273,7 +274,7 @@ async def progress_callback(current, total, action, message, start_time):
     now = time.time()
     msg_id = message.id
     if msg_id in PROGRESS_CACHE:
-        if now - PROGRESS_CACHE[msg_id] < 3: 
+        if now - PROGRESS_CACHE[msg_id] < 20:  # FloodWait কমানোর জন্য 3 থেকে 5 সেকেন্ড করা হলো
             return
     PROGRESS_CACHE[msg_id] = now
     
@@ -1403,7 +1404,7 @@ async def handle_audio_change_file(c: Client, m: Message):
                 
         await m.download(file_name=str(tmp_path), progress=dl_prog)
         
-        audio_tracks = await asyncio.tothread(get_audio_tracks_ffprobe, tmp_path)
+        audio_tracks = await asyncio.to_thread(get_audio_tracks_ffprobe, tmp_path)
         
         if not audio_tracks:
             await status_msg.edit("এই ভিডিওতে কোনো অডিও ট্র্যাক পাওয়া যায়নি বা FFprobe চলতে পারেনি।")
