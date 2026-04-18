@@ -274,7 +274,7 @@ async def progress_callback(current, total, action, message, start_time):
     now = time.time()
     msg_id = message.id
     if msg_id in PROGRESS_CACHE:
-        if now - PROGRESS_CACHE[msg_id] < 20:  # FloodWait কমানোর জন্য 3 থেকে 5 সেকেন্ড করা হলো
+        if now - PROGRESS_CACHE[msg_id] < 5:  # FloodWait কমানোর জন্য 3 থেকে 5 সেকেন্ড করা হলো
             return
     PROGRESS_CACHE[msg_id] = now
     
