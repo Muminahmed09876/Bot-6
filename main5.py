@@ -64,6 +64,11 @@ EDIT_CAPTION_MODE = set()
 USER_THUMB_TIME = {}
 HIDE_PROGRESS_BAR = set()
 
+# --- NEW STATE FOR COOKIES & VPN ---
+AWAITING_COOKIES_FILE = set()
+ACTIVE_VPN = {}
+# -----------------------------------
+
 # --- STATE FOR AUDIO CHANGE ---
 MKV_AUDIO_CHANGE_MODE = set()
 PENDING_AUDIO_ORDERS = {} 
@@ -569,6 +574,8 @@ async def set_bot_commands():
         BotCommand("rename", "Rename replied video (admin only)"),
         BotCommand("mkv_video_audio_change", "MKV audio track change mode (admin only)"),
         BotCommand("youtube", "Toggle YT-DLP / YouTube download mode (admin only)"),
+        BotCommand("file", "Upload cookies.txt file (admin only)"),
+        BotCommand("vpn", "Set VPN country for yt-dlp (admin only)"),
         BotCommand("create_post", "Create new post (admin only)"), 
         BotCommand("mode_check", "Check current mode status (admin only)"), 
         BotCommand("broadcast", "Broadcast (admin only)"),
@@ -580,7 +587,7 @@ async def set_bot_commands():
     except Exception as e:
         logger.warning("Set commands error: %s", e)
 
-async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, status_msg_id, cancel_event):
+async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, status_msg_id, cancel_event, fallback_caption=None):
     """Background task that waits for upload lock to ensure sequential uploads."""
     if uid not in USER_UPLOAD_LOCKS:
         USER_UPLOAD_LOCKS[uid] = asyncio.Lock()
@@ -591,7 +598,7 @@ async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, s
             return
         # Now we possess the upload lock. Video 1 will hold this until done.
         # Video 2 (already downloaded) will wait here.
-        await process_file_and_upload(client, message, tmp_path, original_name=renamed_file, messages_to_delete=[status_msg_id], cancel_event_passed=cancel_event)
+        await process_file_and_upload(client, message, tmp_path, original_name=renamed_file, messages_to_delete=[status_msg_id], cancel_event_passed=cancel_event, fallback_caption=fallback_caption)
 
 # --- QUEUE WORKER ---
 async def process_queue_handler(uid, client):
@@ -627,6 +634,9 @@ async def process_queue_handler(uid, client):
                 }
                 if COOKIES_TXT and os.path.exists(COOKIES_TXT):
                     ydl_opts['cookiefile'] = COOKIES_TXT
+                if uid in ACTIVE_VPN:
+                    ydl_opts['geo_bypass'] = True
+                    ydl_opts['geo_bypass_country'] = ACTIVE_VPN[uid]
 
                 last_edit = 0
                 loop = asyncio.get_running_loop()
@@ -679,7 +689,7 @@ async def process_queue_handler(uid, client):
                     renamed_file = generate_new_filename(actual_path.name)
 
                     asyncio.create_task(
-                        sequential_upload_task(uid, client, m, actual_path, renamed_file, status_msg.id if status_msg else None, cancel_event)
+                        sequential_upload_task(uid, client, m, actual_path, renamed_file, status_msg.id if status_msg else None, cancel_event, fallback_caption=title)
                     )
 
                 except Exception as e:
@@ -796,6 +806,9 @@ async def fetch_youtube_formats(c, m, url):
         ydl_opts = {'quiet': True, 'no_warnings': True}
         if COOKIES_TXT and os.path.exists(COOKIES_TXT):
             ydl_opts['cookiefile'] = COOKIES_TXT
+        if uid in ACTIVE_VPN:
+            ydl_opts['geo_bypass'] = True
+            ydl_opts['geo_bypass_country'] = ACTIVE_VPN[uid]
 
         def extract():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -953,6 +966,8 @@ async def start_handler(c, m: Message):
         "/rename <newname.ext> - Rename replied video (admin only)\n"
         "/mkv_video_audio_change - MKV audio track change mode (admin only)\n"
         "/youtube - Toggle YT-DLP / YouTube download mode (admin only)\n"
+        "/file - Upload cookies.txt file (admin only)\n"
+        "/vpn - Set VPN country for yt-dlp (admin only)\n"
         "/create_post - Create new post (admin only)\n" 
         "/mode_check - Check current mode status (admin only)\n" 
         "/progress_bar - Toggle progress bar ON/OFF (admin only)\n"
@@ -977,6 +992,46 @@ async def progress_bar_cmd(c, m: Message):
     else:
         HIDE_PROGRESS_BAR.add(uid)
         await m.reply_text("Progress bar is now OFF.")
+
+# --- NEW HANDLER: /file ---
+@app.on_message(filters.command("file") & filters.private)
+async def file_cmd(c, m: Message):
+    uid = m.from_user.id
+    if not is_admin(uid):
+        await m.reply_text("You are not authorized to use this command.")
+        return
+    AWAITING_COOKIES_FILE.add(uid)
+    await m.reply_text("Please send or forward the **cookies.txt** file.")
+
+# --- NEW HANDLER: /vpn ---
+@app.on_message(filters.command("vpn") & filters.private)
+async def vpn_cmd(c, m: Message):
+    uid = m.from_user.id
+    if not is_admin(uid):
+        await m.reply_text("You are not authorized to use this command.")
+        return
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Bangladesh 🇧🇩", callback_data="vpn_BD"), InlineKeyboardButton("India 🇮🇳", callback_data="vpn_IN")],
+        [InlineKeyboardButton("USA 🇺🇸", callback_data="vpn_US"), InlineKeyboardButton("UK 🇬🇧", callback_data="vpn_GB")],
+        [InlineKeyboardButton("Singapore 🇸🇬", callback_data="vpn_SG"), InlineKeyboardButton("Germany 🇩🇪", callback_data="vpn_DE")],
+        [InlineKeyboardButton("OFF ❌", callback_data="vpn_off")]
+    ])
+    current = ACTIVE_VPN.get(uid, "OFF")
+    await m.reply_text(f"**yt-dlp VPN Settings**\n\nCurrent Country: `{current}`\nSelect a country to bypass geo-restrictions, or turn OFF.", reply_markup=keyboard)
+
+@app.on_callback_query(filters.regex(r"^vpn_"))
+async def vpn_cb(c, cb):
+    uid = cb.from_user.id
+    if not is_admin(uid): return
+    action = cb.data.split("_")[1]
+    if action == "off":
+        ACTIVE_VPN.pop(uid, None)
+        await cb.message.edit_text("**yt-dlp VPN Settings**\n\nCurrent Country: `OFF`\nVPN has been turned OFF.")
+    else:
+        ACTIVE_VPN[uid] = action
+        await cb.message.edit_text(f"**yt-dlp VPN Settings**\n\nCurrent Country: `{action}`\nVPN (geo-bypass) is now ON for {action}.")
+    await cb.answer()
+# -----------------------------
 
 # --- NEW HANDLER: /youtube ---
 @app.on_message(filters.command("youtube") & filters.private)
@@ -1823,6 +1878,22 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
     if not is_admin(uid):
         return
 
+    # --- Handle Cookies file ---
+    if m.document and uid in AWAITING_COOKIES_FILE:
+        if m.document.file_name and "cookies.txt" in m.document.file_name.lower():
+            status = await m.reply_text("Downloading cookies file...")
+            out_path = "cookies.txt"
+            await m.download(file_name=out_path)
+            global COOKIES_TXT
+            COOKIES_TXT = out_path
+            AWAITING_COOKIES_FILE.discard(uid)
+            await status.edit("**cookies.txt** has been successfully saved and activated for yt-dlp!")
+            return
+        else:
+            await m.reply_text("File name must be 'cookies.txt'. Try again or cancel the operation.")
+            return
+    # ---------------------------
+
     # --- Check for MKV Audio Change Mode first ---
     if uid in MKV_AUDIO_CHANGE_MODE:
         await handle_audio_change_file(c, m)
@@ -2228,7 +2299,7 @@ def process_dynamic_caption(uid, caption_template):
     return "**" + "\n".join(caption_template.splitlines()) + "**"
 
 
-async def process_file_and_upload(c: Client, m: Message, in_path: Path, original_name: str = None, messages_to_delete: list = None, cancel_event_passed: asyncio.Event = None):
+async def process_file_and_upload(c: Client, m: Message, in_path: Path, original_name: str = None, messages_to_delete: list = None, cancel_event_passed: asyncio.Event = None, fallback_caption: str = None):
     uid = m.from_user.id
     # Use passed cancel event or create new one (though logically should be passed)
     cancel_event = cancel_event_passed
@@ -2346,9 +2417,14 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
         width_px = video_metadata.get('width', 0)
         height_px = video_metadata.get('height', 0)
         
+        # --- MODIFIED: Caption Logic to support Fallback Caption for YT ---
         caption_to_use = f"**{target_name}**" # Default to Bold Filename
+        if fallback_caption:
+            caption_to_use = f"**{fallback_caption}**" # Use passed fallback (like YT title)
+
         if final_caption_template:
-            caption_to_use = process_dynamic_caption(uid, final_caption_template)
+            caption_to_use = process_dynamic_caption(uid, final_caption_template) # Prioritize saved caption
+        # ------------------------------------------------------------------
 
         parts_to_upload = [(upload_path, target_name, None, duration_sec)]
         
