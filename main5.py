@@ -103,7 +103,7 @@ USER_PROXY = {}
 
 # Dummy proxies (Replace with real ones if needed)
 PROXY_LIST = {
-    "Bangladesh": "http://103.111.222.111:8080", 
+    "Bangladesh": "http://113.11.76.233:30226", 
     "India": "http://103.26.109.62:9256",
     "USA": "socks5://198.51.100.1:1080"
 }
