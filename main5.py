@@ -100,6 +100,7 @@ AWAITING_COOKIE_FILE = set()
 YOUTUBE_MODE = set()
 YT_LAST_SELECTION = {} # Stores last selected resolutions
 USER_PROXY = {}
+AWAITING_CUSTOM_PROXY = set() # NEW: State for custom proxy input
 
 # Dummy proxies (Replace with real ones if needed)
 PROXY_LIST = {
@@ -993,13 +994,10 @@ async def process_youtube_download(c, status_msg, uid, url, fmt, title, queued=F
         
         msg_context = original_message if original_message else status_msg.reply_to_message or status_msg
         
-        if queued:
-            # If queued, run upload task here inside worker
-            await sequential_upload_task(uid, c, msg_context, actual_path, renamed_file, status_msg.id, cancel_event, custom_caption=custom_caption)
-        else:
-            asyncio.create_task(
-                sequential_upload_task(uid, c, msg_context, actual_path, renamed_file, status_msg.id, cancel_event, custom_caption=custom_caption)
-            )
+        # Always use create_task so download and upload can be pipelined like forward video
+        asyncio.create_task(
+            sequential_upload_task(uid, c, msg_context, actual_path, renamed_file, status_msg.id, cancel_event, custom_caption=custom_caption)
+        )
 
     except Exception as e:
         logger.error(f"YT-DLP DL Error: {e}")
@@ -1076,18 +1074,24 @@ async def proxy_cmd(c, m: Message):
     keyboard = []
     for country, proxy_url in PROXY_LIST.items():
         keyboard.append([InlineKeyboardButton(f"🌐 {country}", callback_data=f"proxy_set_{country}")])
+    keyboard.append([InlineKeyboardButton("➕ Add Proxy", callback_data="proxy_add_custom")])
     keyboard.append([InlineKeyboardButton("❌ Turn OFF Proxy", callback_data="proxy_set_off")])
     
     current_status = USER_PROXY.get(uid, "None (OFF)")
-    await m.reply_text(f"**Proxy Selection for YT-DLP**\n\nCurrent Proxy: `{current_status}`\nSelect a proxy below:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await m.reply_text(f"**Proxy Selection for YT-DLP**\n\nCurrent Proxy: `{current_status}`\nSelect a proxy below or add a custom one:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-@app.on_callback_query(filters.regex(r"^proxy_set_"))
+@app.on_callback_query(filters.regex(r"^(proxy_set_|proxy_add_custom)"))
 async def proxy_set_cb(c: Client, cb: CallbackQuery):
     uid = cb.from_user.id
     if not is_admin(uid):
         await cb.answer("Unauthorized.", show_alert=True)
         return
     
+    if cb.data == "proxy_add_custom":
+        AWAITING_CUSTOM_PROXY.add(uid)
+        await cb.message.edit_text("Please send the custom proxy address (e.g., `http://192.168.1.1:8080` or `socks5://10.0.0.1:1080`):")
+        return
+
     selection = cb.data.replace("proxy_set_", "")
     if selection == "off":
         USER_PROXY.pop(uid, None)
@@ -1465,6 +1469,14 @@ async def text_handler(c, m: Message):
         return
     # -----------------------------------
 
+    # --- HANDLE CUSTOM PROXY INPUT ---
+    if uid in AWAITING_CUSTOM_PROXY:
+        USER_PROXY[uid] = text
+        AWAITING_CUSTOM_PROXY.discard(uid)
+        await m.reply_text(f"✅ Custom Proxy set successfully to:\n`{text}`\n\nAll YT-DLP downloads will now use this proxy.")
+        return
+    # ---------------------------------
+
     # --- BATCH CAPTION & UPLOAD COMMANDS (NEW) ---
     text_lower = text.lower()
     if text_lower in ["on", "off", "ok"]:
@@ -1761,7 +1773,7 @@ async def handle_url_download_and_upload(c: Client, m: Message, url: str):
     except Exception as e:
         logger.error(f"URL Error: {e}")
         try:
-            await status_msg.edit(f"Error: {e}")
+            status_msg.edit(f"Error: {e}")
         except:
             await m.reply_text(f"Error: {e}")
 
