@@ -103,9 +103,9 @@ USER_PROXY = {}
 
 # Dummy proxies (Replace with real ones if needed)
 PROXY_LIST = {
-    "Bangladesh": "http://113.11.76.233:30226", 
-    "India": "http://103.26.109.62:9256",
-    "USA": "socks5://165.225.122.16:11368"
+    "Bangladesh": "http://103.111.222.111:8080", 
+    "India": "http://103.44.55.66:8080",
+    "USA": "socks5://198.51.100.1:1080"
 }
 # --------------------------
 
