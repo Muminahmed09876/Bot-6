@@ -103,9 +103,9 @@ USER_PROXY = {}
 
 # Dummy proxies (Replace with real ones if needed)
 PROXY_LIST = {
-    "Bangladesh": "http://49.205.160.115", 
-    "India": "http://103.137.218.113",
-    "USA": "socks5://160.25.180.35"
+    "Bangladesh": "http://103.111.222.111:8080", 
+    "India": "http://103.44.55.66:8080",
+    "USA": "socks5://198.51.100.1:1080"
 }
 # --------------------------
 
@@ -2364,6 +2364,57 @@ def process_dynamic_caption(uid, caption_template):
     return "**" + "\n".join(caption_template.splitlines()) + "**"
 
 
+async def recursive_split_video(input_path: Path, target_name_stem: str, target_name_ext: str, duration: float, uid: int, cancel_event) -> list:
+    MAX_FILE_SIZE = 1.95 * 1024 * 1024 * 1024 # Safe margin under 2GB
+    if not input_path.exists():
+        return []
+    
+    if input_path.stat().st_size <= MAX_FILE_SIZE or duration <= 0:
+        return [(input_path, duration)]
+        
+    num_parts = math.ceil(input_path.stat().st_size / MAX_FILE_SIZE)
+    base_chunk = duration / num_parts
+    
+    parts = []
+    for i in range(num_parts):
+        s_time = i * base_chunk
+        e_time = (i + 1) * base_chunk
+        
+        if i > 0:
+            s_time -= 5 # overlap
+        if i < num_parts - 1:
+            e_time += 5 # overlap
+            
+        s_time = max(0, s_time)
+        e_time = min(duration, e_time)
+        part_duration = e_time - s_time
+        
+        part_path = TMP / f"split_{uid}_{int(datetime.now().timestamp())}_{i}_{input_path.name}"
+        
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", str(input_path),
+            "-ss", str(s_time),
+            "-to", str(e_time),
+            "-c", "copy",
+            str(part_path)
+        ]
+        
+        if cancel_event.is_set(): raise Exception("Cancelled")
+        await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True, check=False)
+        
+        if part_path.exists() and part_path.stat().st_size > 0:
+            if part_path.stat().st_size > MAX_FILE_SIZE:
+                # Recursively split again if the resulting part is still over 1.95 GB
+                sub_parts = await recursive_split_video(part_path, target_name_stem, target_name_ext, part_duration, uid, cancel_event)
+                parts.extend(sub_parts)
+                try: part_path.unlink() # Cleanup intermediate
+                except: pass
+            else:
+                parts.append((part_path, part_duration))
+    return parts
+
 async def process_file_and_upload(c: Client, m: Message, in_path: Path, original_name: str = None, messages_to_delete: list = None, cancel_event_passed: asyncio.Event = None, custom_caption_override: str = None):
     uid = m.from_user.id
     # Use passed cancel event or create new one (though logically should be passed)
@@ -2493,51 +2544,23 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
         parts_to_upload = [(upload_path, target_name, None, duration_sec)]
         
         # --- SPLIT LOGIC IF GREATER THAN 2GB ---
-        if is_video_file and upload_path.exists() and upload_path.stat().st_size > 2 * 1024 * 1024 * 1024 and duration_sec > 0:
+        MAX_FILE_SIZE = 1.95 * 1024 * 1024 * 1024
+        if is_video_file and upload_path.exists() and upload_path.stat().st_size > MAX_FILE_SIZE and duration_sec > 0:
             try:
                 if status_msg:
-                    await status_msg.edit("Video is over 2GB, splitting video...", reply_markup=progress_keyboard())
+                    await status_msg.edit("Video is over 2GB, splitting video recursively...", reply_markup=progress_keyboard())
             except Exception: pass
             
-            num_parts = math.ceil(upload_path.stat().st_size / (2 * 1024 * 1024 * 1024))
-            base_chunk = duration_sec / num_parts
+            target_stem = Path(target_name).stem
+            target_ext = Path(target_name).suffix
+            
+            raw_parts = await recursive_split_video(upload_path, target_stem, target_ext, duration_sec, uid, cancel_event)
+            
             split_parts = []
-            
-            for i in range(num_parts):
-                s_time = i * base_chunk
-                e_time = (i + 1) * base_chunk
+            for i, (p_path, p_dur) in enumerate(raw_parts):
+                part_target_name = f"{target_stem} - Part {i+1:02d}{target_ext}"
+                split_parts.append((p_path, part_target_name, i+1, p_dur))
                 
-                if i > 0:
-                    s_time -= 60
-                if i < num_parts - 1:
-                    e_time += 60
-                    
-                s_time = max(0, s_time)
-                e_time = min(duration_sec, e_time)
-                part_duration = e_time - s_time
-                
-                part_stem = Path(target_name).stem
-                part_ext = Path(target_name).suffix
-                part_target_name = f"{part_stem} - Part {i+1:02d}{part_ext}"
-                
-                part_path = TMP / f"split_{uid}_{int(datetime.now().timestamp())}_{i}_{target_name}"
-                
-                cmd = [
-                    "ffmpeg",
-                    "-y",
-                    "-i", str(upload_path),
-                    "-ss", str(s_time),
-                    "-to", str(e_time),
-                    "-c", "copy",
-                    str(part_path)
-                ]
-                
-                if cancel_event.is_set(): raise Exception("Cancelled")
-                await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True, check=False)
-                
-                if part_path.exists() and part_path.stat().st_size > 0:
-                    split_parts.append((part_path, part_target_name, i+1, part_duration))
-            
             if split_parts:
                 parts_to_upload = split_parts
         # ---------------------------------------
@@ -2549,9 +2572,9 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
             part_caption = caption_to_use
             if part_num is not None:
                 if part_caption.endswith("**"):
-                    part_caption = part_caption[:-2] + f" ✔️ Part - {part_num:02d}**"
+                    part_caption = part_caption[:-2] + f"\n✔️ Part - {part_num:02d}**"
                 else:
-                    part_caption += f" ✔️ Part - {part_num:02d}"
+                    part_caption += f"\n✔️ Part - {part_num:02d}"
             
             try:
                 if status_msg:
