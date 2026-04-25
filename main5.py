@@ -26,36 +26,13 @@ import yt_dlp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- HARDCODED COOKIES ---
-HARDCODED_COOKIES = """# Netscape HTTP Cookie File
-# https://curl.haxx.se/rfc/cookie_spec.html
-# This is a generated file! Do not edit.
-
-.google.com	TRUE	/	TRUE	1792656368	NID	530=mMKU1IN_MkYo1DIv05jZ5l2qemdZ4ZMsh6tKWwmbZnp-6dpyvSG4BNDimAy0yMqJlODFF8bwOQxN0fFkF_sL8d3R-m8_2f2cFncie80J6QEYfh9xgEcUzw3M_C_I7QLKKMdnKpzoPHauaQ-0Cl9LhXxBecBZRc76Kmx000FI8fvueOdBgHjpMCcH-oegurbRcfx4ji1416mf98g
-.chromewebstore.google.com	TRUE	/	FALSE	1811405177	_ga	GA1.1.1630495003.1776845177
-chromewebstore.google.com	FALSE	/	TRUE	1779437190	OTZ	8575687_32_32__32_
-.chromewebstore.google.com	TRUE	/	FALSE	1811405201	_ga_KHZNC1Q6K0	GS2.1.s1776845177$o1$g1$t1776845201$j36$l0$h0
-.youtube.com	TRUE	/	TRUE	1792397228	__Secure-BUCKET	CLgH
-.youtube.com	TRUE	/	TRUE	1776847028	GPS	1
-.youtube.com	TRUE	/	TRUE	1792398192	VISITOR_INFO1_LIVE	UBjRTDbOw-I
-.youtube.com	TRUE	/	TRUE	1792398192	VISITOR_PRIVACY_METADATA	CgJCRBIEGgAgFw%3D%3D
-.youtube.com	TRUE	/	TRUE	1811406200	PREF	tz=Asia.Dhaka
-.youtube.com	TRUE	/	TRUE	1792397228	__Secure-YNID	17.YT=DZt53H0mg0b7-xjsnQrpgI-SjLP7C1GJt6LyQdf6JZJEA5v62IJNETXc90zXx5W13PnrogqsnkbuUXeZEKmc9Pq0G2SFEge2g7WZ-qbJn-F6HDnMcL5ziaWPCSemxKcS-LX4fke977K43R3d1EdklBTIuMzlb1OAKD8akB8TFK66070GfKVLft6kPi0vpEI98Lg74Fh_xTOy--bbAdT_85KPAQCo0QBSfg1ZTRhTT1D32q1LuXkEVoe2i_cSb6zJldeEI6QPlheWI48Ejvnc3xvGjSpXE4U0AlYIzLncz7ZsQb-DA_9B8GCZ1I3QuyizTMPwb0YqIw_J2Dt-JMdr1A
-.youtube.com	TRUE	/	TRUE	0	YSC	Q0zYhk78gzo
-.youtube.com	TRUE	/	TRUE	1792398192	__Secure-ROLLOUT_TOKEN	COb8kZi6h_zmGxDP38akgIGUAxjaxv7vg4GUAw%3D%3D"""
-
-# Create the cookie file programmatically
-with open("cookies.txt", "w") as f:
-    f.write(HARDCODED_COOKIES)
-COOKIES_TXT = "cookies.txt"
-# -------------------------
-
 # env
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", "10000")) 
 RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+COOKIES_TXT = os.getenv("COOKIES_TXT") # Added for yt-dlp cookies
 
 TMP = Path("tmp")
 TMP.mkdir(parents=True, exist_ok=True)
@@ -99,11 +76,10 @@ USER_WORKERS = {}
 USER_UPLOAD_LOCKS = {}     
 # ------------------------------------------------
 
-# --- YT-DLP STATE (UPDATED FOR MULTIPLE SELECTIONS) ---
-YT_DLP_MODE = set()
+# --- YT-DLP STATE ---
 YT_SESSIONS = {}
-YT_SELECTIONS = {}
-SAVED_QUALITIES = {}
+YT_DLP_MODE = set()
+YT_DLP_SAVED_QUALITIES = {}
 # --------------------
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", ""))
@@ -234,7 +210,7 @@ def delete_caption_keyboard():
 def mode_check_keyboard(uid: int) -> InlineKeyboardMarkup:
     audio_status = "✅ ON" if uid in MKV_AUDIO_CHANGE_MODE else "❌ OFF"
     caption_status = "✅ ON" if uid in EDIT_CAPTION_MODE else "❌ OFF"
-    yt_dlp_status = "✅ ON" if uid in YT_DLP_MODE else "❌ OFF"
+    ytdlp_status = "✅ ON" if uid in YT_DLP_MODE else "❌ OFF"
     
     waiting_count = sum(1 for data in PENDING_AUDIO_ORDERS.values() if data['uid'] == uid)
     waiting_status = f" ({waiting_count} orders pending)" if waiting_count > 0 else ""
@@ -242,7 +218,7 @@ def mode_check_keyboard(uid: int) -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton(f"MKV Audio Change Mode {audio_status}{waiting_status}", callback_data="toggle_audio_mode")],
         [InlineKeyboardButton(f"Edit Caption Mode {caption_status}", callback_data="toggle_caption_mode")],
-        [InlineKeyboardButton(f"YT-DLP Mode {yt_dlp_status}", callback_data="toggle_ytdlp_mode")]
+        [InlineKeyboardButton(f"YT-DLP Mode {ytdlp_status}", callback_data="toggle_ytdlp_mode")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -359,15 +335,12 @@ async def update_batch_status(c, m, uid, status_text):
             except: pass
         asyncio.ensure_future(auto_delete(msg, uid))
 
-async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_dlp=False, yt_format_data=None, yt_title=None):
+async def add_to_queue(uid, c, m, original_name, is_url=False, url=None):
     if uid not in USER_QUEUES:
         USER_QUEUES[uid] = asyncio.Queue()
     
     try:
-        if is_yt_dlp:
-            status_msg = await m.reply_text(f"Queue: Processing started for yt-dlp download...", reply_markup=progress_keyboard())
-        else:
-            status_msg = await m.reply_text(f"Queue: Processing started for `{original_name}`...", reply_markup=progress_keyboard())
+        status_msg = await m.reply_text(f"Queue: Processing started for `{original_name}`...", reply_markup=progress_keyboard())
     except:
         status_msg = None
 
@@ -376,10 +349,7 @@ async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_d
         'original_name': original_name,
         'status_msg': status_msg,
         'is_url': is_url,
-        'url': url,
-        'is_yt_dlp': is_yt_dlp,
-        'yt_format_data': yt_format_data,
-        'yt_title': yt_title
+        'url': url
     })
     
     if uid not in USER_WORKERS or USER_WORKERS[uid].done():
@@ -550,7 +520,7 @@ async def set_bot_commands():
     cmds = [
         BotCommand("start", "Start bot / Help"),
         BotCommand("upload_url", "Download & Upload file from URL (admin only)"),
-        BotCommand("yt_dlp", "Toggle yt-dlp for URLs (admin only)"),
+        BotCommand("ytdlp", "Toggle YT-DLP mode for all links (admin only)"),
         BotCommand("setthumb", "Set custom thumbnail (admin only)"),
         BotCommand("view_thumb", "View your thumbnail (admin only)"),
         BotCommand("del_thumb", "Delete your thumbnail (admin only)"),
@@ -570,7 +540,7 @@ async def set_bot_commands():
     except Exception as e:
         logger.warning("Set commands error: %s", e)
 
-async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, status_msg_id, cancel_event, override_caption=None):
+async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, status_msg_id, cancel_event, fallback_caption=None):
     """Background task that waits for upload lock to ensure sequential uploads."""
     if uid not in USER_UPLOAD_LOCKS:
         USER_UPLOAD_LOCKS[uid] = asyncio.Lock()
@@ -581,7 +551,7 @@ async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, s
             return
         # Now we possess the upload lock. Video 1 will hold this until done.
         # Video 2 (already downloaded) will wait here.
-        await process_file_and_upload(client, message, tmp_path, original_name=renamed_file, messages_to_delete=[status_msg_id], cancel_event_passed=cancel_event, override_caption=override_caption)
+        await process_file_and_upload(client, message, tmp_path, original_name=renamed_file, messages_to_delete=[status_msg_id], cancel_event_passed=cancel_event, fallback_caption=fallback_caption)
 
 # --- QUEUE WORKER ---
 async def process_queue_handler(uid, client):
@@ -594,14 +564,8 @@ async def process_queue_handler(uid, client):
             original_name = task_data.get('original_name')
             status_msg = task_data.get('status_msg') 
             is_url = task_data.get('is_url', False)
-            is_yt_dlp = task_data.get('is_yt_dlp', False)
             
-            if is_yt_dlp:
-                yt_format_data = task_data.get('yt_format_data')
-                yt_title = task_data.get('yt_title')
-                url = task_data.get('url')
-                await process_youtube_download(client, status_msg, uid, url, yt_format_data, yt_title)
-            elif is_url:
+            if is_url:
                 url = task_data.get('url')
                 await download_and_process_generic(client, m, url, status_msg)
             else:
@@ -667,40 +631,36 @@ async def process_queue_handler(uid, client):
     del USER_WORKERS[uid]
     del USER_QUEUES[uid]
 
-# --- YT-DLP UI & FORMAT HELPER ---
-def get_yt_keyboard(uid, session_id):
-    session = YT_SESSIONS.get(session_id)
-    if not session:
-        return None
-        
-    selections = YT_SELECTIONS.get(uid, {}).get(session_id, [])
+# --- YT-DLP CORE FUNCTIONS (UPDATED FOR MULTI-SELECTION) ---
+def build_yt_keyboard(session_id):
+    session = YT_SESSIONS[session_id]
     keyboard = []
     
-    for fmt_id, fmt_data in session['formats'].items():
-        res = fmt_data['res']
-        size_str = fmt_data['size_str']
+    for idx, f in enumerate(session['formats']):
+        res = f['res']
+        size_str = f['size_str']
+        is_selected = idx in session['selected']
         
-        # DL direct button
-        btn_dl = InlineKeyboardButton(f"{res}p - {size_str}", callback_data=f"yt_dl_{session_id}_{fmt_id}")
-        # Selection checkbox button
-        check_str = "✅" if fmt_id in selections else "⬜️"
-        btn_sel = InlineKeyboardButton(check_str, callback_data=f"yt_sel_{session_id}_{fmt_id}")
+        btn_text_dl = f"{res}p - {size_str}"
+        btn_cb_dl = f"yt_dir_{session_id}_{idx}"
         
-        keyboard.append([btn_dl, btn_sel])
+        btn_text_sel = "✅" if is_selected else "⬜"
+        btn_cb_sel = f"yt_sel_{session_id}_{idx}"
+        
+        keyboard.append([
+            InlineKeyboardButton(btn_text_dl, callback_data=btn_cb_dl),
+            InlineKeyboardButton(btn_text_sel, callback_data=btn_cb_sel)
+        ])
     
-    keyboard.append([InlineKeyboardButton("OK 🆗", callback_data=f"yt_ok_{session_id}")])
-    keyboard.append([InlineKeyboardButton("Add Save Quality 💾", callback_data=f"yt_save_{session_id}")])
-    
-    if uid in SAVED_QUALITIES and SAVED_QUALITIES[uid]:
-        keyboard.append([InlineKeyboardButton("Load Same Quality 🔄", callback_data=f"yt_load_{session_id}")])
-        
+    keyboard.append([InlineKeyboardButton("OK 🚀", callback_data=f"yt_ok_{session_id}")])
+    keyboard.append([InlineKeyboardButton("Save Quality 💾", callback_data=f"yt_sq_{session_id}")])
+    keyboard.append([InlineKeyboardButton("Load Saved Quality 🔄", callback_data=f"yt_lq_{session_id}")])
     keyboard.append([InlineKeyboardButton("Cancel ❌", callback_data="cancel_yt")])
     return InlineKeyboardMarkup(keyboard)
 
-# --- YT-DLP CORE FUNCTIONS ---
 async def fetch_youtube_formats(c, m, url):
     uid = m.from_user.id
-    status_msg = await m.reply_text("Fetching formats via yt-dlp...", quote=True)
+    status_msg = await m.reply_text("Fetching formats...", quote=True)
     
     try:
         ydl_opts = {'quiet': True, 'no_warnings': True}
@@ -714,15 +674,15 @@ async def fetch_youtube_formats(c, m, url):
         info = await asyncio.to_thread(extract)
         formats = info.get('formats', [])
         
-        session_id = f"s_{int(time.time())}_{m.id}"
-        YT_SESSIONS[session_id] = {
+        session_id = f"ytses_{uid}_{int(time.time())}"
+        session_data = {
             'url': url,
-            'title': info.get('title', 'YouTube Video'),
-            'formats': {}
+            'title': info.get('title', 'Video'),
+            'formats': [],
+            'selected': []
         }
         
         added_resolutions = set()
-        fmt_idx = 0
         
         for f in formats:
             ext = f.get('ext', '')
@@ -738,145 +698,105 @@ async def fetch_youtube_formats(c, m, url):
                     
                     dl_format = f"{format_id}+bestaudio/best" if f.get('acodec') == 'none' else format_id
                     
-                    fmt_id = str(fmt_idx)
-                    YT_SESSIONS[session_id]['formats'][fmt_id] = {
-                        'res': res,
+                    session_data['formats'].append({
                         'format': dl_format,
-                        'size_str': size_str,
-                        'ext': ext
-                    }
-                    fmt_idx += 1
+                        'res': res,
+                        'ext': ext,
+                        'size_str': size_str
+                    })
         
-        if not YT_SESSIONS[session_id]['formats']:
+        if not session_data['formats']:
             await status_msg.edit("No suitable video formats found.")
             return
             
+        YT_SESSIONS[session_id] = session_data
+        
         await status_msg.edit(
-            f"**Title:** {info.get('title')}\n\nSelect Qualities:\n(Click left button to direct download, right button to select multiple)",
-            reply_markup=get_yt_keyboard(uid, session_id)
+            f"**Title:** {info.get('title')}\n\nSelect Quality:",
+            reply_markup=build_yt_keyboard(session_id)
         )
 
     except Exception as e:
         logger.error(f"YT-DLP Error: {e}")
-        await status_msg.edit(f"Failed to fetch YouTube formats: {e}")
+        await status_msg.edit(f"Failed to fetch formats: {e}")
 
-# --- YT-DLP CALLBACK HANDLERS ---
-@app.on_callback_query(filters.regex(r"^yt_sel_"))
-async def yt_sel_callback(c: Client, cb: CallbackQuery):
-    _, session_id, fmt_id = cb.data.split("_", 2)
+@app.on_callback_query(filters.regex(r"^yt_(dir|sel|ok|sq|lq)_"))
+async def yt_multi_callback(c: Client, cb: CallbackQuery):
     uid = cb.from_user.id
+    parts = cb.data.split('_')
+    action = parts[1]
+    session_id = f"{parts[2]}_{parts[3]}_{parts[4]}"
     
-    if uid not in YT_SELECTIONS:
-        YT_SELECTIONS[uid] = {}
-    if session_id not in YT_SELECTIONS[uid]:
-        YT_SELECTIONS[uid][session_id] = []
+    if not cb.data.startswith(f"yt_{action}_ytses_{uid}_"):
+        await cb.answer("You are not authorized for this action.", show_alert=True)
+        return
         
-    if fmt_id in YT_SELECTIONS[uid][session_id]:
-        YT_SELECTIONS[uid][session_id].remove(fmt_id)
-    else:
-        YT_SELECTIONS[uid][session_id].append(fmt_id)
-        
-    try:
-        await cb.message.edit_reply_markup(get_yt_keyboard(uid, session_id))
-    except Exception:
-        pass
-    await cb.answer()
-
-@app.on_callback_query(filters.regex(r"^yt_dl_"))
-async def yt_dl_callback(c: Client, cb: CallbackQuery):
-    _, session_id, fmt_id = cb.data.split("_", 2)
-    uid = cb.from_user.id
-    
     session = YT_SESSIONS.get(session_id)
     if not session:
-        await cb.answer("Session expired.", show_alert=True)
+        await cb.answer("Session expired or invalid.", show_alert=True)
         return
         
-    fmt_data = session['formats'].get(fmt_id)
-    if not fmt_data: return
-    
-    await cb.message.edit_text("Starting YouTube download...", reply_markup=progress_keyboard())
-    
-    # Process immediately via queue
-    await add_to_queue(uid, c, cb.message, session['title'], is_yt_dlp=True, url=session['url'], yt_format_data=fmt_data, yt_title=session['title'])
-    await cb.answer("Added to queue.")
-
-@app.on_callback_query(filters.regex(r"^yt_ok_"))
-async def yt_ok_callback(c: Client, cb: CallbackQuery):
-    _, session_id = cb.data.split("_", 1)
-    uid = cb.from_user.id
-    
-    session = YT_SESSIONS.get(session_id)
-    if not session:
-        await cb.answer("Session expired.", show_alert=True)
-        return
+    if action == "dir":
+        idx = int(parts[5])
+        f = session['formats'][idx]
+        await cb.message.edit_text(f"Starting {f['res']}p direct download...")
+        asyncio.create_task(process_youtube_download(c, cb.message, uid, session['url'], f['format'], session['title'], f['res']))
         
-    selections = YT_SELECTIONS.get(uid, {}).get(session_id, [])
-    if not selections:
-        await cb.answer("No qualities selected! Please select using the ✅ boxes.", show_alert=True)
-        return
-        
-    await cb.message.edit_text(f"Adding {len(selections)} files to queue...", reply_markup=None)
-    
-    for fmt_id in selections:
-        fmt_data = session['formats'].get(fmt_id)
-        if fmt_data:
-            await add_to_queue(uid, c, cb.message, session['title'], is_yt_dlp=True, url=session['url'], yt_format_data=fmt_data, yt_title=session['title'])
+    elif action == "sel":
+        idx = int(parts[5])
+        if idx in session['selected']:
+            session['selected'].remove(idx)
+        else:
+            session['selected'].append(idx)
+        try:
+            await cb.message.edit_reply_markup(reply_markup=build_yt_keyboard(session_id))
+        except Exception:
+            pass
             
-    await cb.answer(f"Added {len(selections)} selected qualities to queue.")
-
-@app.on_callback_query(filters.regex(r"^yt_save_"))
-async def yt_save_callback(c: Client, cb: CallbackQuery):
-    _, session_id = cb.data.split("_", 1)
-    uid = cb.from_user.id
-    
-    session = YT_SESSIONS.get(session_id)
-    if not session: return
-    
-    selections = YT_SELECTIONS.get(uid, {}).get(session_id, [])
-    if not selections:
-        await cb.answer("No qualities selected to save!", show_alert=True)
-        return
-        
-    saved_res = []
-    for fmt_id in selections:
-        fmt_data = session['formats'].get(fmt_id)
-        if fmt_data:
-            saved_res.append(fmt_data['res'])
+    elif action == "ok":
+        if not session['selected']:
+            await cb.answer("Select at least one quality to download!", show_alert=True)
+            return
             
-    SAVED_QUALITIES[uid] = saved_res
-    await cb.answer(f"Saved qualities: {', '.join(map(str, saved_res))}p", show_alert=True)
-    
-    try:
-        await cb.message.edit_reply_markup(get_yt_keyboard(uid, session_id))
-    except Exception: pass
-
-@app.on_callback_query(filters.regex(r"^yt_load_"))
-async def yt_load_callback(c: Client, cb: CallbackQuery):
-    _, session_id = cb.data.split("_", 1)
-    uid = cb.from_user.id
-    
-    session = YT_SESSIONS.get(session_id)
-    if not session: return
-    
-    saved_res = SAVED_QUALITIES.get(uid, [])
-    if not saved_res:
-        await cb.answer("No saved qualities found.", show_alert=True)
-        return
+        await cb.message.edit_text("Starting selected downloads...", reply_markup=None)
         
-    loaded = 0
-    await cb.message.edit_text("Loading saved qualities and adding to queue...", reply_markup=None)
-    
-    for saved in saved_res:
-        # Find matching format ID
-        for fmt_id, fmt_data in session['formats'].items():
-            if fmt_data['res'] == saved:
-                await add_to_queue(uid, c, cb.message, session['title'], is_yt_dlp=True, url=session['url'], yt_format_data=fmt_data, yt_title=session['title'])
-                loaded += 1
-                break # Just add the first matching one
-                
-    await cb.message.edit_text(f"Added {loaded} saved qualities to queue.")
-    await cb.answer("Saved qualities loaded into queue.")
+        for idx in session['selected']:
+            f = session['formats'][idx]
+            msg = await cb.message.reply_text(f"Preparing {f['res']}p...", quote=True)
+            asyncio.create_task(process_youtube_download(c, msg, uid, session['url'], f['format'], session['title'], f['res']))
+            
+    elif action == "sq":
+        if not session['selected']:
+            await cb.answer("Select qualities first to save!", show_alert=True)
+            return
+            
+        saved_resolutions = [session['formats'][i]['res'] for i in session['selected']]
+        YT_DLP_SAVED_QUALITIES[uid] = saved_resolutions
+        await cb.answer(f"Saved qualities: {', '.join(map(lambda x: str(x)+'p', saved_resolutions))}", show_alert=True)
+        
+    elif action == "lq":
+        saved_resolutions = YT_DLP_SAVED_QUALITIES.get(uid, [])
+        if not saved_resolutions:
+            await cb.answer("No saved qualities found! Save some first.", show_alert=True)
+            return
+            
+        to_download_indices = []
+        for target_res in saved_resolutions:
+            for idx, f in enumerate(session['formats']):
+                if f['res'] == target_res:
+                    to_download_indices.append(idx)
+                    break
+                    
+        if not to_download_indices:
+            await cb.answer("Saved qualities are not available for this link.", show_alert=True)
+            return
+            
+        await cb.message.edit_text("Loading saved qualities and starting downloads...", reply_markup=None)
+        
+        for idx in to_download_indices:
+            f = session['formats'][idx]
+            msg = await cb.message.reply_text(f"Preparing {f['res']}p...", quote=True)
+            asyncio.create_task(process_youtube_download(c, msg, uid, session['url'], f['format'], session['title'], f['res']))
 
 @app.on_callback_query(filters.regex("cancel_yt"))
 async def cancel_yt_cb(c, cb: CallbackQuery):
@@ -884,17 +804,14 @@ async def cancel_yt_cb(c, cb: CallbackQuery):
         await cb.message.delete()
     except: pass
 
-async def process_youtube_download(c, status_msg, uid, url, fmt_data, title):
+async def process_youtube_download(c, status_msg, uid, url, fmt, title, res):
     cancel_event = asyncio.Event()
     TASKS.setdefault(uid, []).append(cancel_event)
-    
-    fmt = fmt_data['format']
-    res = fmt_data['res']
     
     safe_title = re.sub(r"[\\/*?\"<>|:]", "_", title)
     if len(safe_title) > 100: safe_title = safe_title[:100]
     
-    out_tmpl = str(TMP / f"yt_{uid}_{int(datetime.now().timestamp())}_{safe_title}_{res}p.%(ext)s")
+    out_tmpl = str(TMP / f"yt_{uid}_{int(datetime.now().timestamp())}_{safe_title}.%(ext)s")
     
     ydl_opts = {
         'format': fmt,
@@ -923,7 +840,7 @@ async def process_youtube_download(c, status_msg, uid, url, fmt_data, title):
                     percent = (downloaded / total) * 100
                     make_bar = make_progress_bar(percent)
                     text = (
-                        f"**Downloading YouTube Video ({res}p)...**\n"
+                        f"**Downloading Quality {res}p...**\n"
                         f"`[{make_bar}]` **{percent:.2f}%**\n"
                         f"**Size:** `{format_size(downloaded)} / {format_size(total)}`\n"
                         f"**Speed:** `{format_size(speed)}/s`"
@@ -952,18 +869,17 @@ async def process_youtube_download(c, status_msg, uid, url, fmt_data, title):
         if cancel_event.is_set() or not actual_path.exists():
              raise Exception("Cancelled or download failed.")
              
-        await status_msg.edit_text(f"Download complete ({res}p), uploading to Telegram...", reply_markup=None)
+        await status_msg.edit_text("Download complete, queueing for upload...", reply_markup=None)
         
         original_name = actual_path.name
         renamed_file = generate_new_filename(original_name)
         
-        # Determine dynamic caption if no custom caption is set
-        override_cap = None
-        if not USER_CAPTIONS.get(uid):
-            override_cap = f"**{title}**\n**Quality - {res}p**"
-            
+        # Prepare title-based fallback caption as requested
+        clean_title = safe_title.replace('*', '')
+        fallback_cap = f"**{clean_title} - {res}p**"
+        
         asyncio.create_task(
-            sequential_upload_task(uid, c, status_msg.reply_to_message or status_msg, actual_path, renamed_file, status_msg.id, cancel_event, override_caption=override_cap)
+            sequential_upload_task(uid, c, status_msg.reply_to_message or status_msg, actual_path, renamed_file, status_msg.id, cancel_event, fallback_caption=fallback_cap)
         )
 
     except Exception as e:
@@ -986,7 +902,7 @@ async def start_handler(c, m: Message):
         "Note: Many commands can only be used by the Admin (owner).\n\n"
         "Commands:\n"
         "/upload_url <url> - Download & Upload file from URL (admin only)\n"
-        "/yt_dlp - Toggle yt-dlp mode for all URLs (admin only)\n"
+        "/ytdlp - Toggle YT-DLP mode for all links (admin only)\n"
         "/setthumb - Send an image to set as your thumbnail (admin only)\n"
         "/view_thumb - View your thumbnail (admin only)\n"
         "/del_thumb - Delete your thumbnail (admin only)\n"
@@ -1020,20 +936,17 @@ async def progress_bar_cmd(c, m: Message):
         HIDE_PROGRESS_BAR.add(uid)
         await m.reply_text("Progress bar is now OFF.")
 
-# --- NEW HANDLER: /yt_dlp ---
-@app.on_message(filters.command("yt_dlp") & filters.private)
-async def toggle_yt_dlp_cmd(c, m: Message):
+@app.on_message(filters.command("ytdlp") & filters.private)
+async def toggle_ytdlp(c, m: Message):
     uid = m.from_user.id
     if not is_admin(uid):
-        await m.reply_text("You are not authorized.")
         return
     if uid in YT_DLP_MODE:
         YT_DLP_MODE.discard(uid)
-        await m.reply_text("YT-DLP Mode is now **OFF**. Links will be downloaded directly.")
+        await m.reply_text("YT-DLP Mode is now **OFF**.\nLinks will use direct download. (YouTube links will still use YT-DLP)")
     else:
         YT_DLP_MODE.add(uid)
-        await m.reply_text("YT-DLP Mode is now **ON**. Supported links will be downloaded using yt-dlp.")
-# ----------------------------
+        await m.reply_text("YT-DLP Mode is now **ON**.\nALL provided links will be processed through YT-DLP.")
 
 @app.on_message(filters.command("setthumb") & filters.private)
 async def setthumb_prompt(c, m):
@@ -1288,7 +1201,7 @@ async def mode_check_cmd(c, m: Message):
     
     audio_status = "✅ ON" if uid in MKV_AUDIO_CHANGE_MODE else "❌ OFF"
     caption_status = "✅ ON" if uid in EDIT_CAPTION_MODE else "❌ OFF"
-    yt_dlp_status = "✅ ON" if uid in YT_DLP_MODE else "❌ OFF"
+    ytdlp_status = "✅ ON" if uid in YT_DLP_MODE else "❌ OFF"
     
     waiting_count = sum(1 for data in PENDING_AUDIO_ORDERS.values() if data['uid'] == uid)
     waiting_status_text = f"{waiting_count} file(s) waiting for track order." if waiting_count > 0 else "No files are waiting."
@@ -1300,8 +1213,8 @@ async def mode_check_cmd(c, m: Message):
         f"   - *Status:* {waiting_status_text}\n\n"
         f"2. **Edit Caption Mode:** `{caption_status}`\n"
         f"   - *Task:* Adds saved caption without changing rename or thumbnail of forwarded videos.\n\n"
-        f"3. **YT-DLP Mode:** `{yt_dlp_status}`\n"
-        f"   - *Task:* Uses yt-dlp to process all URLs.\n\n"
+        f"3. **YT-DLP Mode:** `{ytdlp_status}`\n"
+        f"   - *Task:* Forces ALL provided links to download via YT-DLP engine.\n\n"
         "Click the buttons below to toggle modes."
     )
     
@@ -1332,7 +1245,7 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
         else:
             EDIT_CAPTION_MODE.add(uid)
             message = "Edit Caption Mode ON."
-
+            
     elif action == "toggle_ytdlp_mode":
         if uid in YT_DLP_MODE:
             YT_DLP_MODE.discard(uid)
@@ -1344,7 +1257,7 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
     try:
         audio_status = "✅ ON" if uid in MKV_AUDIO_CHANGE_MODE else "❌ OFF"
         caption_status = "✅ ON" if uid in EDIT_CAPTION_MODE else "❌ OFF"
-        yt_dlp_status = "✅ ON" if uid in YT_DLP_MODE else "❌ OFF"
+        ytdlp_status = "✅ ON" if uid in YT_DLP_MODE else "❌ OFF"
         
         waiting_count = sum(1 for data in PENDING_AUDIO_ORDERS.values() if data['uid'] == uid)
         waiting_status_text = f"{waiting_count} file(s) waiting for track order." if waiting_count > 0 else "No files are waiting."
@@ -1356,8 +1269,8 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
             f"   - *Status:* {waiting_status_text}\n\n"
             f"2. **Edit Caption Mode:** `{caption_status}`\n"
             f"   - *Task:* Adds saved caption without changing rename or thumbnail of forwarded videos.\n\n"
-            f"3. **YT-DLP Mode:** `{yt_dlp_status}`\n"
-            f"   - *Task:* Uses yt-dlp to process all URLs.\n\n"
+            f"3. **YT-DLP Mode:** `{ytdlp_status}`\n"
+            f"   - *Task:* Forces ALL provided links to download via YT-DLP engine.\n\n"
             "Click the buttons below to toggle modes."
         )
         
@@ -1612,14 +1525,7 @@ async def text_handler(c, m: Message):
 
     if text.startswith("http://") or text.startswith("https://"):
         url = text
-        
-        # Checking yt-dlp mode toggle FIRST
-        if uid in YT_DLP_MODE:
-            await fetch_youtube_formats(c, m, url)
-            return
-            
-        # Fallback normal behavior if yt-dlp mode is OFF
-        if is_youtube_url(url):
+        if is_youtube_url(url) or uid in YT_DLP_MODE:
             await fetch_youtube_formats(c, m, url)
             return
 
@@ -1650,11 +1556,7 @@ async def upload_url_cmd(c, m: Message):
     url = m.text.split(None, 1)[1].strip()
     uid = m.from_user.id
     
-    if uid in YT_DLP_MODE:
-        await fetch_youtube_formats(c, m, url)
-        return
-        
-    if is_youtube_url(url):
+    if is_youtube_url(url) or uid in YT_DLP_MODE:
         await fetch_youtube_formats(c, m, url)
         return
 
@@ -2050,7 +1952,7 @@ async def sequential_remux_upload_task(uid, c, m, in_path, out_name, new_stream_
         try:
             status_msg = await m.reply_text("Changing audio track order (Remuxing)...", reply_markup=progress_keyboard())
             
-            result = await asyncio.tothread(
+            result = await asyncio.to_thread(
                 subprocess.run,
                 cmd,
                 capture_output=True,
@@ -2275,7 +2177,7 @@ def process_dynamic_caption(uid, caption_template):
     return "**" + "\n".join(caption_template.splitlines()) + "**"
 
 
-async def process_file_and_upload(c: Client, m: Message, in_path: Path, original_name: str = None, messages_to_delete: list = None, cancel_event_passed: asyncio.Event = None, override_caption: str = None):
+async def process_file_and_upload(c: Client, m: Message, in_path: Path, original_name: str = None, messages_to_delete: list = None, cancel_event_passed: asyncio.Event = None, fallback_caption: str = None):
     uid = m.from_user.id
     # Use passed cancel event or create new one (though logically should be passed)
     cancel_event = cancel_event_passed
@@ -2394,22 +2296,22 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
         height_px = video_metadata.get('height', 0)
         
         caption_to_use = f"**{target_name}**" # Default to Bold Filename
+        if fallback_caption:
+            caption_to_use = fallback_caption
+            
         if final_caption_template:
             caption_to_use = process_dynamic_caption(uid, final_caption_template)
-        elif override_caption: # Apply override if no custom caption is saved
-            caption_to_use = override_caption
 
         parts_to_upload = [(upload_path, target_name, None, duration_sec)]
         
-        # --- SPLIT LOGIC IF GREATER THAN 1.8GB (UPDATED) ---
-        MAX_PART_SIZE = int(1.8 * 1024 * 1024 * 1024) # Set to 1.8GB
-        if is_video_file and upload_path.exists() and upload_path.stat().st_size > MAX_PART_SIZE and duration_sec > 0:
+        # --- SPLIT LOGIC IF GREATER THAN 1.8GB ---
+        if is_video_file and upload_path.exists() and upload_path.stat().st_size > 1.8 * 1024 * 1024 * 1024 and duration_sec > 0:
             try:
                 if status_msg:
-                    await status_msg.edit("Video is over limit, splitting video...", reply_markup=progress_keyboard())
+                    await status_msg.edit("Video is over 1.8GB, splitting video...", reply_markup=progress_keyboard())
             except Exception: pass
             
-            num_parts = math.ceil(upload_path.stat().st_size / MAX_PART_SIZE)
+            num_parts = math.ceil(upload_path.stat().st_size / (1.8 * 1024 * 1024 * 1024))
             base_chunk = duration_sec / num_parts
             split_parts = []
             
@@ -2458,7 +2360,6 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
             
             part_caption = caption_to_use
             if part_num is not None:
-                # Part added in new line as requested
                 if part_caption.endswith("**"):
                     part_caption = part_caption[:-2] + f"\n✔️ Part - {part_num:02d}**"
                 else:
