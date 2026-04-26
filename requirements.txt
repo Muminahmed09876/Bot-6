@@ -26,3 +26,4 @@ flask
 gunicorn
 python-telegram-bot
 python-dotenv
+tor
