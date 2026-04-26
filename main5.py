@@ -558,7 +558,7 @@ async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, s
             return
         # Now we possess the upload lock. Video 1 will hold this until done.
         # Video 2 (already downloaded) will wait here.
-        await process_file_and_upload(client, message, tmp_path, original_name=renamed_file, messages_to_delete=[status_msg_id], cancel_event_passed=cancel_event)
+        await process_file_and_upload(client, message, tmp_path, original_name=renamed_file, messages_to_delete=[status_msg_id], cancel_event_passed=cancel_event, passed_uid=uid)
 
 # --- QUEUE WORKER ---
 async def process_queue_handler(uid, client):
@@ -1990,7 +1990,7 @@ async def sequential_remux_upload_task(uid, c, m, in_path, out_name, new_stream_
             all_messages_to_delete = messages_to_delete if messages_to_delete else []
             all_messages_to_delete.append(status_msg.id)
 
-            await process_file_and_upload(c, m, out_path, original_name=out_name, messages_to_delete=all_messages_to_delete, cancel_event_passed=cancel_event) 
+            await process_file_and_upload(c, m, out_path, original_name=out_name, messages_to_delete=all_messages_to_delete, cancel_event_passed=cancel_event, passed_uid=uid) 
 
         except Exception as e:
             logger.error(f"Audio remux process error: {e}")
@@ -2193,8 +2193,8 @@ def process_dynamic_caption(uid, caption_template):
     return "**" + "\n".join(caption_template.splitlines()) + "**"
 
 
-async def process_file_and_upload(c: Client, m: Message, in_path: Path, original_name: str = None, messages_to_delete: list = None, cancel_event_passed: asyncio.Event = None):
-    uid = m.from_user.id
+async def process_file_and_upload(c: Client, m: Message, in_path: Path, original_name: str = None, messages_to_delete: list = None, cancel_event_passed: asyncio.Event = None, passed_uid: int = None):
+    uid = passed_uid if passed_uid else (m.from_user.id if m.from_user else m.chat.id)
     # Use passed cancel event or create new one (though logically should be passed)
     cancel_event = cancel_event_passed
     if not cancel_event:
