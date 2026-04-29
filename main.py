@@ -82,7 +82,11 @@ USER_UPLOAD_LOCKS = {}
 MULTI_GROUP_BATCH_MODE = set()
 MULTI_GROUP_DATA = {}
 USE_ORIGINAL_CAPTION_IN_MULTI_GROUP = set()
-PENDING_ZIP_ORDERS = {}
+
+# --- NEW ZIP STATE ---
+PENDING_ZIP_REPLIES = {}
+ACTIVE_ZIP_SESSION = {}
+AWAITING_ZIP_PASSWORD = {}
 # ------------------------------------------------
 
 # --- YT-DLP STATE & MODES ---
@@ -1398,12 +1402,135 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
         await cb.answer(message, show_alert=True)
 
 
+async def extract_and_prepare_zip(c, m, uid, tmp_in, status_msg, cancel_event, pwd=None):
+    try:
+        await status_msg.edit("Extracting ZIP file...", reply_markup=None)
+        ext_dir = TMP / f"ext_{uid}_{int(time.time())}"
+        ext_dir.mkdir(parents=True, exist_ok=True)
+
+        def do_extract():
+            with zipfile.ZipFile(tmp_in, 'r') as zip_ref:
+                if pwd:
+                    zip_ref.extractall(ext_dir, pwd=pwd.encode('utf-8'))
+                else:
+                    zip_ref.extractall(ext_dir)
+
+        await asyncio.to_thread(do_extract)
+        tmp_in.unlink(missing_ok=True)
+
+        extracted_files = sorted([f for f in ext_dir.rglob('*') if f.is_file()])
+        if not extracted_files:
+            await status_msg.edit("ZIP file is empty.")
+            return
+
+        zip_folder_name = tmp_in.name
+        msg = await status_msg.edit(f"**ZIP Folder:** `{zip_folder_name}`\n\nReply **ok** to this message to see the file list.")
+
+        PENDING_ZIP_REPLIES[msg.id] = {
+            'uid': uid,
+            'files': extracted_files,
+            'dir': ext_dir,
+            'status_msg': msg
+        }
+        if cancel_event in TASKS.get(uid, []):
+            TASKS[uid].remove(cancel_event)
+    except Exception as e:
+        logger.error(f"ZIP extract error: {e}")
+        err_str = str(e).lower()
+        if "bad password" in err_str or "password required" in err_str:
+            await status_msg.edit("Wrong password. Send the password again in the chat or /cancel to abort.")
+            AWAITING_ZIP_PASSWORD[uid] = {
+                'tmp_in': tmp_in,
+                'status_msg': status_msg,
+                'cancel_event': cancel_event,
+                'm': m
+            }
+        else:
+            await status_msg.edit(f"ZIP Extraction failed: {e}. Attempting normal upload...")
+
 @app.on_message(filters.text & filters.private)
 async def text_handler(c, m: Message):
     uid = m.from_user.id
     if not is_admin(uid):
         return
     text = m.text.strip()
+
+    if uid in AWAITING_ZIP_PASSWORD:
+        state = AWAITING_ZIP_PASSWORD.pop(uid)
+        await extract_and_prepare_zip(c, state['m'], uid, state['tmp_in'], state['status_msg'], state['cancel_event'], pwd=text)
+        return
+
+    if m.reply_to_message and m.reply_to_message.id in PENDING_ZIP_REPLIES:
+        if text.lower() == "ok":
+            order_data = PENDING_ZIP_REPLIES.pop(m.reply_to_message.id)
+            if order_data['uid'] != uid:
+                return
+
+            files = order_data['files']
+            await m.reply_text(f"Sending {len(files)} files list...")
+            for i, fpath in enumerate(files, 1):
+                await c.send_message(m.chat.id, f"File No: {i}\nName: `{fpath.name}`")
+                await asyncio.sleep(0.3)
+
+            await c.send_message(m.chat.id, "Send file numbers (e.g., 1,3,5,8-15) to upload. Unspecified files will be uploaded sequentially afterwards.")
+            ACTIVE_ZIP_SESSION[uid] = order_data
+            return
+
+    if uid in ACTIVE_ZIP_SESSION:
+        if re.match(r'^[\d,\-\s]+$', text.strip()):
+            order_data = ACTIVE_ZIP_SESSION.pop(uid)
+            files = order_data['files']
+            selected_indices = []
+            try:
+                parts = text.strip().split(',')
+                for p in parts:
+                    p = p.strip()
+                    if not p: continue
+                    if '-' in p:
+                        start, end = map(int, p.split('-'))
+                        for i in range(start, end + 1):
+                            if i not in selected_indices:
+                                selected_indices.append(i)
+                    else:
+                        num = int(p)
+                        if num not in selected_indices:
+                            selected_indices.append(num)
+            except Exception:
+                await m.reply_text("Invalid format. Use numbers and ranges like 1,3,5,8-15")
+                ACTIVE_ZIP_SESSION[uid] = order_data
+                return
+
+            valid_selected = [i for i in selected_indices if 1 <= i <= len(files)]
+            all_indices = list(range(1, len(files) + 1))
+            unselected = [i for i in all_indices if i not in valid_selected]
+
+            final_order = valid_selected + unselected
+
+            async def process_zip_selections():
+                upload_status = await m.reply_text(f"Starting upload of {len(final_order)} files...")
+                for idx in final_order:
+                    fpath = files[idx - 1]
+                    if not fpath.exists():
+                        continue
+
+                    original_name = fpath.name
+                    renamed_file = generate_new_filename(original_name)
+
+                    cancel_event = asyncio.Event()
+                    TASKS.setdefault(uid, []).append(cancel_event)
+
+                    try:
+                        await sequential_upload_task(uid, c, m, fpath, renamed_file, None, cancel_event, default_caption=original_name)
+                    except Exception as e:
+                        logger.error(f"ZIP item upload error: {e}")
+
+                shutil.rmtree(order_data['dir'], ignore_errors=True)
+                try: await upload_status.delete()
+                except: pass
+                await m.reply_text("All ZIP files uploaded successfully.")
+
+            asyncio.create_task(process_zip_selections())
+            return
     
     # --- PROXY AWAITING LOGIC ---
     if uid in AWAITING_PROXY_COUNTRY:
@@ -1545,82 +1672,6 @@ async def text_handler(c, m: Message):
                     await m.reply_text("Batch list is empty or mode is not ON.")
             return
     # ------------------------------------
-
-    # --- Handle ZIP selection ---
-    if m.reply_to_message and m.reply_to_message.id in PENDING_ZIP_ORDERS:
-        order_data = PENDING_ZIP_ORDERS[m.reply_to_message.id]
-        if order_data['uid'] != uid:
-             await m.reply_text("You cannot provide orders for this file.")
-             return
-
-        text_input = m.text.strip()
-        files = order_data['files']
-        
-        selected_indices = set()
-        try:
-            parts = text_input.split(',')
-            for p in parts:
-                p = p.strip()
-                if not p: continue
-                if '-' in p:
-                    start, end = map(int, p.split('-'))
-                    for i in range(start, end + 1):
-                        selected_indices.add(i)
-                else:
-                    selected_indices.add(int(p))
-        except Exception:
-            await m.reply_to_message.reply_text("Invalid format. Use numbers and ranges like 1,3,5,8-15")
-            return
-        
-        valid_indices = [i for i in selected_indices if 1 <= i <= len(files)]
-        if not valid_indices:
-            await m.reply_to_message.reply_text("No valid file numbers found.")
-            return
-        
-        valid_indices.sort()
-        
-        async def process_zip_selections():
-            upload_status = await m.reply_text(f"Starting upload of {len(valid_indices)} files...")
-            for idx in valid_indices:
-                fpath = files[idx - 1]
-                if not fpath.exists():
-                    continue
-                
-                original_name = fpath.name
-                renamed_file = generate_new_filename(original_name)
-                
-                cancel_event = asyncio.Event()
-                TASKS.setdefault(uid, []).append(cancel_event)
-                
-                try:
-                    await sequential_upload_task(uid, c, m, fpath, renamed_file, None, cancel_event, default_caption=original_name)
-                except Exception as e:
-                    logger.error(f"ZIP item upload error: {e}")
-                
-            remaining_files = [f for f in files if f.exists()]
-            if not remaining_files:
-                try: await order_data['status_msg'].delete()
-                except: pass
-                shutil.rmtree(order_data['dir'], ignore_errors=True)
-                PENDING_ZIP_ORDERS.pop(m.reply_to_message.id, None)
-            else:
-                file_list_text = "ZIP extracted. Remaining Files:\n\n"
-                for i, fpath in enumerate(files, 1):
-                    if fpath.exists():
-                        file_list_text += f"{i}. {fpath.name}\n"
-                
-                file_list_text += "\nReply to this message with file numbers (e.g., 1,3,5,8-15) to upload them."
-                if len(file_list_text) > 4000: 
-                    file_list_text = file_list_text[:4000] + "\n...[truncated]"
-                try:
-                    await order_data['status_msg'].edit(file_list_text)
-                except Exception: pass
-                
-            try: await upload_status.delete()
-            except: pass
-            
-        asyncio.create_task(process_zip_selections())
-        return
 
     # Handle set caption request
     if uid in SET_CAPTION_REQUEST:
@@ -1884,43 +1935,32 @@ async def download_and_process_generic(c, m, url, status_msg):
 
         if zipfile.is_zipfile(tmp_in) or tmp_in.name.lower().endswith(".zip"):
             try:
-                await status_msg.edit("ZIP file detected. Extracting...", reply_markup=None)
-                ext_dir = TMP / f"ext_{uid}_{int(datetime.now().timestamp())}"
-                ext_dir.mkdir(parents=True, exist_ok=True)
-                
-                with zipfile.ZipFile(tmp_in, 'r') as zip_ref:
-                    zip_ref.extractall(ext_dir)
-                
-                tmp_in.unlink(missing_ok=True) 
-                
-                extracted_files = sorted([f for f in ext_dir.rglob('*') if f.is_file()])
-                if not extracted_files:
-                    await status_msg.edit("ZIP file is empty.")
+                is_encrypted = False
+                try:
+                    with zipfile.ZipFile(tmp_in, 'r') as zf:
+                        for info in zf.infolist():
+                            if info.flag_bits & 0x1:
+                                is_encrypted = True
+                                break
+                except Exception:
+                    pass
+
+                if is_encrypted:
+                    await status_msg.edit("ZIP file is locked 🔒. Please send the password in the chat:", reply_markup=None)
+                    AWAITING_ZIP_PASSWORD[uid] = {
+                        'tmp_in': tmp_in,
+                        'status_msg': status_msg,
+                        'cancel_event': cancel_event,
+                        'm': m
+                    }
                     return
-                
-                file_list_text = "ZIP extracted. Files:\n\n"
-                for i, fpath in enumerate(extracted_files, 1):
-                    file_list_text += f"{i}. {fpath.name}\n"
-                
-                file_list_text += "\nReply to this message with file numbers (e.g., 1,3,5,8-15) to upload them."
-                
-                if len(file_list_text) > 4000:
-                     file_list_text = file_list_text[:4000] + "\n...[truncated]"
-                     
-                await status_msg.edit(file_list_text)
-                
-                PENDING_ZIP_ORDERS[status_msg.id] = {
-                    'uid': uid,
-                    'files': extracted_files,
-                    'dir': ext_dir,
-                    'status_msg': status_msg
-                }
-                TASKS[uid].remove(cancel_event)
-                return
+                else:
+                    await extract_and_prepare_zip(c, m, uid, tmp_in, status_msg, cancel_event)
+                    return
+
             except Exception as e:
-                logger.error(f"ZIP extract error: {e}")
-                await status_msg.edit(f"ZIP Extraction failed: {e}. Attempting normal upload...")
-                return
+                logger.error(f"ZIP extract error setup: {e}")
+                await status_msg.edit(f"ZIP processing failed: {e}. Attempting normal upload...")
 
         await status_msg.edit("Download complete. Uploading...", reply_markup=None)
         renamed_file = generate_new_filename(safe_name)
@@ -1989,12 +2029,15 @@ async def handle_caption_only_upload_with_file(c: Client, m: Message, file_info)
     
     use_orig_cap = (uid in USE_ORIGINAL_CAPTION_IN_MULTI_GROUP)
     
-    caption_to_use = USER_CAPTIONS.get(uid)
     if use_orig_cap:
         caption_to_use = m.caption or ""
-    elif not caption_to_use:
-        await m.reply_text("Edit caption mode is ON but no caption is saved. Set a caption using /set_caption.")
-        return
+        caption_entities_to_use = m.caption_entities
+    else:
+        caption_to_use = USER_CAPTIONS.get(uid)
+        if not caption_to_use:
+            await m.reply_text("Edit caption mode is ON but no caption is saved. Set a caption using /set_caption.")
+            return
+        caption_entities_to_use = None
 
     cancel_event = asyncio.Event()
     TASKS.setdefault(uid, []).append(cancel_event)
@@ -2016,22 +2059,27 @@ async def handle_caption_only_upload_with_file(c: Client, m: Message, file_info)
         
         if use_orig_cap:
             final_caption = caption_to_use
+            final_entities = caption_entities_to_use
         else:
             final_caption = process_dynamic_caption(uid, caption_to_use)
+            final_entities = None
         
         if file_info.file_id:
             try:
+                parse_mode_arg = None if use_orig_cap else ParseMode.MARKDOWN
+
                 if source_message.video or (file_info and getattr(file_info, 'duration', 0) > 0): # Treat as video
                     await c.send_video(
                         chat_id=m.chat.id,
                         video=file_info.file_id,
                         caption=final_caption,
+                        caption_entities=final_entities,
                         thumb=file_info.thumbs[0].file_id if file_info.thumbs else None,
                         duration=file_info.duration,
                         width=file_info.width,       
                         height=file_info.height,     
                         supports_streaming=True,
-                        parse_mode=ParseMode.MARKDOWN
+                        parse_mode=parse_mode_arg
                     )
                 else:
                     await c.send_document(
@@ -2039,8 +2087,9 @@ async def handle_caption_only_upload_with_file(c: Client, m: Message, file_info)
                         document=file_info.file_id,
                         file_name=file_info.file_name,
                         caption=final_caption,
+                        caption_entities=final_entities,
                         thumb=file_info.thumbs[0].file_id if file_info.thumbs else None,
-                        parse_mode=ParseMode.MARKDOWN
+                        parse_mode=parse_mode_arg
                     )
                 try:
                     await status_msg.delete() # SILENT SUCCESS
