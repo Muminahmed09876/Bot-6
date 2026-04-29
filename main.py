@@ -83,10 +83,10 @@ MULTI_GROUP_BATCH_MODE = set()
 MULTI_GROUP_DATA = {}
 USE_ORIGINAL_CAPTION_IN_MULTI_GROUP = set()
 
-# --- NEW ZIP STATE ---
-PENDING_ZIP_REPLIES = {}
-ACTIVE_ZIP_SESSION = {}
-AWAITING_ZIP_PASSWORD = {}
+# --- NEW ZIP DOWNLOAD MODE STATE ---
+ZIP_DOWNLOAD_MODE = set()
+ZIP_NAV_STATE = {}
+ACTIVE_ZIP_TASKS = set()
 # ------------------------------------------------
 
 # --- YT-DLP STATE & MODES ---
@@ -230,6 +230,7 @@ def mode_check_keyboard(uid: int) -> InlineKeyboardMarkup:
     audio_status = "✅ ON" if uid in MKV_AUDIO_CHANGE_MODE else "❌ OFF"
     caption_status = "✅ ON" if uid in EDIT_CAPTION_MODE else "❌ OFF"
     yt_dlp_status = "✅ ON" if uid in YT_DLP_MODE else "❌ OFF"
+    zip_status = "✅ ON" if uid in ZIP_DOWNLOAD_MODE else "❌ OFF"
     
     waiting_count = sum(1 for data in PENDING_AUDIO_ORDERS.values() if data['uid'] == uid)
     waiting_status = f" ({waiting_count} orders pending)" if waiting_count > 0 else ""
@@ -237,7 +238,8 @@ def mode_check_keyboard(uid: int) -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton(f"MKV Audio Change Mode {audio_status}{waiting_status}", callback_data="toggle_audio_mode")],
         [InlineKeyboardButton(f"Edit Caption Mode {caption_status}", callback_data="toggle_caption_mode")],
-        [InlineKeyboardButton(f"YT-DLP Mode {yt_dlp_status}", callback_data="toggle_ytdlp_mode")]
+        [InlineKeyboardButton(f"YT-DLP Mode {yt_dlp_status}", callback_data="toggle_ytdlp_mode")],
+        [InlineKeyboardButton(f"ZIP Download Mode {zip_status}", callback_data="toggle_zip_mode")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -560,6 +562,7 @@ async def set_bot_commands():
     cmds = [
         BotCommand("start", "Start bot / Help"),
         BotCommand("upload_url", "Download & Upload file from URL (admin only)"),
+        BotCommand("zip_file_download", "Toggle ZIP Download Mode (admin only)"),
         BotCommand("setthumb", "Set custom thumbnail (admin only)"),
         BotCommand("view_thumb", "View your thumbnail (admin only)"),
         BotCommand("del_thumb", "Delete your thumbnail (admin only)"),
@@ -961,6 +964,7 @@ async def start_handler(c, m: Message):
         "Note: Many commands can only be used by the Admin (owner).\n\n"
         "Commands:\n"
         "/upload_url <url> - Download & Upload file from URL (admin only)\n"
+        "/zip_file_download - Toggle ZIP Download Mode (admin only)\n"
         "/setthumb - Send an image to set as your thumbnail (admin only)\n"
         "/view_thumb - View your thumbnail (admin only)\n"
         "/del_thumb - Delete your thumbnail (admin only)\n"
@@ -982,6 +986,19 @@ async def start_handler(c, m: Message):
 @app.on_message(filters.command("help") & filters.private)
 async def help_handler(c, m):
     await start_handler(c, m)
+
+@app.on_message(filters.command("zip_file_download") & filters.private)
+async def zip_file_download_cmd(c, m: Message):
+    uid = m.from_user.id
+    if not is_admin(uid):
+        await m.reply_text("You are not authorized to use this command.")
+        return
+    if uid in ZIP_DOWNLOAD_MODE:
+        ZIP_DOWNLOAD_MODE.discard(uid)
+        await m.reply_text("ZIP File Download Mode **OFF**.")
+    else:
+        ZIP_DOWNLOAD_MODE.add(uid)
+        await m.reply_text("ZIP File Download Mode **ON**.\nSend a direct link. Only one link at a time.\nType `clear` to reset the current task and clear data.")
 
 @app.on_message(filters.command("proxy") & filters.private)
 async def proxy_cmd(c, m: Message):
@@ -1323,6 +1340,7 @@ async def mode_check_cmd(c, m: Message):
     audio_status = "✅ ON" if uid in MKV_AUDIO_CHANGE_MODE else "❌ OFF"
     caption_status = "✅ ON" if uid in EDIT_CAPTION_MODE else "❌ OFF"
     yt_dlp_status = "✅ ON" if uid in YT_DLP_MODE else "❌ OFF"
+    zip_status = "✅ ON" if uid in ZIP_DOWNLOAD_MODE else "❌ OFF"
     
     waiting_count = sum(1 for data in PENDING_AUDIO_ORDERS.values() if data['uid'] == uid)
     waiting_status_text = f"{waiting_count} file(s) waiting for track order." if waiting_count > 0 else "No files are waiting."
@@ -1336,13 +1354,15 @@ async def mode_check_cmd(c, m: Message):
         f"   - *Task:* Adds saved caption without changing rename or thumbnail of forwarded videos.\n\n"
         f"3. **YT-DLP Mode:** `{yt_dlp_status}`\n"
         f"   - *Task:* Processes URLs using YT-DLP engine.\n\n"
+        f"4. **ZIP Download Mode:** `{zip_status}`\n"
+        f"   - *Task:* Direct ZIP link processing.\n\n"
         "Click the buttons below to toggle modes."
     )
     
     await m.reply_text(status_text, reply_markup=mode_check_keyboard(uid), parse_mode=ParseMode.MARKDOWN)
 
 # --- NEW CALLBACK: Mode Toggle Buttons ---
-@app.on_callback_query(filters.regex("toggle_(audio|caption|ytdlp)_mode"))
+@app.on_callback_query(filters.regex("toggle_(audio|caption|ytdlp|zip)_mode"))
 async def mode_toggle_callback(c: Client, cb: CallbackQuery):
     uid = cb.from_user.id
     if not is_admin(uid):
@@ -1374,11 +1394,20 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
         else:
             YT_DLP_MODE.add(uid)
             message = "YT-DLP Mode ON."
+
+    elif action == "toggle_zip_mode":
+        if uid in ZIP_DOWNLOAD_MODE:
+            ZIP_DOWNLOAD_MODE.discard(uid)
+            message = "ZIP Download Mode OFF."
+        else:
+            ZIP_DOWNLOAD_MODE.add(uid)
+            message = "ZIP Download Mode ON."
             
     try:
         audio_status = "✅ ON" if uid in MKV_AUDIO_CHANGE_MODE else "❌ OFF"
         caption_status = "✅ ON" if uid in EDIT_CAPTION_MODE else "❌ OFF"
         yt_dlp_status = "✅ ON" if uid in YT_DLP_MODE else "❌ OFF"
+        zip_status = "✅ ON" if uid in ZIP_DOWNLOAD_MODE else "❌ OFF"
         
         waiting_count = sum(1 for data in PENDING_AUDIO_ORDERS.values() if data['uid'] == uid)
         waiting_status_text = f"{waiting_count} file(s) waiting for track order." if waiting_count > 0 else "No files are waiting."
@@ -1392,6 +1421,8 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
             f"   - *Task:* Adds saved caption without changing rename or thumbnail of forwarded videos.\n\n"
             f"3. **YT-DLP Mode:** `{yt_dlp_status}`\n"
             f"   - *Task:* Processes URLs using YT-DLP engine.\n\n"
+            f"4. **ZIP Download Mode:** `{zip_status}`\n"
+            f"   - *Task:* Direct ZIP link processing.\n\n"
             "Click the buttons below to toggle modes."
         )
         
@@ -1401,52 +1432,106 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
         logger.error(f"Callback edit error: {e}")
         await cb.answer(message, show_alert=True)
 
+# --- ZIP NAVIGATION HELPERS ---
+async def show_directory_contents(c, chat_id, uid):
+    state = ZIP_NAV_STATE[uid]
+    curr_dir = state['current_dir']
+    items = sorted(list(curr_dir.iterdir()), key=lambda x: (not x.is_dir(), x.name.lower()))
+    state['items'] = items
+    
+    text_lines = [f"**Current Folder:** `{curr_dir.name}`\n"]
+    for i, item in enumerate(items, 1):
+        icon = "📁" if item.is_dir() else "📄"
+        text_lines.append(f"**{i}.** {icon} `{item.name}`")
+        
+    text_lines.append("\n**Options:**")
+    text_lines.append("‣ Send number (e.g. `1`) to open a folder.")
+    text_lines.append("‣ Send `b` to go back.")
+    text_lines.append("‣ Send `s` to select this folder for upload.")
+    
+    full_text = "\n".join(text_lines)
+    
+    chunks = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
+    for chunk in chunks:
+        await c.send_message(chat_id, chunk)
+        await asyncio.sleep(0.3)
+        
+async def show_files_for_upload(c, chat_id, uid, files):
+    text_lines = ["**Files in selected folder:**\n"]
+    for i, f in enumerate(files, 1):
+        text_lines.append(f"**{i}.** `{f.name}`")
+        
+    text_lines.append("\n**Upload Options:**")
+    text_lines.append("Send file numbers (e.g., `1,3,5,8-15`) to upload in that exact order.")
+    text_lines.append("Unspecified files will upload sequentially after.")
+    
+    full_text = "\n".join(text_lines)
+    chunks = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
+    for chunk in chunks:
+        await c.send_message(chat_id, chunk)
+        await asyncio.sleep(0.3)
 
-async def extract_and_prepare_zip(c, m, uid, tmp_in, status_msg, cancel_event, pwd=None):
+async def handle_zip_download_mode(c, m, url):
+    uid = m.from_user.id
+    status_msg = await m.reply_text("Downloading ZIP file...", reply_markup=progress_keyboard())
+    tmp_in = TMP / f"zip_dl_{uid}_{int(time.time())}.zip"
+    cancel_event = asyncio.Event()
+    TASKS.setdefault(uid, []).append(cancel_event)
+    
     try:
-        await status_msg.edit("Extracting ZIP file...", reply_markup=None)
-        ext_dir = TMP / f"ext_{uid}_{int(time.time())}"
+        ok, err = False, None
+        if is_drive_url(url):
+            fid = extract_drive_id(url)
+            if fid: ok, err = await download_drive_file(fid, tmp_in, status_msg, cancel_event)
+        else:
+            ok, err = await download_url_generic(url, tmp_in, status_msg, cancel_event)
+            
+        if not ok:
+            await status_msg.edit(f"Download Failed: {err}")
+            ACTIVE_ZIP_TASKS.discard(uid)
+            if tmp_in.exists(): tmp_in.unlink()
+            return
+            
+        await status_msg.edit("Extracting ZIP file...")
+        ext_dir = TMP / f"zip_ext_{uid}_{int(time.time())}"
         ext_dir.mkdir(parents=True, exist_ok=True)
-
+        
         def do_extract():
             with zipfile.ZipFile(tmp_in, 'r') as zip_ref:
-                if pwd:
-                    zip_ref.extractall(ext_dir, pwd=pwd.encode('utf-8'))
-                else:
-                    zip_ref.extractall(ext_dir)
-
+                zip_ref.extractall(ext_dir)
+        
         await asyncio.to_thread(do_extract)
         tmp_in.unlink(missing_ok=True)
-
-        extracted_files = sorted([f for f in ext_dir.rglob('*') if f.is_file()])
-        if not extracted_files:
-            await status_msg.edit("ZIP file is empty.")
-            return
-
-        zip_folder_name = tmp_in.name
-        msg = await status_msg.edit(f"**ZIP Folder:** `{zip_folder_name}`\n\nReply **ok** to this message to see the file list.")
-
-        PENDING_ZIP_REPLIES[msg.id] = {
-            'uid': uid,
-            'files': extracted_files,
-            'dir': ext_dir,
-            'status_msg': msg
+        
+        ZIP_NAV_STATE[uid] = {
+            'root_dir': ext_dir,
+            'current_dir': ext_dir,
+            'state': 'awaiting_open',
+            'status_msg_id': status_msg.id
         }
+        
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("Open 📂", callback_data="zip_nav_open")]])
+        await status_msg.edit(f"**ZIP file extracted successfully.**\nClick below to open.", reply_markup=markup)
+        
+    except Exception as e:
+        logger.error(f"ZIP Mode Error: {e}")
+        await status_msg.edit(f"Error: {e}")
+        ACTIVE_ZIP_TASKS.discard(uid)
+        if tmp_in.exists(): tmp_in.unlink(missing_ok=True)
+    finally:
         if cancel_event in TASKS.get(uid, []):
             TASKS[uid].remove(cancel_event)
-    except Exception as e:
-        logger.error(f"ZIP extract error: {e}")
-        err_str = str(e).lower()
-        if "bad password" in err_str or "password required" in err_str:
-            await status_msg.edit("Wrong password. Send the password again in the chat or /cancel to abort.")
-            AWAITING_ZIP_PASSWORD[uid] = {
-                'tmp_in': tmp_in,
-                'status_msg': status_msg,
-                'cancel_event': cancel_event,
-                'm': m
-            }
-        else:
-            await status_msg.edit(f"ZIP Extraction failed: {e}. Attempting normal upload...")
+
+@app.on_callback_query(filters.regex("zip_nav_open"))
+async def zip_nav_open_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in ZIP_NAV_STATE:
+        await cb.answer("Session expired or invalid.", show_alert=True)
+        return
+    ZIP_NAV_STATE[uid]['state'] = 'navigating'
+    await cb.message.edit_text("Opening ZIP folder content...")
+    await show_directory_contents(c, cb.message.chat.id, uid)
+# -----------------------------
 
 @app.on_message(filters.text & filters.private)
 async def text_handler(c, m: Message):
@@ -1454,83 +1539,110 @@ async def text_handler(c, m: Message):
     if not is_admin(uid):
         return
     text = m.text.strip()
+    text_lower = text.lower()
 
-    if uid in AWAITING_ZIP_PASSWORD:
-        state = AWAITING_ZIP_PASSWORD.pop(uid)
-        await extract_and_prepare_zip(c, state['m'], uid, state['tmp_in'], state['status_msg'], state['cancel_event'], pwd=text)
+    # --- NEW: Handle Clear for ZIP ---
+    if text_lower == "clear":
+        cleared = False
+        if uid in ZIP_NAV_STATE:
+            try:
+                shutil.rmtree(ZIP_NAV_STATE[uid]['root_dir'], ignore_errors=True)
+            except: pass
+            ZIP_NAV_STATE.pop(uid)
+            cleared = True
+        if uid in ACTIVE_ZIP_TASKS:
+            ACTIVE_ZIP_TASKS.discard(uid)
+            cleared = True
+        if cleared:
+            await m.reply_text("ZIP Download session and active tasks cleared. You can send a new link.")
+        else:
+            await m.reply_text("No active ZIP session to clear.")
         return
+    # ---------------------------------
 
-    if m.reply_to_message and m.reply_to_message.id in PENDING_ZIP_REPLIES:
-        if text.lower() == "ok":
-            order_data = PENDING_ZIP_REPLIES.pop(m.reply_to_message.id)
-            if order_data['uid'] != uid:
-                return
-
-            files = order_data['files']
-            await m.reply_text(f"Sending {len(files)} files list...")
-            for i, fpath in enumerate(files, 1):
-                await c.send_message(m.chat.id, f"File No: {i}\nName: `{fpath.name}`")
-                await asyncio.sleep(0.3)
-
-            await c.send_message(m.chat.id, "Send file numbers (e.g., 1,3,5,8-15) to upload. Unspecified files will be uploaded sequentially afterwards.")
-            ACTIVE_ZIP_SESSION[uid] = order_data
+    # --- NEW: Handle ZIP Nav State ---
+    if uid in ZIP_NAV_STATE:
+        state = ZIP_NAV_STATE[uid]
+        if state['state'] == 'navigating':
+            if text_lower == 'b':
+                if state['current_dir'] != state['root_dir']:
+                    state['current_dir'] = state['current_dir'].parent
+                    await show_directory_contents(c, m.chat.id, uid)
+                else:
+                    await m.reply_text("Already at root directory.")
+            elif text_lower == 's':
+                state['state'] = 'awaiting_selection'
+                files = [f for f in state['current_dir'].iterdir() if f.is_file()]
+                files.sort(key=lambda x: x.name.lower())
+                state['files_to_upload'] = files
+                if not files:
+                    await m.reply_text("No files in this folder. Sending 'b' to go back.")
+                    state['state'] = 'navigating'
+                    await show_directory_contents(c, m.chat.id, uid)
+                else:
+                    await show_files_for_upload(c, m.chat.id, uid, files)
+            elif text.isdigit():
+                idx = int(text) - 1
+                if 'items' in state and 0 <= idx < len(state['items']):
+                    item = state['items'][idx]
+                    if item.is_dir():
+                        state['current_dir'] = item
+                        await show_directory_contents(c, m.chat.id, uid)
+                    else:
+                        await m.reply_text("That's a file. Send 's' to select the folder for uploading.")
+                else:
+                    await m.reply_text("Invalid number.")
             return
-
-    if uid in ACTIVE_ZIP_SESSION:
-        if re.match(r'^[\d,\-\s]+$', text.strip()):
-            order_data = ACTIVE_ZIP_SESSION.pop(uid)
-            files = order_data['files']
+        elif state['state'] == 'awaiting_selection':
+            files = state['files_to_upload']
             selected_indices = []
             try:
-                parts = text.strip().split(',')
+                parts = text.split(',')
                 for p in parts:
                     p = p.strip()
                     if not p: continue
                     if '-' in p:
                         start, end = map(int, p.split('-'))
                         for i in range(start, end + 1):
-                            if i not in selected_indices:
-                                selected_indices.append(i)
+                            if i not in selected_indices: selected_indices.append(i)
                     else:
                         num = int(p)
-                        if num not in selected_indices:
-                            selected_indices.append(num)
+                        if num not in selected_indices: selected_indices.append(num)
             except Exception:
                 await m.reply_text("Invalid format. Use numbers and ranges like 1,3,5,8-15")
-                ACTIVE_ZIP_SESSION[uid] = order_data
                 return
-
+            
             valid_selected = [i for i in selected_indices if 1 <= i <= len(files)]
             all_indices = list(range(1, len(files) + 1))
             unselected = [i for i in all_indices if i not in valid_selected]
-
             final_order = valid_selected + unselected
-
-            async def process_zip_selections():
-                upload_status = await m.reply_text(f"Starting upload of {len(final_order)} files...")
+            
+            root_dir = state['root_dir']
+            ZIP_NAV_STATE.pop(uid) 
+            
+            async def process_zip_uploads():
+                upload_status = await m.reply_text(f"Starting upload of {len(final_order)} files in specified order...")
                 for idx in final_order:
                     fpath = files[idx - 1]
-                    if not fpath.exists():
-                        continue
-
+                    if not fpath.exists(): continue
                     original_name = fpath.name
                     renamed_file = generate_new_filename(original_name)
-
                     cancel_event = asyncio.Event()
                     TASKS.setdefault(uid, []).append(cancel_event)
-
                     try:
                         await sequential_upload_task(uid, c, m, fpath, renamed_file, None, cancel_event, default_caption=original_name)
                     except Exception as e:
                         logger.error(f"ZIP item upload error: {e}")
-
-                shutil.rmtree(order_data['dir'], ignore_errors=True)
+                
+                shutil.rmtree(root_dir, ignore_errors=True)
                 try: await upload_status.delete()
                 except: pass
                 await m.reply_text("All ZIP files uploaded successfully.")
+                ACTIVE_ZIP_TASKS.discard(uid)
 
-            asyncio.create_task(process_zip_selections())
+            asyncio.create_task(process_zip_uploads())
             return
+    # ---------------------------------
     
     # --- PROXY AWAITING LOGIC ---
     if uid in AWAITING_PROXY_COUNTRY:
@@ -1548,7 +1660,6 @@ async def text_handler(c, m: Message):
     # ----------------------------
     
     # --- BATCH CAPTION & UPLOAD COMMANDS (MODIFIED) ---
-    text_lower = text.lower()
     if text_lower in ["on", "off", "ok", "no", "d", "cap"]:
         if uid in EDIT_CAPTION_MODE:
             if text_lower == "cap":
@@ -1831,6 +1942,14 @@ async def text_handler(c, m: Message):
 
     if text.startswith("http://") or text.startswith("https://"):
         url = text
+        if uid in ZIP_DOWNLOAD_MODE:
+            if uid in ACTIVE_ZIP_TASKS:
+                await m.reply_text("A ZIP process is already active. Please finish it or send 'clear'.")
+                return
+            ACTIVE_ZIP_TASKS.add(uid)
+            asyncio.create_task(handle_zip_download_mode(c, m, url))
+            return
+            
         if uid in YT_DLP_MODE or is_youtube_url(url):
             await fetch_youtube_formats(c, m, url)
             return
@@ -1862,6 +1981,14 @@ async def upload_url_cmd(c, m: Message):
     url = m.text.split(None, 1)[1].strip()
     uid = m.from_user.id
     
+    if uid in ZIP_DOWNLOAD_MODE:
+        if uid in ACTIVE_ZIP_TASKS:
+            await m.reply_text("A ZIP process is already active. Please finish it or send 'clear'.")
+            return
+        ACTIVE_ZIP_TASKS.add(uid)
+        asyncio.create_task(handle_zip_download_mode(c, m, url))
+        return
+        
     if uid in YT_DLP_MODE or is_youtube_url(url):
         await fetch_youtube_formats(c, m, url)
         return
@@ -1932,35 +2059,6 @@ async def download_and_process_generic(c, m, url, status_msg):
             if tmp_in.exists(): tmp_in.unlink()
             TASKS[uid].remove(cancel_event)
             return
-
-        if zipfile.is_zipfile(tmp_in) or tmp_in.name.lower().endswith(".zip"):
-            try:
-                is_encrypted = False
-                try:
-                    with zipfile.ZipFile(tmp_in, 'r') as zf:
-                        for info in zf.infolist():
-                            if info.flag_bits & 0x1:
-                                is_encrypted = True
-                                break
-                except Exception:
-                    pass
-
-                if is_encrypted:
-                    await status_msg.edit("ZIP file is locked 🔒. Please send the password in the chat:", reply_markup=None)
-                    AWAITING_ZIP_PASSWORD[uid] = {
-                        'tmp_in': tmp_in,
-                        'status_msg': status_msg,
-                        'cancel_event': cancel_event,
-                        'm': m
-                    }
-                    return
-                else:
-                    await extract_and_prepare_zip(c, m, uid, tmp_in, status_msg, cancel_event)
-                    return
-
-            except Exception as e:
-                logger.error(f"ZIP extract error setup: {e}")
-                await status_msg.edit(f"ZIP processing failed: {e}. Attempting normal upload...")
 
         await status_msg.edit("Download complete. Uploading...", reply_markup=None)
         renamed_file = generate_new_filename(safe_name)
