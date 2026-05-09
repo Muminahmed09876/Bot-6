@@ -368,19 +368,16 @@ async def update_batch_status(c, m, uid, status_text, reply_markup=None):
             except: pass
         asyncio.ensure_future(auto_delete(msg, uid))
 
-async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_dlp=False, fmt=None, title=None, res=None, mode="normal", silent=False):
+async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_dlp=False, fmt=None, title=None, res=None):
     if uid not in USER_QUEUES:
         USER_QUEUES[uid] = asyncio.Queue()
     
-    if not silent:
-        try:
-            if is_yt_dlp:
-                status_msg = await m.reply_text(f"Queue: YT-DLP processing started for `{title}` ({res}p)...")
-            else:
-                status_msg = await m.reply_text(f"Queue: Processing started for `{original_name}`...", reply_markup=progress_keyboard())
-        except:
-            status_msg = None
-    else:
+    try:
+        if is_yt_dlp:
+            status_msg = await m.reply_text(f"Queue: YT-DLP processing started for `{title}` ({res}p)...")
+        else:
+            status_msg = await m.reply_text(f"Queue: Processing started for `{original_name}`...", reply_markup=progress_keyboard())
+    except:
         status_msg = None
 
     await USER_QUEUES[uid].put({
@@ -392,8 +389,7 @@ async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_d
         'is_yt_dlp': is_yt_dlp,
         'fmt': fmt,
         'title': title,
-        'res': res,
-        'mode': mode
+        'res': res
     })
     
     if uid not in USER_WORKERS or USER_WORKERS[uid].done():
@@ -588,7 +584,7 @@ async def set_bot_commands():
     except Exception as e:
         logger.warning("Set commands error: %s", e)
 
-async def universal_sequential_upload_task(uid, client, message, tmp_path, renamed_file, status_msg_id, cancel_event, default_caption=None, mode="normal"):
+async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, status_msg_id, cancel_event, default_caption=None):
     """Background task that waits for upload lock to ensure sequential uploads."""
     if uid not in USER_UPLOAD_LOCKS:
         USER_UPLOAD_LOCKS[uid] = asyncio.Lock()
@@ -599,7 +595,7 @@ async def universal_sequential_upload_task(uid, client, message, tmp_path, renam
             return
         # Now we possess the upload lock. Video 1 will hold this until done.
         # Video 2 (already downloaded) will wait here.
-        await universal_upload_processor(client, message, tmp_path, original_name=renamed_file, messages_to_delete=[status_msg_id] if status_msg_id else [], cancel_event_passed=cancel_event, passed_uid=uid, default_caption=default_caption, mode=mode)
+        await process_file_and_upload(client, message, tmp_path, original_name=renamed_file, messages_to_delete=[status_msg_id] if status_msg_id else [], cancel_event_passed=cancel_event, passed_uid=uid, default_caption=default_caption)
 
 # --- QUEUE WORKER ---
 async def process_queue_handler(uid, client):
@@ -613,7 +609,6 @@ async def process_queue_handler(uid, client):
             status_msg = task_data.get('status_msg') 
             is_url = task_data.get('is_url', False)
             is_yt_dlp = task_data.get('is_yt_dlp', False)
-            mode = task_data.get('mode', 'normal')
             
             if is_yt_dlp:
                 url = task_data.get('url')
@@ -700,7 +695,7 @@ async def process_queue_handler(uid, client):
                     yt_caption = f"{title} - {res}p" if title else original_name
                     
                     asyncio.create_task(
-                        universal_sequential_upload_task(uid, client, m, actual_path, renamed_file, status_msg.id if status_msg else None, cancel_event, default_caption=yt_caption, mode=mode)
+                        sequential_upload_task(uid, client, m, actual_path, renamed_file, status_msg.id if status_msg else None, cancel_event, default_caption=yt_caption)
                     )
                 except Exception as e:
                     logger.error(f"YT-DLP Queue DL Error: {e}")
@@ -753,7 +748,7 @@ async def process_queue_handler(uid, client):
                     
                     # 2. Upload Phase (Pipelined)
                     asyncio.create_task(
-                        universal_sequential_upload_task(uid, client, m, tmp_path, renamed_file, status_msg.id if status_msg else None, cancel_event, default_caption=original_name, mode=mode)
+                        sequential_upload_task(uid, client, m, tmp_path, renamed_file, status_msg.id if status_msg else None, cancel_event, default_caption=original_name)
                     )
                 
                 except Exception as e:
@@ -819,8 +814,7 @@ async def queue_yt_dlp(uid, c, m, url, fmt, title, res):
         'url': url,
         'fmt': fmt,
         'title': title,
-        'res': res,
-        'mode': 'normal'
+        'res': res
     })
     
     if uid not in USER_WORKERS or USER_WORKERS[uid].done():
@@ -1296,7 +1290,7 @@ async def toggle_edit_caption_mode(c, m: Message):
         await m.reply_text("edit video caption mode **OFF**.\nFrom now on, uploaded videos will be renamed, thumbnails changed, and saved caption added.")
     else:
         EDIT_CAPTION_MODE.add(uid)
-        await m.reply_text("edit video caption mode **ON**.\nFrom now on, videos will be queued, renamed, and the saved caption applied.\n\n**New Feature:** Type `on` to enable file ID save mode. Type `no` to enable Multi-group Batch mode. Type `off` to disable.")
+        await m.reply_text("edit video caption mode **ON**.\nFrom now on, only the saved caption will be added. Video name and thumbnail will remain the same.\n\n**New Feature:** Type `on` to enable file ID save mode. Type `no` to enable Multi-group Batch mode. Type `off` to disable.")
 
 # --- HANDLER: /mkv_video_audio_change ---
 @app.on_message(filters.command("mkv_video_audio_change") & filters.private)
@@ -1652,7 +1646,7 @@ async def text_handler(c, m: Message):
                     cancel_event = asyncio.Event()
                     TASKS.setdefault(uid, []).append(cancel_event)
                     try:
-                        await universal_sequential_upload_task(uid, c, m, fpath, renamed_file, None, cancel_event, default_caption=original_name)
+                        await sequential_upload_task(uid, c, m, fpath, renamed_file, None, cancel_event, default_caption=original_name)
                     except Exception as e:
                         logger.error(f"ZIP item upload error: {e}")
                 
@@ -1691,9 +1685,6 @@ async def text_handler(c, m: Message):
     if is_batch_cmd:
         if uid in EDIT_CAPTION_MODE:
             if text_lower == "cap":
-                if uid in BATCH_CAPTION_MODE:
-                    await m.reply_text("Batch Caption Mode is ON. 'cap' command will not work until you turn it off.")
-                    return
                 if uid in USE_ORIGINAL_CAPTION_IN_MULTI_GROUP:
                     USE_ORIGINAL_CAPTION_IN_MULTI_GROUP.discard(uid)
                     await m.reply_text("Original Caption Mode OFF. Now saved caption will be used.")
@@ -1703,7 +1694,7 @@ async def text_handler(c, m: Message):
             elif text_lower == "on":
                 BATCH_CAPTION_MODE.add(uid)
                 BATCH_DATA[uid] = []
-                await m.reply_text("Batch Caption Mode ON. Forward videos to save them for batch processing.")
+                await m.reply_text("Batch Caption Mode ON. Forward videos to save file IDs.")
             elif text_lower == "no":
                 MULTI_GROUP_BATCH_MODE.add(uid)
                 MULTI_GROUP_DATA[uid] = [[]]
@@ -1721,7 +1712,7 @@ async def text_handler(c, m: Message):
                 MULTI_GROUP_BATCH_MODE.discard(uid)
                 MULTI_GROUP_DATA.pop(uid, None)
                 BATCH_STATUS_MSG.pop(uid, None)
-                await m.reply_text("Batch Caption Mode & Multi-group Mode OFF. Forwarded videos will be processed sequentially.")
+                await m.reply_text("Batch Caption Mode & Multi-group Mode OFF. Forwarded videos will have caption changed directly.")
             elif text_lower.startswith("ok"):
                 if uid in MULTI_GROUP_BATCH_MODE and uid in MULTI_GROUP_DATA and MULTI_GROUP_DATA[uid]:
                     parts = text_lower.split()
@@ -1737,7 +1728,7 @@ async def text_handler(c, m: Message):
 
                     groups = MULTI_GROUP_DATA[uid]
                     total_items = sum(len(g) for g in groups)
-                    await m.reply_text(f"Multi-group processing queued for {len(groups)} groups ({total_items} items total)...")
+                    await m.reply_text(f"Multi-group processing started for {len(groups)} groups ({total_items} items total)...")
                     
                     queues = [list(g) for g in groups]
                     
@@ -1750,10 +1741,7 @@ async def text_handler(c, m: Message):
                                 if not q:
                                     break
                                 item = q.pop(0)
-                                msg_obj = item['message']
-                                file_info_obj = item['file_info']
-                                orig_name = file_info_obj.file_name if file_info_obj.file_name else f"video_{file_info_obj.file_unique_id}.mp4"
-                                await add_to_queue(uid, c, msg_obj, orig_name, is_url=False, mode="edit_caption", silent=True)
+                                await handle_caption_only_upload_with_file(c, item['message'], item['file_info'])
                                 await asyncio.sleep(0.5)
                     
                     MULTI_GROUP_DATA[uid] = [[]]
@@ -1763,7 +1751,7 @@ async def text_handler(c, m: Message):
                         except: pass
                         BATCH_STATUS_MSG.pop(uid, None)
                     
-                    complete_msg = await m.reply_text("Multi-group batch processing complete. Items are in queue.")
+                    complete_msg = await m.reply_text("Multi-group batch processing complete.")
                     async def auto_delete():
                         await asyncio.sleep(5) 
                         try: await complete_msg.delete()
@@ -1771,13 +1759,12 @@ async def text_handler(c, m: Message):
                     asyncio.ensure_future(auto_delete())
                 elif uid in BATCH_CAPTION_MODE and uid in BATCH_DATA and BATCH_DATA[uid]:
                     items = BATCH_DATA[uid]
-                    await m.reply_text(f"Processing queued for {len(items)} items...")
+                    await m.reply_text(f"Processing started for {len(items)} items...")
                     
                     for item in items:
                         msg_obj = item['message']
                         file_info_obj = item['file_info']
-                        orig_name = file_info_obj.file_name if file_info_obj.file_name else f"video_{file_info_obj.file_unique_id}.mp4"
-                        await add_to_queue(uid, c, msg_obj, orig_name, is_url=False, mode="edit_caption", silent=True)
+                        await handle_caption_only_upload_with_file(c, msg_obj, file_info_obj)
                         await asyncio.sleep(0.5)
                     
                     BATCH_DATA[uid] = []
@@ -1787,7 +1774,7 @@ async def text_handler(c, m: Message):
                         except: pass
                         BATCH_STATUS_MSG.pop(uid, None)
                     
-                    complete_msg = await m.reply_text("Batch queuing complete. Items are in queue.")
+                    complete_msg = await m.reply_text("Batch processing complete.")
                     async def auto_delete():
                         await asyncio.sleep(5) 
                         try: await complete_msg.delete()
@@ -1813,9 +1800,9 @@ async def text_handler(c, m: Message):
                     
                     for item in items:
                         if item.get('is_url'):
-                            await add_to_queue(uid, c, item['message'], item['original_name'], is_url=True, url=item['url'], silent=True)
+                            await add_to_queue(uid, c, item['message'], item['original_name'], is_url=True, url=item['url'])
                         else:
-                            await add_to_queue(uid, c, item['message'], item['original_name'], is_url=False, silent=True)
+                            await add_to_queue(uid, c, item['message'], item['original_name'], is_url=False)
                         await asyncio.sleep(0.5)
                     
                     BATCH_DATA[uid] = []
@@ -2124,7 +2111,7 @@ async def download_and_process_generic(c, m, url, status_msg):
                 if not audio_tracks:
                     await status_msg.edit("No audio tracks found in this video or FFprobe failed. Uploading directly...")
                     asyncio.create_task(
-                        universal_sequential_upload_task(uid, c, m, tmp_in, renamed_file, status_msg.id, cancel_event, default_caption=safe_name)
+                        sequential_upload_task(uid, c, m, tmp_in, renamed_file, status_msg.id, cancel_event, default_caption=safe_name)
                     )
                     return
                 
@@ -2156,18 +2143,119 @@ async def download_and_process_generic(c, m, url, status_msg):
                 await status_msg.edit(f"Error analyzing audio tracks: {e}. Uploading directly...")
                 # Fallback to normal upload
                 asyncio.create_task(
-                    universal_sequential_upload_task(uid, c, m, tmp_in, renamed_file, status_msg.id, cancel_event, default_caption=safe_name)
+                    sequential_upload_task(uid, c, m, tmp_in, renamed_file, status_msg.id, cancel_event, default_caption=safe_name)
                 )
                 return
 
         # Normal upload for URL if MKV mode is off
         asyncio.create_task(
-            universal_sequential_upload_task(uid, c, m, tmp_in, renamed_file, status_msg.id, cancel_event, default_caption=safe_name)
+            sequential_upload_task(uid, c, m, tmp_in, renamed_file, status_msg.id, cancel_event, default_caption=safe_name)
         )
     except Exception as e:
         await status_msg.edit(f"Error: {e}")
     finally:
         pass # Task cleanup in upload
+
+async def handle_caption_only_upload(c: Client, m: Message):
+    """Wrapper for handling caption change from message object"""
+    file_info = m.video or m.document
+    await handle_caption_only_upload_with_file(c, m, file_info)
+
+async def handle_caption_only_upload_with_file(c: Client, m: Message, file_info):
+    uid = m.from_user.id
+    
+    use_orig_cap = (uid in USE_ORIGINAL_CAPTION_IN_MULTI_GROUP)
+    
+    if use_orig_cap:
+        caption_to_use = m.caption or ""
+        caption_entities_to_use = m.caption_entities
+    else:
+        caption_to_use = USER_CAPTIONS.get(uid)
+        if not caption_to_use:
+            await m.reply_text("Edit caption mode is ON but no caption is saved. Set a caption using /set_caption.")
+            return
+        caption_entities_to_use = None
+
+    cancel_event = asyncio.Event()
+    TASKS.setdefault(uid, []).append(cancel_event)
+    
+    try:
+        status_msg = await m.reply_text("Editing caption...", reply_markup=progress_keyboard())
+    except Exception:
+        status_msg = await m.reply_text("Editing caption...", reply_markup=progress_keyboard())
+    
+    try:
+        source_message = m
+        
+        if not file_info:
+            try:
+                await status_msg.edit("This is not a video or document file.")
+            except Exception:
+                await m.reply_text("This is not a video or document file.")
+            return
+        
+        if use_orig_cap:
+            final_caption = caption_to_use
+            final_entities = caption_entities_to_use
+        else:
+            final_caption = process_dynamic_caption(uid, caption_to_use)
+            final_entities = None
+        
+        if file_info.file_id:
+            try:
+                parse_mode_arg = None if use_orig_cap else ParseMode.MARKDOWN
+
+                if source_message.video or (file_info and getattr(file_info, 'duration', 0) > 0): # Treat as video
+                    await c.send_video(
+                        chat_id=m.chat.id,
+                        video=file_info.file_id,
+                        caption=final_caption,
+                        caption_entities=final_entities,
+                        thumb=file_info.thumbs[0].file_id if file_info.thumbs else None,
+                        duration=file_info.duration,
+                        width=file_info.width,       
+                        height=file_info.height,     
+                        supports_streaming=True,
+                        parse_mode=parse_mode_arg
+                    )
+                else:
+                    await c.send_document(
+                        chat_id=m.chat.id,
+                        document=file_info.file_id,
+                        file_name=file_info.file_name,
+                        caption=final_caption,
+                        caption_entities=final_entities,
+                        thumb=file_info.thumbs[0].file_id if file_info.thumbs else None,
+                        parse_mode=parse_mode_arg
+                    )
+                try:
+                    await status_msg.delete() # SILENT SUCCESS
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    await status_msg.edit(f"Caption edit error: {e}", reply_markup=None)
+                except Exception:
+                    await m.reply_text(f"Caption edit error: {e}", reply_markup=None)
+                return
+        else:
+            try:
+                await status_msg.edit("File ID not found.", reply_markup=None)
+            except Exception:
+                await m.reply_text("File ID not found.", reply_markup=None)
+            return
+
+    except Exception as e:
+        traceback.print_exc()
+        try:
+            await status_msg.edit(f"Caption edit error: {e}", reply_markup=None)
+        except Exception:
+            await m.reply_text(f"Caption edit error: {e}", reply_markup=None)
+    finally:
+        try:
+            TASKS[uid].remove(cancel_event)
+        except Exception:
+            pass
 
 @app.on_message(filters.private & (filters.video | filters.document))
 async def forwarded_file_or_direct_file(c: Client, m: Message):
@@ -2224,11 +2312,7 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
             return
         # ------------------------
 
-        file_info = m.video or m.document
-        if not file_info:
-            return
-        original_name = file_info.file_name if file_info.file_name else (f"video_{file_info.file_unique_id}.mp4" if m.video else f"file_{file_info.file_unique_id}")
-        await add_to_queue(uid, c, m, original_name, is_url=False, mode="edit_caption")
+        await handle_caption_only_upload(c, m)
         return
 
     # --- SEQUENTIAL QUEUE LOGIC START ---
@@ -2404,7 +2488,7 @@ async def sequential_remux_upload_task(uid, c, m, in_path, out_name, new_stream_
             all_messages_to_delete = messages_to_delete if messages_to_delete else []
             all_messages_to_delete.append(status_msg.id)
 
-            await universal_upload_processor(c, m, out_path, original_name=out_name, messages_to_delete=all_messages_to_delete, cancel_event_passed=cancel_event, passed_uid=uid, default_caption=default_caption, mode="normal") 
+            await process_file_and_upload(c, m, out_path, original_name=out_name, messages_to_delete=all_messages_to_delete, cancel_event_passed=cancel_event, passed_uid=uid, default_caption=default_caption) 
 
         except Exception as e:
             logger.error(f"Audio remux process error: {e}")
@@ -2465,7 +2549,7 @@ async def rename_cmd(c, m: Message):
         
         # Use sequential upload logic
         asyncio.create_task(
-            universal_sequential_upload_task(uid, c, m, tmp_out, new_name, status_msg.id, cancel_event, default_caption=new_name)
+            sequential_upload_task(uid, c, m, tmp_out, new_name, status_msg.id, cancel_event, default_caption=new_name)
         )
     except Exception as e:
         await m.reply_text(f"Rename error: {e}")
@@ -2607,7 +2691,7 @@ def process_dynamic_caption(uid, caption_template):
     return "**" + "\n".join(caption_template.splitlines()) + "**"
 
 
-async def universal_upload_processor(c: Client, m: Message, in_path: Path, original_name: str = None, messages_to_delete: list = None, cancel_event_passed: asyncio.Event = None, passed_uid: int = None, default_caption: str = None, mode: str = "normal"):
+async def process_file_and_upload(c: Client, m: Message, in_path: Path, original_name: str = None, messages_to_delete: list = None, cancel_event_passed: asyncio.Event = None, passed_uid: int = None, default_caption: str = None):
     uid = passed_uid if passed_uid else (m.from_user.id if m.from_user else m.chat.id)
     # Use passed cancel event or create new one (though logically should be passed)
     cancel_event = cancel_event_passed
@@ -2617,6 +2701,7 @@ async def universal_upload_processor(c: Client, m: Message, in_path: Path, origi
     
     upload_path = in_path
     temp_thumb_path = None
+    final_caption_template = USER_CAPTIONS.get(uid)
     status_msg = None 
     parts_to_upload = []
 
@@ -2725,23 +2810,12 @@ async def universal_upload_processor(c: Client, m: Message, in_path: Path, origi
         width_px = video_metadata.get('width', 0)
         height_px = video_metadata.get('height', 0)
         
-        # Caption Logic based on merged modes
-        caption_entities_to_use = None
-        parse_mode_arg = ParseMode.MARKDOWN
-        use_orig_cap = (uid in USE_ORIGINAL_CAPTION_IN_MULTI_GROUP)
-
-        if mode == "edit_caption" and use_orig_cap:
-            caption_to_use = m.caption or ""
-            caption_entities_to_use = m.caption_entities
-            parse_mode_arg = None
-        else:
-            caption_to_use = f"**{target_name}**" 
-            if default_caption:
-                caption_to_use = f"**{default_caption}**"
-                
-            final_caption_template = USER_CAPTIONS.get(uid)
-            if final_caption_template:
-                caption_to_use = process_dynamic_caption(uid, final_caption_template)
+        caption_to_use = f"**{target_name}**" # Default to Bold Filename
+        if default_caption:
+            caption_to_use = f"**{default_caption}**"
+            
+        if final_caption_template:
+            caption_to_use = process_dynamic_caption(uid, final_caption_template)
 
         parts_to_upload = [(upload_path, target_name, None, duration_sec)]
         
@@ -2802,7 +2876,7 @@ async def universal_upload_processor(c: Client, m: Message, in_path: Path, origi
             
             part_caption = caption_to_use
             if part_num is not None:
-                if parse_mode_arg == ParseMode.MARKDOWN and part_caption.endswith("**"):
+                if part_caption.endswith("**"):
                     part_caption = part_caption[:-2] + f"\n✔️ Part - {part_num:02d}**"
                 else:
                     part_caption += f"\n✔️ Part - {part_num:02d}"
@@ -2832,14 +2906,13 @@ async def universal_upload_processor(c: Client, m: Message, in_path: Path, origi
                             chat_id=m.chat.id,
                             video=str(current_upload_path),
                             caption=part_caption,
-                            caption_entities=caption_entities_to_use,
                             thumb=thumb_path,
                             duration=int(current_duration),
                             width=width_px,
                             height=height_px,
                             supports_streaming=True,
                             file_name=current_target_name, 
-                            parse_mode=parse_mode_arg,
+                            parse_mode=ParseMode.MARKDOWN,
                             progress=ul_prog
                         )
                     elif is_audio_file:
@@ -2848,8 +2921,7 @@ async def universal_upload_processor(c: Client, m: Message, in_path: Path, origi
                             audio=str(current_upload_path),
                             file_name=current_target_name,
                             caption=part_caption,
-                            caption_entities=caption_entities_to_use,
-                            parse_mode=parse_mode_arg,
+                            parse_mode=ParseMode.MARKDOWN,
                             progress=ul_prog
                         )
                     else:
@@ -2858,8 +2930,7 @@ async def universal_upload_processor(c: Client, m: Message, in_path: Path, origi
                             document=str(current_upload_path),
                             file_name=current_target_name,
                             caption=part_caption,
-                            caption_entities=caption_entities_to_use,
-                            parse_mode=parse_mode_arg,
+                            parse_mode=ParseMode.MARKDOWN,
                             progress=ul_prog
                         )
                     
