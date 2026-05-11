@@ -1566,16 +1566,20 @@ async def show_files_for_upload(c, chat_id, uid, files, status_msg=None):
         await asyncio.sleep(0.3)
 
 async def process_zip_uploads(c, message, uid, final_order):
-    state = ZIP_NAV_STATE[uid]
+    state = ZIP_NAV_STATE.get(uid)
+    if not state:
+        return
+    state['state'] = 'uploading'
     files = state['files_to_upload']
     root_dir = state['root_dir']
     garbage_msgs = state.get('garbage_msgs', [])
     
-    ZIP_NAV_STATE.pop(uid)
-    
     upload_status = await c.send_message(message.chat.id, f"Starting upload of {len(final_order)} files in specified order...")
     
     for idx in final_order:
+        if uid not in ZIP_NAV_STATE or ZIP_NAV_STATE[uid].get('state') != 'uploading':
+            break # Cancelled or cleared during upload
+            
         fpath = files[idx - 1]
         if not fpath.exists(): continue
         original_name = fpath.name
@@ -1587,16 +1591,20 @@ async def process_zip_uploads(c, message, uid, final_order):
         except Exception as e:
             logger.error(f"ZIP item upload error: {e}")
     
+    shutil.rmtree(root_dir, ignore_errors=True)
+    
     try: await c.delete_messages(message.chat.id, garbage_msgs)
     except: pass
     
-    complete_msg = await c.send_message(message.chat.id, "All ZIP files queued/uploaded successfully.")
-    async def auto_delete(msg_obj):
-        await asyncio.sleep(5)
-        try: await msg_obj.delete()
-        except: pass
-    asyncio.ensure_future(auto_delete(complete_msg))
-    await check_and_show_next_zip(c, message.chat.id, uid)
+    if uid in ZIP_NAV_STATE and ZIP_NAV_STATE[uid].get('state') == 'uploading':
+        ZIP_NAV_STATE.pop(uid, None)
+        complete_msg = await c.send_message(message.chat.id, "All ZIP files queued/uploaded successfully.")
+        async def auto_delete(msg_obj):
+            await asyncio.sleep(5)
+            try: await msg_obj.delete()
+            except: pass
+        asyncio.ensure_future(auto_delete(complete_msg))
+        await check_and_show_next_zip(c, message.chat.id, uid)
 
 @app.on_callback_query(filters.regex("zip_upload_all"))
 async def zip_upload_all_cb(c, cb):
@@ -1616,7 +1624,7 @@ async def zip_cancel_cb(c, cb):
         msgs = ZIP_NAV_STATE[uid].get('garbage_msgs', [])
         try: await c.delete_messages(cb.message.chat.id, msgs)
         except: pass
-        ZIP_NAV_STATE.pop(uid)
+        ZIP_NAV_STATE.pop(uid, None)
     await cb.message.edit_text("ZIP session cleared. Files are kept and can be accessed via `path`.")
     await check_and_show_next_zip(c, cb.message.chat.id, uid)
 
