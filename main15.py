@@ -90,6 +90,8 @@ MULTI_GROUP_DONE_MSG = {}
 ZIP_DOWNLOAD_MODE = set()
 ZIP_NAV_STATE = {}
 ZIP_READY_LIST = {} # New: uid -> list of extracted zip info for serial display
+ZIP_DL_QUEUES = {}  # New: queue for serial zip downloading
+ZIP_DL_WORKERS = {} # New: worker for serial zip downloading
 # ------------------------------------------------
 
 # --- NEW STATE FOR PATH NAVIGATOR ---
@@ -1043,9 +1045,11 @@ async def zip_file_download_cmd(c, m: Message):
     if uid in ZIP_DOWNLOAD_MODE:
         ZIP_DOWNLOAD_MODE.discard(uid)
         ZIP_READY_LIST.pop(uid, None)
-        if uid in ZIP_NAV_STATE:
-            shutil.rmtree(ZIP_NAV_STATE[uid]['root_dir'], ignore_errors=True)
-            ZIP_NAV_STATE.pop(uid)
+        ZIP_NAV_STATE.pop(uid, None)
+        if uid in ZIP_DL_QUEUES:
+            while not ZIP_DL_QUEUES[uid].empty():
+                try: ZIP_DL_QUEUES[uid].get_nowait(); ZIP_DL_QUEUES[uid].task_done()
+                except: pass
         await m.reply_text("ZIP File Download Mode **OFF**.")
     else:
         ZIP_DOWNLOAD_MODE.add(uid)
@@ -1506,6 +1510,18 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
         await cb.answer(message, show_alert=True)
 
 # --- ZIP AUTO EXTRACT & UPLOAD LOGIC ---
+async def zip_download_worker(uid, c):
+    while uid in ZIP_DL_QUEUES and not ZIP_DL_QUEUES[uid].empty():
+        task_data = await ZIP_DL_QUEUES[uid].get()
+        try:
+            await execute_zip_download_and_extract(c, task_data['message'], task_data['url'])
+        except Exception as e:
+            logger.error(f"ZIP Worker Error: {e}")
+        finally:
+            ZIP_DL_QUEUES[uid].task_done()
+    if uid in ZIP_DL_WORKERS:
+        del ZIP_DL_WORKERS[uid]
+
 async def check_and_show_next_zip(c, chat_id, uid):
     if uid not in ZIP_NAV_STATE and ZIP_READY_LIST.get(uid):
         next_zip = ZIP_READY_LIST[uid].pop(0)
@@ -1571,8 +1587,6 @@ async def process_zip_uploads(c, message, uid, final_order):
         except Exception as e:
             logger.error(f"ZIP item upload error: {e}")
     
-    shutil.rmtree(root_dir, ignore_errors=True)
-    
     try: await c.delete_messages(message.chat.id, garbage_msgs)
     except: pass
     
@@ -1599,17 +1613,16 @@ async def zip_upload_all_cb(c, cb):
 async def zip_cancel_cb(c, cb):
     uid = cb.from_user.id
     if uid in ZIP_NAV_STATE:
-        shutil.rmtree(ZIP_NAV_STATE[uid]['root_dir'], ignore_errors=True)
         msgs = ZIP_NAV_STATE[uid].get('garbage_msgs', [])
         try: await c.delete_messages(cb.message.chat.id, msgs)
         except: pass
         ZIP_NAV_STATE.pop(uid)
-    await cb.message.edit_text("ZIP session cleared.")
+    await cb.message.edit_text("ZIP session cleared. Files are kept and can be accessed via `path`.")
     await check_and_show_next_zip(c, cb.message.chat.id, uid)
 
-async def handle_zip_download_mode(c, m, url):
+async def execute_zip_download_and_extract(c, m, url):
     uid = m.from_user.id
-    status_msg = await m.reply_text("Downloading ZIP file in queue...", reply_markup=progress_keyboard())
+    status_msg = await c.send_message(m.chat.id, "Downloading ZIP file in queue...", reply_markup=progress_keyboard())
     tmp_in = TMP / f"zip_dl_{uid}_{int(time.time())}.zip"
     cancel_event = asyncio.Event()
     TASKS.setdefault(uid, []).append(cancel_event)
@@ -1710,101 +1723,45 @@ async def send_path_ui(c, chat_id, uid, msg_id=None):
     
     NAV_PATHS[uid]['items'] = items
     
-    keyboard = []
-    if current != TMP and current.is_relative_to(TMP):
-        keyboard.append([InlineKeyboardButton("⬆️ Up", callback_data="path_up")])
-        
-    for i, item in enumerate(items[:50]):
-        name = item.name[:40] + "..." if len(item.name) > 40 else item.name
+    text_lines = [f"**File Manager**\n**Current Path:** `{current}`\n"]
+    text_lines.append("**0.** ⬆️ Up")
+    
+    for i, item in enumerate(items, 1):
+        name = item.name
         if item.is_dir():
-            keyboard.append([InlineKeyboardButton(f"📁 {name}", callback_data=f"path_cd_{i}")])
+            text_lines.append(f"**{i}.** 📁 `{name}`")
         else:
-            keyboard.append([InlineKeyboardButton(f"📄 {name}", callback_data=f"path_file_{i}")])
+            text_lines.append(f"**{i}.** 📄 `{name}`")
             
-    keyboard.append([InlineKeyboardButton("❌ Close", callback_data="path_close")])
+    text_lines.append("\n**Options:**")
+    text_lines.append("‣ Send `0` to go up.")
+    text_lines.append("‣ Send a number to open a folder (e.g., `1`).")
+    text_lines.append("‣ Send numbers to select files for upload (e.g., `2,3,5-8`).")
+    text_lines.append("‣ Send `close` to exit manager.")
     
-    text = f"**File Manager**\nCurrent Path: `{current}`"
-    markup = InlineKeyboardMarkup(keyboard)
+    full_text = "\n".join(text_lines)
     
-    if msg_id:
-        try: await c.edit_message_text(chat_id, msg_id, text, reply_markup=markup)
-        except: pass
-    else:
-        await c.send_message(chat_id, text, reply_markup=markup)
+    chunks = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
+    for idx, chunk in enumerate(chunks):
+        if msg_id and idx == 0:
+            try: await c.edit_message_text(chat_id, msg_id, chunk)
+            except: await c.send_message(chat_id, chunk)
+        else:
+            await c.send_message(chat_id, chunk)
 
-@app.on_callback_query(filters.regex(r"^path_"))
-async def path_callback(c: Client, cb: CallbackQuery):
-    uid = cb.from_user.id
-    data = cb.data
-    
-    if uid not in NAV_PATHS:
-        await cb.answer("Session expired.", show_alert=True)
-        return
-        
-    if data == "path_close":
-        NAV_PATHS.pop(uid, None)
-        await cb.message.delete()
-        return
-        
-    if data == "path_up":
-        current = NAV_PATHS[uid]['current']
-        if current != TMP:
-            NAV_PATHS[uid]['current'] = current.parent
-        await send_path_ui(c, cb.message.chat.id, uid, cb.message.id)
-        return
-        
-    if data.startswith("path_cd_"):
-        idx = int(data.split("_")[-1])
-        try:
-            selected = NAV_PATHS[uid]['items'][idx]
-            if selected.is_dir():
-                NAV_PATHS[uid]['current'] = selected
-                await send_path_ui(c, cb.message.chat.id, uid, cb.message.id)
-        except:
-            await cb.answer("Folder not found.", show_alert=True)
-        return
-        
-    if data.startswith("path_file_"):
-        idx = int(data.split("_")[-1])
-        try:
-            selected = NAV_PATHS[uid]['items'][idx]
-            if selected.is_file():
-                NAV_PATHS[uid]['selected_file'] = selected
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("Upload as Video 🎬", callback_data="path_upld_vid")],
-                    [InlineKeyboardButton("Upload as Document 📄", callback_data="path_upld_doc")],
-                    [InlineKeyboardButton("🔙 Back", callback_data="path_back")]
-                ])
-                await cb.message.edit_text(f"Selected File:\n`{selected.name}`\n\nChoose upload method:", reply_markup=keyboard)
-        except:
-            await cb.answer("File not found.", show_alert=True)
-        return
-        
-    if data == "path_back":
-        await send_path_ui(c, cb.message.chat.id, uid, cb.message.id)
-        return
-        
-    if data.startswith("path_upld_"):
-        file_path = NAV_PATHS[uid].get('selected_file')
-        if not file_path or not file_path.exists():
-            await cb.answer("File does not exist anymore.", show_alert=True)
-            return
-        
-        original_name = file_path.name
+async def process_path_uploads(uid, c, m, files_to_upload):
+    for fpath in files_to_upload:
+        original_name = fpath.name
         renamed_file = generate_new_filename(original_name)
-        
         cancel_event = asyncio.Event()
         TASKS.setdefault(uid, []).append(cancel_event)
-        
-        status_msg = await c.send_message(cb.message.chat.id, f"Uploading {original_name}...", reply_markup=progress_keyboard())
-        USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
-        
-        asyncio.create_task(
-            sequential_upload_task(uid, c, cb.message, file_path, renamed_file, status_msg.id, cancel_event, default_caption=original_name)
-        )
-        
-        await cb.answer("Upload queued.")
-        await send_path_ui(c, cb.message.chat.id, uid, cb.message.id)
+        try:
+            status_msg = await c.send_message(m.chat.id, f"Uploading `{original_name}`...", reply_markup=progress_keyboard())
+            USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
+            await sequential_upload_task(uid, c, m, fpath, renamed_file, status_msg.id, cancel_event, default_caption=original_name)
+        except Exception as e:
+            logger.error(f"Path item upload error: {e}")
+    await c.send_message(m.chat.id, "Path selected files queued/uploaded successfully.")
 
 # ----------------------------------------
 
@@ -1826,11 +1783,13 @@ async def text_handler(c, m: Message):
     # --- NEW: Handle Clear for ZIP ---
     if text_lower == "clear":
         cleared = False
-        ZIP_READY_LIST.pop(uid, None) # Clear queued zips
+        ZIP_READY_LIST.pop(uid, None)
+        if uid in ZIP_DL_QUEUES:
+            while not ZIP_DL_QUEUES[uid].empty():
+                try: ZIP_DL_QUEUES[uid].get_nowait(); ZIP_DL_QUEUES[uid].task_done()
+                except: pass
+            cleared = True
         if uid in ZIP_NAV_STATE:
-            try:
-                shutil.rmtree(ZIP_NAV_STATE[uid]['root_dir'], ignore_errors=True)
-            except: pass
             ZIP_NAV_STATE.pop(uid)
             cleared = True
         if cleared:
@@ -1873,6 +1832,58 @@ async def text_handler(c, m: Message):
             return
     # ---------------------------------
     
+    # --- NEW: Handle Path Selection ---
+    if uid in NAV_PATHS:
+        if text_lower == 'close':
+            NAV_PATHS.pop(uid)
+            await m.reply_text("File Manager closed.")
+            return
+        if text_lower == '0':
+            current = NAV_PATHS[uid]['current']
+            if current != TMP:
+                NAV_PATHS[uid]['current'] = current.parent
+            await send_path_ui(c, m.chat.id, uid)
+            return
+            
+        selected_indices = []
+        try:
+            parts = text.split(',')
+            for p in parts:
+                p = p.strip()
+                if not p: continue
+                if '-' in p:
+                    start, end = map(int, p.split('-'))
+                    for i in range(start, end + 1):
+                        if i not in selected_indices: selected_indices.append(i)
+                else:
+                    num = int(p)
+                    if num not in selected_indices: selected_indices.append(num)
+        except Exception:
+            pass
+            
+        if selected_indices:
+            items = NAV_PATHS[uid].get('items', [])
+            if len(selected_indices) == 1 and 1 <= selected_indices[0] <= len(items):
+                idx = selected_indices[0] - 1
+                selected_item = items[idx]
+                if selected_item.is_dir():
+                    NAV_PATHS[uid]['current'] = selected_item
+                    await send_path_ui(c, m.chat.id, uid)
+                    return
+                    
+            files_to_upload = []
+            for i in selected_indices:
+                if 1 <= i <= len(items):
+                    item = items[i-1]
+                    if item.is_file():
+                        files_to_upload.append(item)
+            
+            if files_to_upload:
+                await m.reply_text(f"Starting upload for {len(files_to_upload)} selected files from path...")
+                asyncio.create_task(process_path_uploads(uid, c, m, files_to_upload))
+                return
+    # ---------------------------------
+
     # --- PROXY AWAITING LOGIC ---
     if uid in AWAITING_PROXY_COUNTRY:
         AWAITING_PROXY_COUNTRY.discard(uid)
@@ -2208,7 +2219,12 @@ async def text_handler(c, m: Message):
     if text.startswith("http://") or text.startswith("https://"):
         url = text
         if uid in ZIP_DOWNLOAD_MODE:
-            asyncio.create_task(handle_zip_download_mode(c, m, url))
+            if uid not in ZIP_DL_QUEUES:
+                ZIP_DL_QUEUES[uid] = asyncio.Queue()
+            await ZIP_DL_QUEUES[uid].put({'url': url, 'message': m})
+            await m.reply_text(f"ZIP link added to queue. Position: {ZIP_DL_QUEUES[uid].qsize()}")
+            if uid not in ZIP_DL_WORKERS or ZIP_DL_WORKERS[uid].done():
+                ZIP_DL_WORKERS[uid] = asyncio.create_task(zip_download_worker(uid, c))
             return
             
         if uid in YT_DLP_MODE or is_youtube_url(url):
@@ -2243,7 +2259,12 @@ async def upload_url_cmd(c, m: Message):
     uid = m.from_user.id
     
     if uid in ZIP_DOWNLOAD_MODE:
-        asyncio.create_task(handle_zip_download_mode(c, m, url))
+        if uid not in ZIP_DL_QUEUES:
+            ZIP_DL_QUEUES[uid] = asyncio.Queue()
+        await ZIP_DL_QUEUES[uid].put({'url': url, 'message': m})
+        await m.reply_text(f"ZIP link added to queue. Position: {ZIP_DL_QUEUES[uid].qsize()}")
+        if uid not in ZIP_DL_WORKERS or ZIP_DL_WORKERS[uid].done():
+            ZIP_DL_WORKERS[uid] = asyncio.create_task(zip_download_worker(uid, c))
         return
         
     if uid in YT_DLP_MODE or is_youtube_url(url):
@@ -2828,6 +2849,12 @@ async def cancel_single_cb(c, cb):
 async def cancel_all_cb(c, cb):
     uid = cb.from_user.id
     count = 0
+    
+    if uid in ZIP_DL_QUEUES:
+        while not ZIP_DL_QUEUES[uid].empty():
+            try: ZIP_DL_QUEUES[uid].get_nowait(); ZIP_DL_QUEUES[uid].task_done()
+            except: pass
+            
     if uid in USER_TASK_EVENTS:
         for ev in USER_TASK_EVENTS[uid].values():
             ev.set()
@@ -2846,7 +2873,7 @@ async def cancel_all_cb(c, cb):
             try: Path(file_data['path']).unlink(missing_ok=True)
             except: pass
             
-    await cb.answer(f"All {count} tasks cancelled.", show_alert=True)
+    await cb.answer(f"All {count} tasks and queues cancelled.", show_alert=True)
     try: await cb.message.delete()
     except: pass
 
