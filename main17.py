@@ -54,6 +54,11 @@ USER_THUMB_TIME = {}
 HIDE_PROGRESS_BAR = set()
 USER_PROGRESS_INTERVAL = {} # New: custom interval for progress bar
 
+# --- STATE FOR UPLOAD PAUSE & CONTINUE ---
+UPLOAD_HALTED = set()
+STUCK_UPLOADS = {}
+# -----------------------------------------
+
 # --- STATE FOR AUDIO CHANGE ---
 MKV_AUDIO_CHANGE_MODE = set()
 PENDING_AUDIO_ORDERS = {} 
@@ -615,6 +620,7 @@ async def set_bot_commands():
         BotCommand("proxy", "Toggle and setup Tor Proxy (admin only)"),
         BotCommand("create_post", "Create new post (admin only)"), 
         BotCommand("mode_check", "Check current mode status (admin only)"), 
+        BotCommand("continue", "Manage paused uploads due to failure (admin only)"),
         BotCommand("broadcast", "Broadcast (admin only)"),
         BotCommand("progress_bar", "Toggle progress bar ON/OFF or Custom Interval (admin only)"),
         BotCommand("help", "Help")
@@ -633,9 +639,31 @@ async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, s
         if cancel_event.is_set():
             if tmp_path.exists(): tmp_path.unlink()
             return
+            
+        if uid in UPLOAD_HALTED:
+            STUCK_UPLOADS.setdefault(uid, []).append({
+                'client': client,
+                'message': message,
+                'tmp_path': tmp_path,
+                'renamed_file': renamed_file,
+                'status_msg_id': status_msg_id,
+                'cancel_event': cancel_event,
+                'default_caption': default_caption
+            })
+            try:
+                await client.send_message(message.chat.id, f"⏸ Upload paused to maintain serial. `{renamed_file}` is waiting in /continue.")
+            except: pass
+            return
+            
         # Now we possess the upload lock. Video 1 will hold this until done.
         # Video 2 (already downloaded) will wait here.
-        await process_file_and_upload(client, message, tmp_path, original_name=renamed_file, messages_to_delete=[status_msg_id] if status_msg_id else [], cancel_event_passed=cancel_event, passed_uid=uid, default_caption=default_caption)
+        success = await process_file_and_upload(client, message, tmp_path, original_name=renamed_file, messages_to_delete=[status_msg_id] if status_msg_id else [], cancel_event_passed=cancel_event, passed_uid=uid, default_caption=default_caption)
+        
+        if not success:
+            UPLOAD_HALTED.add(uid)
+            try:
+                await client.send_message(message.chat.id, f"❌ Upload failed or cancelled for `{renamed_file}`. Subsequent uploads are paused. Check /continue.")
+            except: pass
 
 # --- QUEUE WORKER ---
 async def process_queue_handler(uid, client):
@@ -735,6 +763,9 @@ async def process_queue_handler(uid, client):
                         except: pass
                     if cancel_event in TASKS.get(uid, []):
                         TASKS[uid].remove(cancel_event)
+                    UPLOAD_HALTED.add(uid)
+                    try: await client.send_message(m.chat.id, f"❌ Download failed for link:\n{url}\n\nUpload queue paused. Check /continue")
+                    except: pass
                         
             elif is_url:
                 url = task_data.get('url')
@@ -788,6 +819,9 @@ async def process_queue_handler(uid, client):
                         await m.reply_text(f"Queue Error for `{original_name}`: {e}")
                     if tmp_path.exists():
                         tmp_path.unlink()
+                    UPLOAD_HALTED.add(uid)
+                    try: await m.reply_text(f"❌ Download failed for this file. Upload queue paused. Check /continue", quote=True)
+                    except: pass
                 finally:
                     pass
 
@@ -1026,6 +1060,7 @@ async def start_handler(c, m: Message):
         "/proxy - Toggle and setup Tor Proxy (admin only)\n"
         "/create_post - Create new post (admin only)\n" 
         "/mode_check - Check current mode status (admin only)\n" 
+        "/continue - Manage paused uploads due to failure (admin only)\n"
         "/progress_bar - Toggle progress bar ON/OFF or Custom Interval (admin only)\n"
         "/broadcast <text> - Broadcast (admin only)\n"
         "/help - Help"
@@ -1035,6 +1070,78 @@ async def start_handler(c, m: Message):
 @app.on_message(filters.command("help") & filters.private)
 async def help_handler(c, m):
     await start_handler(c, m)
+
+@app.on_message(filters.command("continue") & filters.private)
+async def continue_cmd(c, m: Message):
+    uid = m.from_user.id
+    if not is_admin(uid):
+        return
+        
+    stuck_count = len(STUCK_UPLOADS.get(uid, []))
+    
+    if uid not in UPLOAD_HALTED and stuck_count == 0:
+        await m.reply_text("Your upload queue is not paused and no videos are stuck.")
+        return
+        
+    text = f"⏸ **Upload Queue Paused**\n\n"
+    text += f"You have **{stuck_count}** video(s)/file(s) downloaded and waiting to be uploaded.\n\n"
+    text += "Choose an action below:"
+    
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Upload All 🚀", callback_data="continue_upload")],
+        [InlineKeyboardButton("Delete All 🗑️", callback_data="continue_delete")]
+    ])
+    
+    await m.reply_text(text, reply_markup=markup)
+
+@app.on_callback_query(filters.regex("^continue_upload$"))
+async def continue_upload_cb(c, cb):
+    uid = cb.from_user.id
+    if not is_admin(uid):
+        return
+    if uid in UPLOAD_HALTED:
+        UPLOAD_HALTED.remove(uid)
+    
+    items = STUCK_UPLOADS.pop(uid, [])
+    await cb.message.edit_text(f"Resuming upload for {len(items)} items in serial order...")
+    
+    for item in items:
+        if 'remux_data' in item:
+            asyncio.create_task(
+                sequential_remux_upload_task(
+                    uid, item['client'], item['message'], item['tmp_path'],
+                    item['remux_data']['out_name'], item['remux_data']['new_stream_map'],
+                    item['remux_data']['messages_to_delete'], item['cancel_event'],
+                    item['remux_data']['default_caption']
+                )
+            )
+        else:
+            asyncio.create_task(
+                sequential_upload_task(
+                    uid, item['client'], item['message'], item['tmp_path'], 
+                    item['renamed_file'], item['status_msg_id'], 
+                    item['cancel_event'], item['default_caption']
+                )
+            )
+
+@app.on_callback_query(filters.regex("^continue_delete$"))
+async def continue_delete_cb(c, cb):
+    uid = cb.from_user.id
+    if not is_admin(uid):
+        return
+    if uid in UPLOAD_HALTED:
+        UPLOAD_HALTED.remove(uid)
+        
+    items = STUCK_UPLOADS.pop(uid, [])
+    count = 0
+    for item in items:
+        try:
+            if item['tmp_path'].exists():
+                item['tmp_path'].unlink()
+                count += 1
+        except:
+            pass
+    await cb.message.edit_text(f"Deleted {count} stuck files from storage. Queue unpaused.")
 
 @app.on_message(filters.command("zip_file_download") & filters.private)
 async def zip_file_download_cmd(c, m: Message):
@@ -1656,6 +1763,20 @@ async def execute_zip_download_and_extract(c, m, url):
         if not ok:
             await status_msg.edit(f"Download Failed: {err}")
             if tmp_in.exists(): tmp_in.unlink()
+            UPLOAD_HALTED.add(uid)
+            try: await c.send_message(m.chat.id, f"❌ Download failed for ZIP link:\n{url}\n\nUpload queue paused. Check /continue")
+            except: pass
+            return
+            
+        if not zipfile.is_zipfile(tmp_in):
+            await status_msg.edit("File is not a ZIP. Uploading directly...", reply_markup=progress_keyboard())
+            
+            original_name = url.split("/")[-1].split("?")[0] or f"file_{int(time.time())}"
+            renamed_file = generate_new_filename(original_name)
+            
+            asyncio.create_task(
+                sequential_upload_task(uid, c, m, tmp_in, renamed_file, status_msg.id, cancel_event, default_caption=original_name)
+            )
             return
             
         await status_msg.edit("Extracting ZIP file...", reply_markup=progress_keyboard())
@@ -2353,6 +2474,9 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
             if not fid:
                 await status_msg.edit("Google Drive ID not found.")
                 if cancel_event in TASKS.get(uid, []): TASKS[uid].remove(cancel_event)
+                UPLOAD_HALTED.add(uid)
+                try: await c.send_message(m.chat.id, f"❌ Download failed for link:\n{url}\n\nUpload queue paused. Check /continue")
+                except: pass
                 return
             ok, err = await download_drive_file(fid, tmp_in, status_msg, cancel_event=cancel_event)
         else:
@@ -2362,6 +2486,9 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
             await status_msg.edit(f"Download Failed: {err}")
             if tmp_in.exists(): tmp_in.unlink()
             if cancel_event in TASKS.get(uid, []): TASKS[uid].remove(cancel_event)
+            UPLOAD_HALTED.add(uid)
+            try: await c.send_message(m.chat.id, f"❌ Download failed for link:\n{url}\n\nUpload queue paused. Check /continue")
+            except: pass
             return
 
         await status_msg.edit("Download complete. Uploading...", reply_markup=None)
@@ -2715,6 +2842,22 @@ async def sequential_remux_upload_task(uid, c, m, in_path, out_name, new_stream_
         if cancel_event.is_set():
              if in_path.exists(): in_path.unlink()
              return
+             
+        if uid in UPLOAD_HALTED:
+            STUCK_UPLOADS.setdefault(uid, []).append({
+                'client': c,
+                'message': m,
+                'tmp_path': in_path,
+                'remux_data': {
+                    'out_name': out_name,
+                    'new_stream_map': new_stream_map,
+                    'messages_to_delete': messages_to_delete,
+                    'default_caption': default_caption
+                }
+            })
+            try: await c.send_message(m.chat.id, f"⏸ Upload paused to maintain serial. Audio change for `{out_name}` is waiting in /continue.")
+            except: pass
+            return
 
         out_path = TMP / f"remux_{uid}_{int(datetime.now().timestamp())}_{out_name}"
         
@@ -2769,7 +2912,12 @@ async def sequential_remux_upload_task(uid, c, m, in_path, out_name, new_stream_
             all_messages_to_delete = messages_to_delete if messages_to_delete else []
             all_messages_to_delete.append(status_msg.id)
 
-            await process_file_and_upload(c, m, out_path, original_name=out_name, messages_to_delete=all_messages_to_delete, cancel_event_passed=cancel_event, passed_uid=uid, default_caption=default_caption) 
+            success = await process_file_and_upload(c, m, out_path, original_name=out_name, messages_to_delete=all_messages_to_delete, cancel_event_passed=cancel_event, passed_uid=uid, default_caption=default_caption) 
+            
+            if not success:
+                UPLOAD_HALTED.add(uid)
+                try: await c.send_message(m.chat.id, f"❌ Upload failed for `{out_name}`. Subsequent uploads are paused. Check /continue.")
+                except: pass
 
         except Exception as e:
             logger.error(f"Audio remux process error: {e}")
@@ -2836,6 +2984,9 @@ async def rename_cmd(c, m: Message):
         )
     except Exception as e:
         await m.reply_text(f"Rename error: {e}")
+        UPLOAD_HALTED.add(uid)
+        try: await m.reply_text(f"❌ Rename download failed for `{new_name}`. Upload queue paused. Check /continue", quote=True)
+        except: pass
     finally:
         # Cancel event cleanup handled in upload task
         pass
@@ -3308,6 +3459,7 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
                     await c.delete_messages(chat_id=m.chat.id, message_ids=messages_to_delete)
                 except Exception:
                     pass
+            return True
         
         if last_exc:
             msg_text = "Operation cancelled by user." if "Cancelled" in str(last_exc) else f"Upload failed: {last_exc}"
@@ -3315,6 +3467,7 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
                 await status_msg.edit(msg_text, reply_markup=None)
             else:
                 await m.reply_text(msg_text, reply_markup=None)
+            return False
 
     except Exception as e:
         msg_text = "Operation cancelled by user." if "Cancelled" in str(e) else f"Upload error: {e}"
@@ -3322,6 +3475,7 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
             await status_msg.edit(msg_text)
         else:
             await m.reply_text(msg_text)
+        return False
     finally:
         try:
             if upload_path != in_path and upload_path.exists():
