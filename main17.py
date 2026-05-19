@@ -27,6 +27,16 @@ import zipfile
 import shutil
 import cgi
 
+# For extended archive support (if available in environment)
+try:
+    import rarfile
+except ImportError:
+    pass
+try:
+    import py7zr
+except ImportError:
+    pass
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -55,6 +65,11 @@ USER_THUMB_TIME = {}
 HIDE_PROGRESS_BAR = set()
 USER_PROGRESS_INTERVAL = {} # New: custom interval for progress bar
 
+# --- NEW STATE FOR PAUSE/CONTINUE & AUTO ZIP ---
+USER_QUEUE_PAUSED = set()
+AUTO_UPLOAD_ALL = set()
+# -----------------------------------------------
+
 # --- STATE FOR AUDIO CHANGE ---
 MKV_AUDIO_CHANGE_MODE = set()
 PENDING_AUDIO_ORDERS = {} 
@@ -81,11 +96,6 @@ USER_QUEUES = {}
 USER_WORKERS = {}          
 USER_UPLOAD_LOCKS = {}     
 
-# --- NEW STATE FOR QUEUE HALT (ERROR HANDLING) ---
-QUEUE_PAUSED = {}
-QUEUE_PAUSE_EVENTS = {}
-CURRENT_ERROR_ITEM = {}
-
 # --- NEW STATE FOR MULTI GROUP BATCH & CAPTION OVERRIDE & ZIP ---
 MULTI_GROUP_BATCH_MODE = set()
 MULTI_GROUP_DATA = {}
@@ -94,7 +104,6 @@ MULTI_GROUP_DONE_MSG = {}
 
 # --- NEW ZIP DOWNLOAD MODE STATE ---
 ZIP_DOWNLOAD_MODE = set()
-ZIP_AUTO_UPLOAD_ALL = set() # Auto upload all trigger
 ZIP_NAV_STATE = {}
 ZIP_READY_LIST = {} # New: uid -> list of extracted zip info for serial display
 ZIP_DL_QUEUES = {}  # New: queue for serial zip downloading
@@ -246,17 +255,12 @@ def format_duration(seconds):
     if m > 0: return f"{m}m {s}s"
     return f"{s}s"
 
-def progress_keyboard(cb_data_suffix="single"):
+def progress_keyboard():
+    # Included Refresh button as per requirement
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Refresh 🔄", callback_data=f"refresh_{cb_data_suffix}"),
-         InlineKeyboardButton("Cancel ❌", callback_data=f"cancel_{cb_data_suffix}")],
-        [InlineKeyboardButton("All Cancel ❌", callback_data="cancel_all")]
-    ])
-
-def error_halt_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Continue ▶️", callback_data="queue_continue"),
-         InlineKeyboardButton("Delete 🗑️", callback_data="queue_delete")]
+        [InlineKeyboardButton("Refresh 🔄", callback_data="refresh_btn")],
+        [InlineKeyboardButton("Cancel ❌", callback_data="cancel_single"),
+         InlineKeyboardButton("All Cancel ❌", callback_data="cancel_all")]
     ])
 
 def delete_caption_keyboard():
@@ -308,7 +312,6 @@ def get_audio_tracks_ffprobe(file_path: Path) -> list:
         logger.error(f"FFprobe error: {e}")
         return []
 
-# --- NEW HELPER: Check if file has OPUS audio ---
 def has_opus_audio(file_path: Path) -> bool:
     try:
         cmd = [
@@ -324,7 +327,6 @@ def has_opus_audio(file_path: Path) -> bool:
     except Exception as e:
         logger.error(f"Error checking OPUS audio: {e}")
         return False
-# ------------------------------------------------
 
 def format_size(bytes_size):
     if not bytes_size or bytes_size == 0:
@@ -335,14 +337,13 @@ def format_size(bytes_size):
     s = round(bytes_size / p, 2)
     return "%s %s" % (s, size_name[i])
 
-# --- PROGRESS BAR HELPER ---
 PROGRESS_CACHE = {}
 
 def make_progress_bar(percent):
     filled = int(percent / 5)
     return "█" * filled + "░" * (20 - filled)
 
-async def progress_callback(current, total, action, message, start_time, is_time_based=False, original_name=""):
+async def progress_callback(current, total, action, message, start_time, is_time_based=False, original_name=None):
     if message.chat.id in HIDE_PROGRESS_BAR:
         return
     if total == 0: return
@@ -372,10 +373,12 @@ async def progress_callback(current, total, action, message, start_time, is_time
         size_str = f"{format_size(current)} / {format_size(total)}"
         speed_str = f"{format_size(speed)}/s"
     
-    file_name_display = f"**File:** `{original_name}`\n" if original_name else ""
+    # Original Name added to progress bar
+    orig_name_str = f"**File:** `{original_name}`\n" if original_name else ""
+    
     text = (
         f"**{action}**\n"
-        f"{file_name_display}"
+        f"{orig_name_str}"
         f"`[{make_progress_bar(percent)}]` **{percent:.2f}%**\n"
         f"**Processed:** `{size_str}`\n"
         f"**Speed:** `{speed_str}`\n"
@@ -385,9 +388,7 @@ async def progress_callback(current, total, action, message, start_time, is_time
         await message.edit_text(text, reply_markup=progress_keyboard())
     except Exception:
         pass
-# ---------------------------
 
-# --- TOR PROXY SETUP HELPER ---
 def setup_tor(country_code):
     try:
         torrc_content = f"SocksPort 9050\nHTTPTunnelPort 8118\nExitNodes {{{country_code}}}\nStrictNodes 1\n"
@@ -397,7 +398,6 @@ def setup_tor(country_code):
         subprocess.Popen(["tor", "-f", "torrc_bot"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
         logger.error(f"Tor setup error: {e}")
-# ------------------------------
 
 async def update_batch_status(c, m, uid, status_text, reply_markup=None):
     if uid in BATCH_STATUS_MSG:
@@ -423,7 +423,7 @@ async def update_batch_status(c, m, uid, status_text, reply_markup=None):
             except: pass
         asyncio.ensure_future(auto_delete(msg, uid))
 
-async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_dlp=False, fmt=None, title=None, res=None):
+async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_dlp=False, fmt=None, title=None, res=None, original_caption=None):
     if uid not in USER_QUEUES:
         USER_QUEUES[uid] = asyncio.Queue()
     
@@ -444,7 +444,8 @@ async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_d
         'is_yt_dlp': is_yt_dlp,
         'fmt': fmt,
         'title': title,
-        'res': res
+        'res': res,
+        'original_caption': original_caption
     })
     
     if uid not in USER_WORKERS or USER_WORKERS[uid].done():
@@ -512,109 +513,121 @@ def generate_post_caption(data: dict) -> str:
     return final_caption
 
 
-async def download_stream(resp, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=""):
-    total = 0
+async def get_filename_from_url(url):
+    """Accurately detect filename from URL/Headers to fix > 100 chars bug."""
     try:
-        size = int(resp.headers.get("Content-Length", 0))
+        async with aiohttp.ClientSession() as sess:
+            async with sess.head(url, allow_redirects=True, timeout=10) as resp:
+                cd = resp.headers.get('Content-Disposition')
+                if cd:
+                    _, params = cgi.parse_header(cd)
+                    if 'filename' in params:
+                        return params['filename']
+    except Exception:
+        pass
+    fname = url.split("/")[-1].split("?")[0]
+    return urllib.parse.unquote(fname)
+
+async def download_stream(resp, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
+    total = 0
+    if out_path.exists():
+        total = out_path.stat().st_size
+    try:
+        size = int(resp.headers.get("Content-Length", 0)) + total
     except:
         size = 0
     chunk_size = 1024 * 1024
     start_t = time.time()
-    
-    # Extract filename from headers if possible
-    content_disp = resp.headers.get('Content-Disposition')
-    if content_disp:
-        _, params = cgi.parse_header(content_disp)
-        if 'filename' in params:
-            header_name = params['filename']
-            # Decode if needed
-            header_name = urllib.parse.unquote(header_name)
-            # Use it if original is too long or generic
-            if len(original_name) > 100 or original_name == "url_download":
-                original_name = header_name
-
     try:
-        with out_path.open("wb") as f:
+        mode = "ab" if total > 0 else "wb"
+        with out_path.open(mode) as f:
             async for chunk in resp.content.iter_chunked(chunk_size):
                 if cancel_event and cancel_event.is_set():
-                    return False, "Operation cancelled by user.", original_name
+                    return False, "Operation cancelled by user."
                 if not chunk:
                     break
                 if total > MAX_SIZE:
-                    return False, "File size cannot exceed limit.", original_name
+                    return False, "File size cannot exceed limit."
                 total += len(chunk)
                 f.write(chunk)
                 
                 if message and size > 0:
                     await progress_callback(total, size, "Downloading...", message, start_t, original_name=original_name)
     except Exception as e:
-        return False, str(e), original_name
-    return True, None, original_name
+        return False, str(e)
+    return True, None
 
-async def download_url_generic(url: str, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=""):
+async def download_url_generic(url: str, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
     proxy = "http://127.0.0.1:8118" if PROXY_MODE else None
     for attempt in range(1, 11):
-        if cancel_event and cancel_event.is_set():
-            return False, "Cancelled", original_name
         timeout = aiohttp.ClientTimeout(total=7200, sock_connect=120)
         headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"}
+        if out_path.exists():
+            downloaded = out_path.stat().st_size
+            headers["Range"] = f"bytes={downloaded}-"
+            
         connector = aiohttp.TCPConnector(limit=0, force_close=True)
         try:
             async with aiohttp.ClientSession(timeout=timeout, headers=headers, connector=connector) as sess:
                 async with sess.get(url, allow_redirects=True, proxy=proxy) as resp:
-                    if resp.status == 404 or resp.status != 200:
+                    if resp.status in (404, 403) or resp.status >= 500:
                         if attempt < 10:
-                            if message: await message.edit_text(f"Connection error (HTTP {resp.status}). Retrying {attempt}/10...", reply_markup=progress_keyboard())
                             await asyncio.sleep(2)
                             continue
-                        return False, f"HTTP {resp.status}", original_name
-                    ok, err, new_name = await download_stream(resp, out_path, message, cancel_event=cancel_event, original_name=original_name)
-                    if not ok and err != "Operation cancelled by user.":
-                        if attempt < 10:
-                            if message: await message.edit_text(f"Network error payload incomplete. Retrying {attempt}/10...", reply_markup=progress_keyboard())
-                            await asyncio.sleep(2)
-                            continue
-                    return ok, err, new_name
+                        return False, f"HTTP {resp.status}"
+                    if resp.status in (200, 206):
+                        ok, err = await download_stream(resp, out_path, message, cancel_event=cancel_event, original_name=original_name)
+                        if ok: return True, None
+                        else:
+                            if attempt < 10: await asyncio.sleep(2); continue
+                            return False, err
         except Exception as e:
             if attempt < 10:
-                if message: await message.edit_text(f"Error: {e}. Retrying {attempt}/10...", reply_markup=progress_keyboard())
                 await asyncio.sleep(2)
                 continue
-            return False, str(e), original_name
-    return False, "Failed after 10 attempts", original_name
+            return False, str(e)
+    return False, "Failed after 10 attempts"
 
-async def download_drive_file(file_id: str, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=""):
+async def download_drive_file(file_id: str, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
     proxy = "http://127.0.0.1:8118" if PROXY_MODE else None
     base = f"https://drive.google.com/uc?export=download&id={file_id}"
     for attempt in range(1, 11):
-        if cancel_event and cancel_event.is_set():
-            return False, "Cancelled", original_name
         timeout = aiohttp.ClientTimeout(total=7200, sock_connect=120)
         headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"}
+        
+        if out_path.exists():
+            downloaded = out_path.stat().st_size
+            headers["Range"] = f"bytes={downloaded}-"
+            
         connector = aiohttp.TCPConnector(limit=0, force_close=True)
         try:
             async with aiohttp.ClientSession(timeout=timeout, headers=headers, connector=connector) as sess:
                 async with sess.get(base, allow_redirects=True, proxy=proxy) as resp:
-                    if resp.status == 200 and "content-disposition" in (k.lower() for k in resp.headers.keys()):
-                        return await download_stream(resp, out_path, message, cancel_event=cancel_event, original_name=original_name)
+                    if resp.status in (200, 206) and "content-disposition" in (k.lower() for k in resp.headers.keys()):
+                        ok, err = await download_stream(resp, out_path, message, cancel_event=cancel_event, original_name=original_name)
+                        if ok: return True, None
+                        if attempt < 10: await asyncio.sleep(2); continue
+                        
                     if resp.status == 404 or resp.status >= 500:
                         if attempt < 10:
-                            if message: await message.edit_text(f"Connection error (HTTP {resp.status}). Retrying {attempt}/10...", reply_markup=progress_keyboard())
                             await asyncio.sleep(2)
                             continue
                     text = await resp.text(errors="ignore")
-                    m_token = re.search(r"confirm=([0-9A-Za-z-_]+)", text)
-                    if m_token:
-                        token = m_token.group(1)
+                    m = re.search(r"confirm=([0-9A-Za-z-_]+)", text)
+                    if m:
+                        token = m.group(1)
                         download_url = f"https://drive.google.com/uc?export=download&confirm={token}&id={file_id}"
                         async with sess.get(download_url, allow_redirects=True, proxy=proxy) as resp2:
                             if resp2.status == 404 or resp2.status >= 500:
                                 if attempt < 10:
                                     await asyncio.sleep(2)
                                     continue
-                            if resp2.status != 200:
-                                return False, f"HTTP {resp2.status}", original_name
-                            return await download_stream(resp2, out_path, message, cancel_event=cancel_event, original_name=original_name)
+                            if resp2.status not in (200, 206):
+                                return False, f"HTTP {resp2.status}"
+                            ok, err = await download_stream(resp2, out_path, message, cancel_event=cancel_event, original_name=original_name)
+                            if ok: return True, None
+                            if attempt < 10: await asyncio.sleep(2); continue
+                            
                     for k, v in resp.cookies.items():
                         if k.startswith("download_warning"):
                             token = v.value
@@ -624,21 +637,22 @@ async def download_drive_file(file_id: str, out_path: Path, message: Message = N
                                     if attempt < 10:
                                         await asyncio.sleep(2)
                                         continue
-                                if resp2.status != 200:
-                                    return False, f"HTTP {resp2.status}", original_name
-                                return await download_stream(resp2, out_path, message, cancel_event=cancel_event, original_name=original_name)
+                                if resp2.status not in (200, 206):
+                                    return False, f"HTTP {resp2.status}"
+                                ok, err = await download_stream(resp2, out_path, message, cancel_event=cancel_event, original_name=original_name)
+                                if ok: return True, None
+                                if attempt < 10: await asyncio.sleep(2); continue
                     
-                    if attempt < 10 and resp.status != 200:
+                    if attempt < 10 and resp.status not in (200, 206):
                         await asyncio.sleep(2)
                         continue
-                    return False, "Google Drive requires permission or the link is not public.", original_name
+                    return False, "Google Drive requires permission or the link is not public."
         except Exception as e:
             if attempt < 10:
-                if message: await message.edit_text(f"Drive Error: {e}. Retrying {attempt}/10...", reply_markup=progress_keyboard())
                 await asyncio.sleep(2)
                 continue
-            return False, str(e), original_name
-    return False, "Failed after 10 attempts", original_name
+            return False, str(e)
+    return False, "Failed after 10 attempts"
 
 async def set_bot_commands():
     cmds = [
@@ -659,6 +673,8 @@ async def set_bot_commands():
         BotCommand("mode_check", "Check current mode status (admin only)"), 
         BotCommand("broadcast", "Broadcast (admin only)"),
         BotCommand("progress_bar", "Toggle progress bar ON/OFF or Custom Interval (admin only)"),
+        BotCommand("continue", "Resume paused queue / Restore buttons"),
+        BotCommand("restart", "Show Storage info and Clear Data"),
         BotCommand("help", "Help")
     ]
     try:
@@ -666,7 +682,7 @@ async def set_bot_commands():
     except Exception as e:
         logger.warning("Set commands error: %s", e)
 
-async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, status_msg_id, cancel_event, default_caption=None):
+async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, status_msg_id, cancel_event, default_caption=None, original_caption=None):
     """Background task that waits for upload lock to ensure sequential uploads."""
     if uid not in USER_UPLOAD_LOCKS:
         USER_UPLOAD_LOCKS[uid] = asyncio.Lock()
@@ -675,19 +691,17 @@ async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, s
         if cancel_event.is_set():
             if tmp_path.exists(): tmp_path.unlink()
             return
-        await process_file_and_upload(client, message, tmp_path, original_name=renamed_file, messages_to_delete=[status_msg_id] if status_msg_id else [], cancel_event_passed=cancel_event, passed_uid=uid, default_caption=default_caption)
+        await process_file_and_upload(client, message, tmp_path, original_name=renamed_file, messages_to_delete=[status_msg_id] if status_msg_id else [], cancel_event_passed=cancel_event, passed_uid=uid, default_caption=default_caption, original_caption_passed=original_caption)
 
-# --- QUEUE WORKER ---
+# --- QUEUE WORKER WITH PAUSE LOGIC ---
 async def process_queue_handler(uid, client):
     """Worker function that processes tasks sequentially for a user."""
-    if uid not in QUEUE_PAUSE_EVENTS:
-        QUEUE_PAUSE_EVENTS[uid] = asyncio.Event()
-        QUEUE_PAUSE_EVENTS[uid].set() # Initially unpaused
-        
     queue = USER_QUEUES[uid]
     while not queue.empty():
-        await QUEUE_PAUSE_EVENTS[uid].wait() # Wait if paused due to error
-        
+        # Pause Logic handling
+        while uid in USER_QUEUE_PAUSED:
+            await asyncio.sleep(1)
+            
         task_data = await queue.get()
         try:
             m = task_data.get('message')
@@ -695,6 +709,7 @@ async def process_queue_handler(uid, client):
             status_msg = task_data.get('status_msg') 
             is_url = task_data.get('is_url', False)
             is_yt_dlp = task_data.get('is_yt_dlp', False)
+            original_caption = task_data.get('original_caption')
             
             cancel_event = asyncio.Event()
             TASKS.setdefault(uid, []).append(cancel_event)
@@ -772,60 +787,42 @@ async def process_queue_handler(uid, client):
                     yt_caption = f"{title} - {res}p" if title else original_name
                     
                     asyncio.create_task(
-                        sequential_upload_task(uid, client, m, actual_path, renamed_file, status_msg.id if status_msg else None, cancel_event, default_caption=yt_caption)
+                        sequential_upload_task(uid, client, m, actual_path, renamed_file, status_msg.id if status_msg else None, cancel_event, default_caption=yt_caption, original_caption=original_caption)
                     )
                 except Exception as e:
                     logger.error(f"YT-DLP Queue DL Error: {e}")
-                    if status_msg:
-                        try: await status_msg.edit_text(f"YouTube Download Error: {e}\n\nQueue Paused.", reply_markup=error_halt_keyboard())
-                        except: pass
-                    QUEUE_PAUSE_EVENTS[uid].clear()
-                    if cancel_event in TASKS.get(uid, []): TASKS[uid].remove(cancel_event)
+                    raise e
                         
             elif is_url:
                 url = task_data.get('url')
-                await download_and_process_generic(client, m, url, status_msg, cancel_event, original_name=original_name)
+                await download_and_process_generic(client, m, url, status_msg, cancel_event)
             else:
+                # Start Processing
                 file_info = m.video or m.document
+                
                 tmp_path = TMP / f"forwarded_{uid}_{int(datetime.now().timestamp())}_{original_name}"
                 
                 try:
+                    # 1. Download Phase (Sequential)
                     if status_msg:
                         try:
                             await status_msg.edit("Downloading...", reply_markup=progress_keyboard())
                         except: pass
                     
                     start_t = time.time()
-                    
-                    # Implementation of resilient telegram download loop
-                    dl_success = False
-                    for attempt in range(1, 11):
-                        if cancel_event.is_set(): break
-                        try:
-                            async def dl_prog(current, total):
-                                if cancel_event.is_set():
-                                    client.stop_transmission()
-                                if status_msg:
-                                    await progress_callback(current, total, "Downloading...", status_msg, start_t, original_name=original_name)
+                    async def dl_prog(current, total):
+                        if cancel_event.is_set():
+                            client.stop_transmission()
+                        if status_msg:
+                            await progress_callback(current, total, "Downloading...", status_msg, start_t, original_name=original_name)
                             
-                            await m.download(file_name=str(tmp_path), progress=dl_prog)
-                            dl_success = True
-                            break
-                        except Exception as e:
-                            logger.error(f"Telegram DL attempt {attempt} failed: {e}")
-                            if attempt < 10:
-                                if status_msg: await status_msg.edit(f"Telegram Download error: {e}. Retrying {attempt}/10...", reply_markup=progress_keyboard())
-                                await asyncio.sleep(2)
-                            else:
-                                raise e
+                    await m.download(file_name=str(tmp_path), progress=dl_prog)
                     
                     if cancel_event.is_set():
                          if tmp_path.exists(): tmp_path.unlink()
-                         if cancel_event in TASKS.get(uid, []): TASKS[uid].remove(cancel_event)
+                         if cancel_event in TASKS.get(uid, []):
+                             TASKS[uid].remove(cancel_event)
                          continue
-                         
-                    if not dl_success:
-                        raise Exception("Failed after 10 attempts")
 
                     try:
                         if status_msg:
@@ -835,56 +832,80 @@ async def process_queue_handler(uid, client):
 
                     renamed_file = generate_new_filename(original_name)
                     
+                    # 2. Upload Phase (Pipelined)
                     asyncio.create_task(
-                        sequential_upload_task(uid, client, m, tmp_path, renamed_file, status_msg.id if status_msg else None, cancel_event, default_caption=original_name)
+                        sequential_upload_task(uid, client, m, tmp_path, renamed_file, status_msg.id if status_msg else None, cancel_event, default_caption=original_name, original_caption=original_caption)
                     )
                 
                 except Exception as e:
-                    logger.error(f"Queue Item Failed: {e}")
-                    if status_msg:
-                        await status_msg.edit(f"Queue Error: {e}\n\nQueue Paused.", reply_markup=error_halt_keyboard())
-                    else:
-                        await m.reply_text(f"Queue Error for `{original_name}`: {e}\n\nQueue Paused.", reply_markup=error_halt_keyboard())
-                    QUEUE_PAUSE_EVENTS[uid].clear()
                     if tmp_path.exists():
                         tmp_path.unlink()
-                finally:
-                    pass
+                    raise e
 
         except Exception as e:
             logger.error(f"Queue Loop Error: {e}")
+            USER_QUEUE_PAUSED.add(uid)
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Continue ▶️", callback_data="queue_continue"),
+                 InlineKeyboardButton("Delete 🗑️", callback_data="queue_delete")]
+            ])
+            err_msg = f"Task Failed for `{original_name}`: {e}\n\n⚠️ **Queue is Paused.** Please select an option to resume or cancel remaining queue."
+            if status_msg:
+                try: await status_msg.reply_text(err_msg, reply_markup=markup, quote=True)
+                except: pass
+            elif m:
+                try: await m.reply_text(err_msg, reply_markup=markup, quote=True)
+                except: pass
         finally:
             queue.task_done()
     
-    del USER_WORKERS[uid]
-    del USER_QUEUES[uid]
+    # Cleanup when queue is empty
+    if uid in USER_WORKERS: del USER_WORKERS[uid]
+    if uid in USER_QUEUES: del USER_QUEUES[uid]
+
+
+@app.on_callback_query(filters.regex("refresh_btn"))
+async def refresh_btn_cb(c, cb):
+    # Sends a small refresh acknowledgment. AIOHTTP handles its own chunk restarts in generic.
+    await cb.answer("Refreshed! Progress will update shortly...", show_alert=False)
 
 @app.on_callback_query(filters.regex("queue_continue"))
 async def queue_continue_cb(c, cb):
     uid = cb.from_user.id
-    if uid in QUEUE_PAUSE_EVENTS:
-        QUEUE_PAUSE_EVENTS[uid].set()
-        await cb.answer("Queue Resumed.", show_alert=True)
-        try: await cb.message.edit_reply_markup(None)
-        except: pass
+    USER_QUEUE_PAUSED.discard(uid)
+    await cb.answer("Queue Resumed!", show_alert=True)
+    try: await cb.message.delete()
+    except: pass
 
 @app.on_callback_query(filters.regex("queue_delete"))
 async def queue_delete_cb(c, cb):
     uid = cb.from_user.id
-    if uid in QUEUE_PAUSE_EVENTS:
-        QUEUE_PAUSE_EVENTS[uid].set()
-        await cb.answer("Item ignored. Queue Resumed.", show_alert=True)
-        try: await cb.message.delete()
-        except: pass
+    # Clear queues
+    if uid in USER_QUEUES:
+        while not USER_QUEUES[uid].empty():
+            try: 
+                item = USER_QUEUES[uid].get_nowait()
+                if 'status_msg' in item and item['status_msg']:
+                    try: await item['status_msg'].delete()
+                    except: pass
+                USER_QUEUES[uid].task_done()
+            except: pass
+            
+    if uid in ZIP_DL_QUEUES:
+        while not ZIP_DL_QUEUES[uid].empty():
+            try: 
+                item = ZIP_DL_QUEUES[uid].get_nowait()
+                if 'queue_msg' in item and item['queue_msg']:
+                    try: await item['queue_msg'].delete()
+                    except: pass
+                ZIP_DL_QUEUES[uid].task_done()
+            except: pass
+            
+    USER_QUEUE_PAUSED.discard(uid)
+    await cb.answer("All Queues Deleted & Cancelled!", show_alert=True)
+    try: await cb.message.delete()
+    except: pass
 
-@app.on_callback_query(filters.regex(r"^refresh_"))
-async def refresh_task_cb(c, cb):
-    uid = cb.from_user.id
-    action = cb.data.replace("refresh_", "")
-    # In a real heavy implementation, this would interrupt and restart with Range.
-    # We will trigger the event to cancel and retry if we implement a retry-wrapper, 
-    # but for now we'll just acknowledge as the retry loop is inside the functions.
-    await cb.answer("Refresh command sent. Re-establishing connection in background...", show_alert=False)
 
 # --- YT-DLP CORE FUNCTIONS ---
 def build_yt_keyboard(session_id):
@@ -1114,6 +1135,8 @@ async def start_handler(c, m: Message):
         "/mode_check - Check current mode status (admin only)\n" 
         "/progress_bar - Toggle progress bar ON/OFF or Custom Interval (admin only)\n"
         "/broadcast <text> - Broadcast (admin only)\n"
+        "/continue - Resume paused queue / Restore buttons\n"
+        "/restart - Show Storage info and Clear Data\n"
         "/help - Help"
     )
     await m.reply_text(text)
@@ -1121,6 +1144,42 @@ async def start_handler(c, m: Message):
 @app.on_message(filters.command("help") & filters.private)
 async def help_handler(c, m):
     await start_handler(c, m)
+
+@app.on_message(filters.command("continue") & filters.private)
+async def continue_cmd(c, m: Message):
+    uid = m.from_user.id
+    if uid in USER_QUEUE_PAUSED:
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Continue ▶️", callback_data="queue_continue"),
+             InlineKeyboardButton("Delete 🗑️", callback_data="queue_delete")]
+        ])
+        await m.reply_text("Queue is currently paused due to an error. Select an option to resume or delete:", reply_markup=markup)
+    else:
+        await m.reply_text("Your queue is not paused right now.")
+
+@app.on_message(filters.command("restart") & filters.private)
+async def restart_cmd(c, m: Message):
+    uid = m.from_user.id
+    if not is_admin(uid):
+        await m.reply_text("You are not authorized.")
+        return
+    total, used, free = shutil.disk_usage("/")
+    text = (f"**📊 Storage Status:**\n\n"
+            f"**Total Storage:** `{format_size(total)}`\n"
+            f"**Used Storage:** `{format_size(used)}`\n"
+            f"**Free Storage:** `{format_size(free)}`\n\n"
+            f"Use the button below to format/clear all temporary bot data.")
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("Clear Data 🗑", callback_data="clear_tmp_data")]])
+    await m.reply_text(text, reply_markup=markup)
+
+@app.on_callback_query(filters.regex("clear_tmp_data"))
+async def clear_tmp_data_cb(c, cb):
+    uid = cb.from_user.id
+    if not is_admin(uid): return
+    shutil.rmtree(TMP, ignore_errors=True)
+    TMP.mkdir(parents=True, exist_ok=True)
+    await cb.answer("Storage Formatted / Data Cleared!", show_alert=True)
+    await cb.message.edit_text(cb.message.text + "\n\n*(Data Successfully Cleared)*")
 
 @app.on_message(filters.command("zip_file_download") & filters.private)
 async def zip_file_download_cmd(c, m: Message):
@@ -1130,9 +1189,9 @@ async def zip_file_download_cmd(c, m: Message):
         return
     if uid in ZIP_DOWNLOAD_MODE:
         ZIP_DOWNLOAD_MODE.discard(uid)
-        ZIP_AUTO_UPLOAD_ALL.discard(uid)
         ZIP_READY_LIST.pop(uid, None)
         ZIP_NAV_STATE.pop(uid, None)
+        AUTO_UPLOAD_ALL.discard(uid)
         if uid in ZIP_DL_QUEUES:
             while not ZIP_DL_QUEUES[uid].empty():
                 try: 
@@ -1145,7 +1204,7 @@ async def zip_file_download_cmd(c, m: Message):
         await m.reply_text("ZIP File Download Mode **OFF**.")
     else:
         ZIP_DOWNLOAD_MODE.add(uid)
-        await m.reply_text("ZIP File Download Mode **ON**.\nSend direct links or forward telegram zip files. Multiple files will be queued automatically.\nType `clear` to reset the current tasks and clear data.\nType `all` to auto upload all extracted items.\nType `all off` to turn off auto upload.")
+        await m.reply_text("ZIP File Download Mode **ON**.\nSend direct links or Telegram Files. Multiple items will be queued automatically.\nType `clear` to reset. Type `all` for auto upload all.")
 
 @app.on_message(filters.command("proxy") & filters.private)
 async def proxy_cmd(c, m: Message):
@@ -1311,7 +1370,7 @@ async def photo_handler(c, m: Message):
         return
     uid = m.from_user.id
     
-    # --- NEW: Handle Create Post Mode ---
+    # --- Handle Create Post Mode ---
     if uid in CREATE_POST_MODE and uid in POST_CREATION_STATE and POST_CREATION_STATE[uid]['state'] == 'awaiting_image':
         
         state_data = POST_CREATION_STATE[uid]
@@ -1356,7 +1415,6 @@ async def photo_handler(c, m: Message):
             POST_CREATION_STATE.pop(uid, None)
             if out.exists(): out.unlink(missing_ok=True)
         return
-    # --- END NEW: Handle Create Post Mode ---
     
     if uid in SET_THUMB_REQUEST:
         SET_THUMB_REQUEST.discard(uid)
@@ -1460,7 +1518,7 @@ async def toggle_audio_change_mode(c, m: Message):
         MKV_AUDIO_CHANGE_MODE.add(uid)
         await m.reply_text("MKV audio change mode has been **TURNED ON**. Now send an **MKV file** or any other **video file**.\n(This mode stays on until manually turned off.)")
 
-# --- NEW HANDLER: /create_post ---
+# --- HANDLER: /create_post ---
 @app.on_message(filters.command("create_post") & filters.private)
 async def toggle_create_post_mode(c, m: Message):
     uid = m.from_user.id
@@ -1498,7 +1556,7 @@ async def toggle_create_post_mode(c, m: Message):
 # ---------------------------------------------
 
 
-# --- NEW HANDLER: /mode_check ---
+# --- HANDLER: /mode_check ---
 @app.on_message(filters.command("mode_check") & filters.private)
 async def mode_check_cmd(c, m: Message):
     uid = m.from_user.id
@@ -1530,7 +1588,7 @@ async def mode_check_cmd(c, m: Message):
     
     await m.reply_text(status_text, reply_markup=mode_check_keyboard(uid), parse_mode=ParseMode.MARKDOWN)
 
-# --- NEW CALLBACK: Mode Toggle Buttons ---
+# --- CALLBACK: Mode Toggle Buttons ---
 @app.on_callback_query(filters.regex("toggle_(audio|caption|ytdlp|zip)_mode"))
 async def mode_toggle_callback(c: Client, cb: CallbackQuery):
     uid = cb.from_user.id
@@ -1603,12 +1661,9 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
 
 # --- ZIP AUTO EXTRACT & UPLOAD LOGIC ---
 async def zip_download_worker(uid, c):
-    if uid not in QUEUE_PAUSE_EVENTS:
-        QUEUE_PAUSE_EVENTS[uid] = asyncio.Event()
-        QUEUE_PAUSE_EVENTS[uid].set()
-        
     while uid in ZIP_DL_QUEUES and not ZIP_DL_QUEUES[uid].empty():
-        await QUEUE_PAUSE_EVENTS[uid].wait()
+        while uid in USER_QUEUE_PAUSED:
+            await asyncio.sleep(1)
         
         task_data = await ZIP_DL_QUEUES[uid].get()
         try:
@@ -1616,15 +1671,17 @@ async def zip_download_worker(uid, c):
             if queue_msg:
                 try: await queue_msg.delete()
                 except: pass
-            
-            if task_data.get('is_telegram_file'):
-                await process_telegram_file_in_zip_mode(c, task_data['message'], task_data['file_info'])
-            else:
-                await execute_zip_download_and_extract(c, task_data['message'], task_data['url'])
+            await execute_zip_download_and_extract(c, task_data['message'], task_data.get('url'))
         except Exception as e:
             logger.error(f"ZIP Worker Error: {e}")
-            QUEUE_PAUSE_EVENTS[uid].clear()
-            await c.send_message(task_data['message'].chat.id, f"ZIP Queue paused due to error: {e}", reply_markup=error_halt_keyboard())
+            USER_QUEUE_PAUSED.add(uid)
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Continue ▶️", callback_data="queue_continue"),
+                 InlineKeyboardButton("Delete 🗑️", callback_data="queue_delete")]
+            ])
+            try:
+                await c.send_message(task_data['message'].chat.id, f"ZIP Task Failed: {e}\n\nQueue Paused. Select an option:", reply_markup=markup, reply_to_message_id=task_data['message'].id)
+            except: pass
         finally:
             ZIP_DL_QUEUES[uid].task_done()
     if uid in ZIP_DL_WORKERS:
@@ -1640,12 +1697,12 @@ async def check_and_show_next_zip(c, chat_id, uid):
             'garbage_msgs': []
         }
         
-        if uid in ZIP_AUTO_UPLOAD_ALL:
-            files = next_zip['files_to_upload']
+        if uid in AUTO_UPLOAD_ALL:
+            files = ZIP_NAV_STATE[uid]['files_to_upload']
             final_order = list(range(1, len(files) + 1))
-            msg = await c.send_message(chat_id, "Auto uploading all extracted files...")
-            ZIP_NAV_STATE[uid]['garbage_msgs'].append(msg.id)
-            await process_zip_uploads(c, msg, uid, final_order)
+            await c.send_message(chat_id, "Auto Upload All is ON. Starting upload...")
+            # Using asyncio task so it doesn't block
+            asyncio.create_task(process_zip_uploads(c, chat_id, uid, final_order))
         else:
             await show_files_for_upload(c, chat_id, uid, next_zip['files_to_upload'])
 
@@ -1681,7 +1738,8 @@ async def show_files_for_upload(c, chat_id, uid, files, status_msg=None):
             state['garbage_msgs'].append(msg.id)
         await asyncio.sleep(0.3)
 
-async def process_zip_uploads(c, message, uid, final_order):
+async def process_zip_uploads(c, message_or_chat_id, uid, final_order):
+    chat_id = message_or_chat_id.chat.id if hasattr(message_or_chat_id, 'chat') else message_or_chat_id
     state = ZIP_NAV_STATE.get(uid)
     if not state:
         return
@@ -1690,9 +1748,11 @@ async def process_zip_uploads(c, message, uid, final_order):
     root_dir = state['root_dir']
     garbage_msgs = state.get('garbage_msgs', [])
     
-    upload_status = await c.send_message(message.chat.id, f"Starting upload of {len(final_order)} files in specified order...")
+    upload_status = await c.send_message(chat_id, f"Starting upload of {len(final_order)} files in specified order...")
     
     for idx in final_order:
+        while uid in USER_QUEUE_PAUSED:
+             await asyncio.sleep(1)
         if uid not in ZIP_NAV_STATE or ZIP_NAV_STATE[uid].get('state') != 'uploading':
             break # Cancelled or cleared during upload
             
@@ -1702,28 +1762,43 @@ async def process_zip_uploads(c, message, uid, final_order):
         renamed_file = generate_new_filename(original_name)
         cancel_event = asyncio.Event()
         TASKS.setdefault(uid, []).append(cancel_event)
+        
+        # Creating a fake message object if message_or_chat_id is just an ID (for auto upload)
+        class FakeMessage:
+            def __init__(self, cid):
+                class Chat:
+                    id = cid
+                self.chat = Chat()
+                self.from_user = None
+                self.id = 0
+        m_obj = message_or_chat_id if hasattr(message_or_chat_id, 'chat') else FakeMessage(chat_id)
+        
         try:
-            await sequential_upload_task(uid, c, message, fpath, renamed_file, None, cancel_event, default_caption=original_name)
+            await sequential_upload_task(uid, c, m_obj, fpath, renamed_file, None, cancel_event, default_caption=original_name, original_caption=original_name)
         except Exception as e:
             logger.error(f"ZIP item upload error: {e}")
-            QUEUE_PAUSE_EVENTS[uid].clear()
-            await c.send_message(message.chat.id, f"ZIP Item Error: {e}\n\nQueue paused.", reply_markup=error_halt_keyboard())
-            await QUEUE_PAUSE_EVENTS[uid].wait()
+            USER_QUEUE_PAUSED.add(uid)
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Continue ▶️", callback_data="queue_continue"),
+                 InlineKeyboardButton("Delete 🗑️", callback_data="queue_delete")]
+            ])
+            await c.send_message(chat_id, f"Upload Failed: {e}\nQueue Paused.", reply_markup=markup)
     
-    shutil.rmtree(root_dir, ignore_errors=True)
+    if root_dir:
+        shutil.rmtree(root_dir, ignore_errors=True)
     
-    try: await c.delete_messages(message.chat.id, garbage_msgs)
+    try: await c.delete_messages(chat_id, garbage_msgs)
     except: pass
     
     if uid in ZIP_NAV_STATE and ZIP_NAV_STATE[uid].get('state') == 'uploading':
         ZIP_NAV_STATE.pop(uid, None)
-        complete_msg = await c.send_message(message.chat.id, "All ZIP files queued/uploaded successfully.")
+        complete_msg = await c.send_message(chat_id, "All ZIP files queued/uploaded successfully.")
         async def auto_delete(msg_obj):
             await asyncio.sleep(5)
             try: await msg_obj.delete()
             except: pass
         asyncio.ensure_future(auto_delete(complete_msg))
-        await check_and_show_next_zip(c, message.chat.id, uid)
+        await check_and_show_next_zip(c, chat_id, uid)
 
 @app.on_callback_query(filters.regex("zip_upload_all"))
 async def zip_upload_all_cb(c, cb):
@@ -1747,93 +1822,131 @@ async def zip_cancel_cb(c, cb):
     await cb.message.edit_text("ZIP session cleared. Files are kept and can be accessed via `path`.")
     await check_and_show_next_zip(c, cb.message.chat.id, uid)
 
-async def process_telegram_file_in_zip_mode(c, m, file_info):
+def is_archive_file(filepath: Path) -> bool:
+    ext = filepath.suffix.lower()
+    return ext in ['.zip', '.rar', '.7z']
+
+async def execute_zip_download_and_extract(c, m, url=None):
     uid = m.from_user.id
-    original_name = getattr(file_info, 'file_name', f"file_{file_info.file_unique_id}")
-    is_zip = original_name.lower().endswith('.zip') or (getattr(file_info, 'mime_type', '') == 'application/zip')
+    status_msg = await c.send_message(m.chat.id, "Downloading Queue Item...", reply_markup=progress_keyboard())
     
-    status_msg = await c.send_message(m.chat.id, f"Processing Telegram file: `{original_name}`...", reply_markup=progress_keyboard())
+    safe_name = f"zip_dl_{uid}_{int(time.time())}"
+    if url:
+        original_name = await get_filename_from_url(url)
+        safe_name = re.sub(r"[\\/*?\"<>|:]", "_", original_name)
+        if len(safe_name) > 100:
+            ext = Path(safe_name).suffix
+            safe_name = safe_name[:100 - len(ext)] + ext
+            
+    tmp_in = TMP / f"zip_{uid}_{int(time.time())}_{safe_name}"
+    
     cancel_event = asyncio.Event()
     TASKS.setdefault(uid, []).append(cancel_event)
     USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
     
-    tmp_path = TMP / f"tg_zip_{uid}_{int(time.time())}_{original_name}"
-    
     try:
-        start_t = time.time()
-        dl_success = False
-        for attempt in range(1, 11):
-            if cancel_event.is_set(): break
-            try:
-                async def dl_prog(current, total):
-                    if cancel_event.is_set(): c.stop_transmission()
-                    await progress_callback(current, total, "Downloading Telegram File...", status_msg, start_t, original_name=original_name)
-                
-                await m.download(file_name=str(tmp_path), progress=dl_prog)
-                dl_success = True
-                break
-            except Exception as e:
-                if attempt < 10:
-                    await status_msg.edit(f"Telegram DL Error {e}. Retrying {attempt}/10...", reply_markup=progress_keyboard())
-                    await asyncio.sleep(2)
-                else: raise e
-                
-        if not dl_success: raise Exception("Failed after 10 attempts")
-        
-        if is_zip:
-            await extract_downloaded_zip(c, m, uid, tmp_path, status_msg, cancel_event)
-        else:
-            await status_msg.edit("Not a ZIP file. Queuing for direct upload...", reply_markup=progress_keyboard())
-            renamed_file = generate_new_filename(original_name)
-            asyncio.create_task(
-                sequential_upload_task(uid, c, m, tmp_path, renamed_file, status_msg.id, cancel_event, default_caption=original_name)
-            )
-    except Exception as e:
-        logger.error(f"TG ZIP Mode Error: {e}")
-        await status_msg.edit(f"Error: {e}\n\nQueue Paused.", reply_markup=error_halt_keyboard())
-        QUEUE_PAUSE_EVENTS[uid].clear()
-        if tmp_path.exists(): tmp_path.unlink(missing_ok=True)
-    finally:
-        if cancel_event in TASKS.get(uid, []): TASKS[uid].remove(cancel_event)
-
-
-async def extract_downloaded_zip(c, m, uid, tmp_in, status_msg, cancel_event):
-    ext_dir = TMP / f"zip_ext_{uid}_{int(time.time())}"
-    ext_dir.mkdir(parents=True, exist_ok=True)
-    
-    try:
-        await status_msg.edit("Extracting ZIP file...", reply_markup=progress_keyboard())
-        start_t = time.time()
-        with zipfile.ZipFile(tmp_in, 'r') as zip_ref:
-            total_size = sum(info.file_size for info in zip_ref.infolist())
-            extracted_size = 0
-            for info in zip_ref.infolist():
-                if cancel_event.is_set(): break
-                await asyncio.to_thread(zip_ref.extract, info, ext_dir)
-                extracted_size += info.file_size
-                await progress_callback(extracted_size, total_size, "Extracting ZIP...", status_msg, start_t, original_name=tmp_in.name)
+        ok, err = False, None
+        original_name_pass = url.split("/")[-1] if url else None
+        if url:
+            original_name_pass = await get_filename_from_url(url)
+            if is_drive_url(url):
+                fid = extract_drive_id(url)
+                if fid: ok, err = await download_drive_file(fid, tmp_in, status_msg, cancel_event, original_name=original_name_pass)
+            else:
+                ok, err = await download_url_generic(url, tmp_in, status_msg, cancel_event, original_name=original_name_pass)
+        else: # Telegram File
+            original_name_pass = m.video.file_name if m.video else (m.document.file_name if m.document else "telegram_file")
+            start_t = time.time()
+            async def dl_prog(current, total):
+                if cancel_event.is_set():
+                    c.stop_transmission()
+                await progress_callback(current, total, "Downloading...", status_msg, start_t, original_name=original_name_pass)
+            await m.download(file_name=str(tmp_in), progress=dl_prog)
+            ok = True
             
+        if not ok or not tmp_in.exists():
+            raise Exception(f"Download Failed: {err}")
+            
+        if not is_archive_file(tmp_in):
+            await status_msg.edit("Non-archive file detected. Queueing for direct upload...", reply_markup=None)
+            ZIP_READY_LIST.setdefault(uid, []).append({
+                'root_dir': None,
+                'files_to_upload': [tmp_in]
+            })
+            await check_and_show_next_zip(c, m.chat.id, uid)
+            return
+
+        await status_msg.edit("Extracting Archive file...", reply_markup=progress_keyboard())
+        ext_dir = TMP / f"zip_ext_{uid}_{int(time.time())}"
+        ext_dir.mkdir(parents=True, exist_ok=True)
+        
+        start_t = time.time()
+        
+        # General extraction logic
+        ext = tmp_in.suffix.lower()
+        if ext == '.zip':
+            with zipfile.ZipFile(tmp_in, 'r') as zip_ref:
+                total_size = sum(info.file_size for info in zip_ref.infolist())
+                extracted_size = 0
+                for info in zip_ref.infolist():
+                    if cancel_event.is_set(): break
+                    await asyncio.to_thread(zip_ref.extract, info, ext_dir)
+                    extracted_size += info.file_size
+                    await progress_callback(extracted_size, total_size, "Extracting ZIP...", status_msg, start_t)
+        elif ext == '.rar' and 'rarfile' in globals():
+            with rarfile.RarFile(tmp_in, 'r') as rar_ref:
+                total_size = sum(info.file_size for info in rar_ref.infolist())
+                extracted_size = 0
+                for info in rar_ref.infolist():
+                    if cancel_event.is_set(): break
+                    await asyncio.to_thread(rar_ref.extract, info, ext_dir)
+                    extracted_size += info.file_size
+                    await progress_callback(extracted_size, total_size, "Extracting RAR...", status_msg, start_t)
+        elif ext == '.7z' and 'py7zr' in globals():
+            with py7zr.SevenZipFile(tmp_in, mode='r') as sz_ref:
+                await asyncio.to_thread(sz_ref.extractall, path=ext_dir)
+                # progress callback difficult with basic py7zr API, fallback to basic UI
+                await status_msg.edit("Extracting 7Z... Please wait.", reply_markup=progress_keyboard())
+        else:
+            # Fallback for systems without rarfile/py7zr
+            cmd = ["7z", "x", str(tmp_in), f"-o{ext_dir}", "-y"]
+            process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            await process.communicate()
+            
+        # Recursive archive extraction
         found_zip = True
         while found_zip:
             found_zip = False
             for root, dirs, files in os.walk(ext_dir):
                 for file in files:
-                    if file.lower().endswith('.zip'):
+                    if is_archive_file(Path(file)):
                         nested_zip_path = Path(root) / file
                         try:
-                            with zipfile.ZipFile(nested_zip_path, 'r') as nested_ref:
-                                n_total = sum(n_info.file_size for n_info in nested_ref.infolist())
-                                n_ext = 0
-                                n_start = time.time()
-                                for n_info in nested_ref.infolist():
-                                    if cancel_event.is_set(): break
-                                    await asyncio.to_thread(nested_ref.extract, n_info, root)
-                                    n_ext += n_info.file_size
-                                    await progress_callback(n_ext, n_total, f"Extracting Nested ZIP: {file[:10]}...", status_msg, n_start, original_name=file)
+                            if nested_zip_path.suffix.lower() == '.zip':
+                                with zipfile.ZipFile(nested_zip_path, 'r') as nested_ref:
+                                    n_total = sum(n_info.file_size for n_info in nested_ref.infolist())
+                                    n_ext = 0
+                                    n_start = time.time()
+                                    for n_info in nested_ref.infolist():
+                                        if cancel_event.is_set(): break
+                                        await asyncio.to_thread(nested_ref.extract, n_info, root)
+                                        n_ext += n_info.file_size
+                                        await progress_callback(n_ext, n_total, f"Extracting Nested Archive: {file[:10]}...", status_msg, n_start)
+                            elif nested_zip_path.suffix.lower() == '.rar' and 'rarfile' in globals():
+                                with rarfile.RarFile(nested_zip_path, 'r') as nested_ref:
+                                    await asyncio.to_thread(nested_ref.extractall, root)
+                            elif nested_zip_path.suffix.lower() == '.7z' and 'py7zr' in globals():
+                                with py7zr.SevenZipFile(nested_zip_path, mode='r') as sz_ref:
+                                    await asyncio.to_thread(sz_ref.extractall, path=root)
+                            else:
+                                cmd = ["7z", "x", str(nested_zip_path), f"-o{root}", "-y"]
+                                process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                await process.communicate()
+                                
                             nested_zip_path.unlink()
                             found_zip = True
                         except Exception as e:
-                            logger.error(f"Nested ZIP extraction error: {e}")
+                            logger.error(f"Nested Archive extraction error: {e}")
         
         tmp_in.unlink(missing_ok=True)
         
@@ -1844,11 +1957,12 @@ async def extract_downloaded_zip(c, m, uid, tmp_in, status_msg, cancel_event):
         all_files.sort(key=lambda x: x.name.lower())
         
         if not all_files:
-            await status_msg.edit("No files found in the extracted ZIP.")
+            await status_msg.edit("No files found in the extracted archive.")
             shutil.rmtree(ext_dir, ignore_errors=True)
             return
 
-        try: await status_msg.delete()
+        try:
+            await status_msg.delete()
         except: pass
 
         ZIP_READY_LIST.setdefault(uid, []).append({
@@ -1858,54 +1972,8 @@ async def extract_downloaded_zip(c, m, uid, tmp_in, status_msg, cancel_event):
         await check_and_show_next_zip(c, m.chat.id, uid)
         
     except Exception as e:
-        logger.error(f"Extraction Error: {e}")
-        await status_msg.edit(f"Error extracting ZIP: {e}\n\nQueue Paused.", reply_markup=error_halt_keyboard())
-        QUEUE_PAUSE_EVENTS[uid].clear()
-        if tmp_in.exists(): tmp_in.unlink(missing_ok=True)
-
-
-async def execute_zip_download_and_extract(c, m, url):
-    uid = m.from_user.id
-    status_msg = await c.send_message(m.chat.id, "Downloading Link in ZIP queue...", reply_markup=progress_keyboard())
-    tmp_in = TMP / f"zip_dl_{uid}_{int(time.time())}"
-    cancel_event = asyncio.Event()
-    TASKS.setdefault(uid, []).append(cancel_event)
-    USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
-    
-    try:
-        ok, err, final_name = False, None, ""
-        if is_drive_url(url):
-            fid = extract_drive_id(url)
-            if fid: ok, err, final_name = await download_drive_file(fid, tmp_in, status_msg, cancel_event, original_name=url.split("/")[-1])
-        else:
-            ok, err, final_name = await download_url_generic(url, tmp_in, status_msg, cancel_event, original_name=url.split("/")[-1])
-            
-        if not ok:
-            await status_msg.edit(f"Download Failed: {err}\n\nQueue Paused.", reply_markup=error_halt_keyboard())
-            QUEUE_PAUSE_EVENTS[uid].clear()
-            if tmp_in.exists(): tmp_in.unlink()
-            return
-            
-        is_zip = False
-        try:
-            is_zip = zipfile.is_zipfile(tmp_in)
-        except:
-            is_zip = final_name.lower().endswith('.zip')
-
-        if is_zip:
-            await extract_downloaded_zip(c, m, uid, tmp_in, status_msg, cancel_event)
-        else:
-            await status_msg.edit("Not a ZIP file. Queuing for direct upload...", reply_markup=progress_keyboard())
-            renamed_file = generate_new_filename(final_name)
-            asyncio.create_task(
-                sequential_upload_task(uid, c, m, tmp_in, renamed_file, status_msg.id, cancel_event, default_caption=final_name)
-            )
-            
-    except Exception as e:
-        logger.error(f"ZIP Mode Error: {e}")
-        await status_msg.edit(f"Error: {e}\n\nQueue Paused.", reply_markup=error_halt_keyboard())
-        QUEUE_PAUSE_EVENTS[uid].clear()
-        if tmp_in.exists(): tmp_in.unlink(missing_ok=True)
+        logger.error(f"Archive Mode Error: {e}")
+        raise e
     finally:
         if cancel_event in TASKS.get(uid, []):
             TASKS[uid].remove(cancel_event)
@@ -1951,6 +2019,8 @@ async def send_path_ui(c, chat_id, uid, msg_id=None):
 
 async def process_path_uploads(uid, c, m, files_to_upload):
     for fpath in files_to_upload:
+        while uid in USER_QUEUE_PAUSED:
+            await asyncio.sleep(1)
         original_name = fpath.name
         renamed_file = generate_new_filename(original_name)
         cancel_event = asyncio.Event()
@@ -1958,9 +2028,15 @@ async def process_path_uploads(uid, c, m, files_to_upload):
         try:
             status_msg = await c.send_message(m.chat.id, f"Uploading `{original_name}`...", reply_markup=progress_keyboard())
             USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
-            await sequential_upload_task(uid, c, m, fpath, renamed_file, status_msg.id, cancel_event, default_caption=original_name)
+            await sequential_upload_task(uid, c, m, fpath, renamed_file, status_msg.id, cancel_event, default_caption=original_name, original_caption=original_name)
         except Exception as e:
             logger.error(f"Path item upload error: {e}")
+            USER_QUEUE_PAUSED.add(uid)
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Continue ▶️", callback_data="queue_continue"),
+                 InlineKeyboardButton("Delete 🗑️", callback_data="queue_delete")]
+            ])
+            await c.send_message(m.chat.id, f"Upload Failed: {e}\nQueue Paused.", reply_markup=markup)
     await c.send_message(m.chat.id, "Path selected files queued/uploaded successfully.")
 
 # ----------------------------------------
@@ -1973,29 +2049,27 @@ async def text_handler(c, m: Message):
     text = m.text.strip()
     text_lower = text.lower()
 
-    # --- NEW: Handle Path UI ---
     if text_lower == "path":
         NAV_PATHS[uid] = {"current": TMP, "items": []}
         await send_path_ui(c, m.chat.id, uid)
         return
-    # ---------------------------
-    
+
+    # Handle all for zip
     if uid in ZIP_DOWNLOAD_MODE:
         if text_lower == "all":
-            ZIP_AUTO_UPLOAD_ALL.add(uid)
-            await m.reply_text("Auto Upload All mode is now ON for zip extractions.")
+            AUTO_UPLOAD_ALL.add(uid)
+            await m.reply_text("Auto Upload All is now **ON**.")
+            # Trigger if one is waiting
             if uid in ZIP_NAV_STATE and ZIP_NAV_STATE[uid]['state'] == 'awaiting_selection':
-                # Trigger if already waiting
                 files = ZIP_NAV_STATE[uid]['files_to_upload']
                 final_order = list(range(1, len(files) + 1))
                 await process_zip_uploads(c, m, uid, final_order)
             return
         elif text_lower in ["all f", "all off"]:
-            ZIP_AUTO_UPLOAD_ALL.discard(uid)
-            await m.reply_text("Auto Upload All mode is now OFF.")
+            AUTO_UPLOAD_ALL.discard(uid)
+            await m.reply_text("Auto Upload All is now **OFF**.")
             return
 
-    # --- NEW: Handle Clear for ZIP ---
     if text_lower == "clear":
         cleared = False
         ZIP_READY_LIST.pop(uid, None)
@@ -2017,9 +2091,7 @@ async def text_handler(c, m: Message):
         else:
             await m.reply_text("No active ZIP session to clear.")
         return
-    # ---------------------------------
 
-    # --- NEW: Handle ZIP File Selection ---
     if uid in ZIP_NAV_STATE:
         state = ZIP_NAV_STATE[uid]
         if state['state'] == 'awaiting_selection':
@@ -2050,9 +2122,7 @@ async def text_handler(c, m: Message):
             
             await process_zip_uploads(c, m, uid, final_order)
             return
-    # ---------------------------------
     
-    # --- NEW: Handle Path Selection ---
     if uid in NAV_PATHS:
         if text_lower == 'close':
             NAV_PATHS.pop(uid)
@@ -2102,9 +2172,7 @@ async def text_handler(c, m: Message):
                 await m.reply_text(f"Starting upload for {len(files_to_upload)} selected files from path...")
                 asyncio.create_task(process_path_uploads(uid, c, m, files_to_upload))
                 return
-    # ---------------------------------
 
-    # --- PROXY AWAITING LOGIC ---
     if uid in AWAITING_PROXY_COUNTRY:
         AWAITING_PROXY_COUNTRY.discard(uid)
         country_code = text.lower()
@@ -2117,9 +2185,7 @@ async def text_handler(c, m: Message):
         else:
             await m.reply_text("Invalid country code. Please use a 2-letter code like 'in' or 'bd'.")
         return
-    # ----------------------------
     
-    # --- BATCH CAPTION & UPLOAD COMMANDS (MODIFIED) ---
     is_batch_cmd = False
     if text_lower in ["on", "off", "no", "d", "cap"]:
         is_batch_cmd = True
@@ -2259,7 +2325,7 @@ async def text_handler(c, m: Message):
                         if item.get('is_url'):
                             await add_to_queue(uid, c, item['message'], item['original_name'], is_url=True, url=item['url'])
                         else:
-                            await add_to_queue(uid, c, item['message'], item['original_name'], is_url=False)
+                            await add_to_queue(uid, c, item['message'], item['original_name'], is_url=False, original_caption=item['message'].caption)
                         await asyncio.sleep(0.5)
                     
                     BATCH_DATA[uid] = []
@@ -2278,9 +2344,7 @@ async def text_handler(c, m: Message):
                 else:
                     await m.reply_text("Batch list is empty or mode is not ON.")
             return
-    # ------------------------------------
 
-    # Handle set caption request
     if uid in SET_CAPTION_REQUEST:
         SET_CAPTION_REQUEST.discard(uid)
         USER_CAPTIONS[uid] = text
@@ -2288,7 +2352,6 @@ async def text_handler(c, m: Message):
         await m.reply_text("Your caption has been saved. Uploaded videos will use this caption.")
         return
 
-    # --- Handle audio order input (MODIFIED) ---
     if m.reply_to_message and m.reply_to_message.id in PENDING_AUDIO_ORDERS:
         prompt_message_id = m.reply_to_message.id
         file_data = PENDING_AUDIO_ORDERS.get(prompt_message_id)
@@ -2299,11 +2362,9 @@ async def text_handler(c, m: Message):
 
         tracks = file_data['tracks']
         try:
-            # Parse input like "1,3" or "2"
             new_order_str = [x.strip() for x in text.split(',') if x.strip()]
             num_tracks_in_file = len(tracks)
             
-            # --- UPDATED VALIDATION: Allow any subset ---
             if not new_order_str:
                  await m.reply_text("You must provide at least one track number.")
                  return
@@ -2319,7 +2380,6 @@ async def text_handler(c, m: Message):
                 
                 stream_index_to_map = tracks[user_track_num - 1]['stream_index']
                 new_stream_map.append(f"0:{stream_index_to_map}") 
-            # --------------------------------------------
 
             asyncio.create_task(
                 handle_audio_remux(
@@ -2345,9 +2405,7 @@ async def text_handler(c, m: Message):
             except Exception: pass
             PENDING_AUDIO_ORDERS.pop(prompt_message_id, None)
             return
-    # -----------------------------------------------------
 
-    # --- NEW: Handle Post Creation Editing Steps ---
     if uid in CREATE_POST_MODE and uid in POST_CREATION_STATE:
         state_data = POST_CREATION_STATE[uid]
         state_data['message_ids'].append(m.id) 
@@ -2433,15 +2491,13 @@ async def text_handler(c, m: Message):
             
             await m.reply_text("✅ Post creation successfully completed and additional messages deleted.")
             return
-    # --- END NEW: Handle Post Creation Editing Steps ---
-
 
     if text.startswith("http://") or text.startswith("https://"):
         url = text
         if uid in ZIP_DOWNLOAD_MODE:
             if uid not in ZIP_DL_QUEUES:
                 ZIP_DL_QUEUES[uid] = asyncio.Queue()
-            queue_msg = await m.reply_text(f"ZIP link added to queue. Position: {ZIP_DL_QUEUES[uid].qsize() + 1}")
+            queue_msg = await m.reply_text(f"Queue item added. Position: {ZIP_DL_QUEUES[uid].qsize() + 1}")
             await ZIP_DL_QUEUES[uid].put({'url': url, 'message': m, 'queue_msg': queue_msg})
             if uid not in ZIP_DL_WORKERS or ZIP_DL_WORKERS[uid].done():
                 ZIP_DL_WORKERS[uid] = asyncio.create_task(zip_download_worker(uid, c))
@@ -2451,7 +2507,7 @@ async def text_handler(c, m: Message):
             await fetch_youtube_formats(c, m, url)
             return
 
-        original_name = url.split("/")[-1].split("?")[0] or "url_download"
+        original_name = await get_filename_from_url(url)
         if uid in BATCH_UPLOAD_MODE:
             if uid not in BATCH_DATA:
                 BATCH_DATA[uid] = []
@@ -2462,7 +2518,7 @@ async def text_handler(c, m: Message):
                 'url': url
             })
             count = len(BATCH_DATA[uid])
-            status_text = f"{count} items saved for batch upload."
+            status_text = f"{count} items saved for batch upload.\nLast: `{original_name}`"
             await update_batch_status(c, m, uid, status_text)
         else:
             await add_to_queue(uid, c, m, original_name, is_url=True, url=url)
@@ -2481,7 +2537,7 @@ async def upload_url_cmd(c, m: Message):
     if uid in ZIP_DOWNLOAD_MODE:
         if uid not in ZIP_DL_QUEUES:
             ZIP_DL_QUEUES[uid] = asyncio.Queue()
-        queue_msg = await m.reply_text(f"ZIP link added to queue. Position: {ZIP_DL_QUEUES[uid].qsize() + 1}")
+        queue_msg = await m.reply_text(f"Queue item added. Position: {ZIP_DL_QUEUES[uid].qsize() + 1}")
         await ZIP_DL_QUEUES[uid].put({'url': url, 'message': m, 'queue_msg': queue_msg})
         if uid not in ZIP_DL_WORKERS or ZIP_DL_WORKERS[uid].done():
             ZIP_DL_WORKERS[uid] = asyncio.create_task(zip_download_worker(uid, c))
@@ -2491,7 +2547,7 @@ async def upload_url_cmd(c, m: Message):
         await fetch_youtube_formats(c, m, url)
         return
 
-    original_name = url.split("/")[-1].split("?")[0] or "url_download"
+    original_name = await get_filename_from_url(url)
     
     if uid in BATCH_UPLOAD_MODE:
         if uid not in BATCH_DATA:
@@ -2503,25 +2559,12 @@ async def upload_url_cmd(c, m: Message):
             'url': url
         })
         count = len(BATCH_DATA[uid])
-        status_text = f"{count} items saved for batch upload."
+        status_text = f"{count} items saved for batch upload.\nLast: `{original_name}`"
         await update_batch_status(c, m, uid, status_text)
     else:
         await add_to_queue(uid, c, m, original_name, is_url=True, url=url)
 
-async def handle_url_download_and_upload(c: Client, m: Message, url: str):
-    uid = m.from_user.id
-    try:
-        status_msg = await m.reply_text("Downloading...", reply_markup=progress_keyboard())
-        await download_and_process_generic(c, m, url, status_msg)
-    except Exception as e:
-        logger.error(f"URL Error: {e}")
-        try:
-            await status_msg.edit(f"Error: {e}")
-        except:
-            await m.reply_text(f"Error: {e}")
-
-async def download_and_process_generic(c, m, url, status_msg, cancel_event_passed=None, original_name=""):
-    """Fallback for direct URLs or Google Drive if YT-DLP fails/skips"""
+async def download_and_process_generic(c, m, url, status_msg, cancel_event_passed=None):
     uid = m.from_user.id
     cancel_event = cancel_event_passed or asyncio.Event()
     if not cancel_event_passed:
@@ -2531,21 +2574,19 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
         USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
         
     try:
-        if not original_name:
-            original_name = url.split("/")[-1].split("?")[0] or f"download_{int(datetime.now().timestamp())}"
-            original_name = urllib.parse.unquote(original_name)
-            
-        safe_name = re.sub(r"[\\/*?\"<>|:]", "_", original_name)
+        fname = await get_filename_from_url(url)
+        safe_name = re.sub(r"[\\/*?\"<>|:]", "_", fname)
 
         if len(safe_name) > 100:
-            safe_name = safe_name[:100]
+            ext = Path(safe_name).suffix
+            safe_name = safe_name[:100 - len(ext)] + ext
 
         video_exts = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm"}
         if not any(safe_name.lower().endswith(ext) for ext in video_exts):
             safe_name += ".mp4"
 
         tmp_in = TMP / f"dl_{uid}_{int(datetime.now().timestamp())}_{safe_name}"
-        ok, err, final_name = False, None, original_name
+        ok, err = False, None
         
         if is_drive_url(url):
             fid = extract_drive_id(url)
@@ -2553,23 +2594,15 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
                 await status_msg.edit("Google Drive ID not found.")
                 if cancel_event in TASKS.get(uid, []): TASKS[uid].remove(cancel_event)
                 return
-            ok, err, final_name = await download_drive_file(fid, tmp_in, status_msg, cancel_event=cancel_event, original_name=original_name)
+            ok, err = await download_drive_file(fid, tmp_in, status_msg, cancel_event=cancel_event, original_name=fname)
         else:
-            ok, err, final_name = await download_url_generic(url, tmp_in, status_msg, cancel_event=cancel_event, original_name=original_name)
+            ok, err = await download_url_generic(url, tmp_in, status_msg, cancel_event=cancel_event, original_name=fname)
 
         if not ok:
-            await status_msg.edit(f"Download Failed: {err}\n\nQueue Paused.", reply_markup=error_halt_keyboard())
-            QUEUE_PAUSE_EVENTS[uid].clear()
-            if tmp_in.exists(): tmp_in.unlink()
-            if cancel_event in TASKS.get(uid, []): TASKS[uid].remove(cancel_event)
-            return
+            raise Exception(f"Download Failed: {err}")
 
         await status_msg.edit("Download complete. Uploading...", reply_markup=None)
-        
-        safe_final_name = re.sub(r"[\\/*?\"<>|:]", "_", final_name)
-        if len(safe_final_name) > 100: safe_final_name = safe_final_name[:100]
-        
-        renamed_file = generate_new_filename(safe_final_name)
+        renamed_file = generate_new_filename(safe_name)
         
         if uid in MKV_AUDIO_CHANGE_MODE:
             try:
@@ -2579,7 +2612,7 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
                 if not audio_tracks:
                     await status_msg.edit("No audio tracks found in this video or FFprobe failed. Uploading directly...")
                     asyncio.create_task(
-                        sequential_upload_task(uid, c, m, tmp_in, renamed_file, status_msg.id, cancel_event, default_caption=safe_final_name)
+                        sequential_upload_task(uid, c, m, tmp_in, renamed_file, status_msg.id, cancel_event, default_caption=safe_name, original_caption=fname)
                     )
                     return
                 
@@ -2603,44 +2636,40 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
                     'path': tmp_in, 
                     'original_name': renamed_file,
                     'tracks': audio_tracks,
-                    'default_caption': safe_final_name
+                    'default_caption': safe_name
                 }
                 return 
             except Exception as e:
                 logger.error(f"URL Audio track analysis error: {e}")
                 await status_msg.edit(f"Error analyzing audio tracks: {e}. Uploading directly...")
                 asyncio.create_task(
-                    sequential_upload_task(uid, c, m, tmp_in, renamed_file, status_msg.id, cancel_event, default_caption=safe_final_name)
+                    sequential_upload_task(uid, c, m, tmp_in, renamed_file, status_msg.id, cancel_event, default_caption=safe_name, original_caption=fname)
                 )
                 return
 
         asyncio.create_task(
-            sequential_upload_task(uid, c, m, tmp_in, renamed_file, status_msg.id, cancel_event, default_caption=safe_final_name)
+            sequential_upload_task(uid, c, m, tmp_in, renamed_file, status_msg.id, cancel_event, default_caption=safe_name, original_caption=fname)
         )
     except Exception as e:
-        await status_msg.edit(f"Error: {e}\n\nQueue Paused.", reply_markup=error_halt_keyboard())
-        QUEUE_PAUSE_EVENTS[uid].clear()
+        raise e
     finally:
         pass 
 
 async def handle_caption_only_upload(c: Client, m: Message):
-    """Wrapper for handling caption change from message object"""
     file_info = m.video or m.document
     await handle_caption_only_upload_with_file(c, m, file_info)
 
 async def handle_caption_only_upload_with_file(c: Client, m: Message, file_info):
     uid = m.from_user.id
     
-    use_orig_cap = (uid in USE_ORIGINAL_CAPTION_IN_MULTI_GROUP)
+    use_orig_cap = (uid in USE_ORIGINAL_CAPTION_IN_MULTI_GROUP) or (uid not in EDIT_CAPTION_MODE) or (USER_CAPTIONS.get(uid) is None)
     
     if use_orig_cap:
-        caption_to_use = m.caption or getattr(file_info, 'file_name', f"file_{file_info.file_unique_id}")
+        caption_to_use = m.caption or (file_info.file_name if file_info and file_info.file_name else "Video")
         caption_entities_to_use = m.caption_entities
     else:
         caption_to_use = USER_CAPTIONS.get(uid)
-        if not caption_to_use:
-            caption_to_use = getattr(m, 'caption', getattr(file_info, 'file_name', f"file_{file_info.file_unique_id}"))
-        caption_entities_to_use = getattr(m, 'caption_entities', None) if not USER_CAPTIONS.get(uid) else None
+        caption_entities_to_use = None
 
     cancel_event = asyncio.Event()
     TASKS.setdefault(uid, []).append(cancel_event)
@@ -2662,7 +2691,7 @@ async def handle_caption_only_upload_with_file(c: Client, m: Message, file_info)
                 await m.reply_text("This is not a video or document file.")
             return
         
-        if use_orig_cap or not USER_CAPTIONS.get(uid):
+        if use_orig_cap:
             final_caption = caption_to_use
             final_entities = caption_entities_to_use
         else:
@@ -2671,9 +2700,9 @@ async def handle_caption_only_upload_with_file(c: Client, m: Message, file_info)
         
         if file_info.file_id:
             try:
-                parse_mode_arg = None if (use_orig_cap or not USER_CAPTIONS.get(uid)) else ParseMode.MARKDOWN
+                parse_mode_arg = None if use_orig_cap else ParseMode.MARKDOWN
 
-                if source_message.video or (file_info and getattr(file_info, 'duration', 0) > 0): # Treat as video
+                if source_message.video or (file_info and getattr(file_info, 'duration', 0) > 0): 
                     await c.send_video(
                         chat_id=m.chat.id,
                         video=file_info.file_id,
@@ -2732,17 +2761,13 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
         return
         
     file_info = m.video or m.document
+    original_name = file_info.file_name if file_info and file_info.file_name else f"file_{file_info.file_unique_id}"
 
     if uid in ZIP_DOWNLOAD_MODE:
         if uid not in ZIP_DL_QUEUES:
             ZIP_DL_QUEUES[uid] = asyncio.Queue()
-        queue_msg = await m.reply_text(f"Telegram file added to ZIP queue. Position: {ZIP_DL_QUEUES[uid].qsize() + 1}")
-        await ZIP_DL_QUEUES[uid].put({
-            'message': m,
-            'file_info': file_info,
-            'queue_msg': queue_msg,
-            'is_telegram_file': True
-        })
+        queue_msg = await m.reply_text(f"Queue item added. Position: {ZIP_DL_QUEUES[uid].qsize() + 1}")
+        await ZIP_DL_QUEUES[uid].put({'message': m, 'queue_msg': queue_msg, 'is_telegram_file': True})
         if uid not in ZIP_DL_WORKERS or ZIP_DL_WORKERS[uid].done():
             ZIP_DL_WORKERS[uid] = asyncio.create_task(zip_download_worker(uid, c))
         return
@@ -2766,8 +2791,7 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
             
             group_idx = len(MULTI_GROUP_DATA[uid])
             count_in_group = len(MULTI_GROUP_DATA[uid][-1])
-            original_name = getattr(file_info, 'file_name', f"file_{file_info.file_unique_id}")
-            status_text = f"Group {group_idx}: {count_in_group} video file IDs saved.\n**File:** `{original_name}`"
+            status_text = f"Group {group_idx}: {count_in_group} video file IDs saved.\nLast: `{original_name}`"
             markup = InlineKeyboardMarkup([[InlineKeyboardButton("Done ✅", callback_data="multi_group_done")]])
             
             if uid in MULTI_GROUP_DONE_MSG:
@@ -2793,20 +2817,12 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
             })
             
             count = len(BATCH_DATA[uid])
-            original_name = getattr(file_info, 'file_name', f"file_{file_info.file_unique_id}")
-            status_text = f"{count} video file IDs saved.\n**File:** `{original_name}`"
+            status_text = f"{count} video file IDs saved.\nLast: `{original_name}`"
             await update_batch_status(c, m, uid, status_text)
             return
 
         await handle_caption_only_upload(c, m)
         return
-
-    if file_info and getattr(file_info, 'file_name', None):
-        original_name = file_info.file_name
-    elif m.video:
-        original_name = f"video_{file_info.file_unique_id}.mp4"
-    else:
-        original_name = f"file_{file_info.file_unique_id}"
 
     if uid in BATCH_UPLOAD_MODE:
         if uid not in BATCH_DATA: 
@@ -2817,13 +2833,12 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
             'is_url': False
         })
         count = len(BATCH_DATA[uid])
-        status_text = f"{count} files saved for batch upload.\n**File:** `{original_name}`"
+        status_text = f"{count} files saved for batch upload.\nLast: `{original_name}`"
         await update_batch_status(c, m, uid, status_text)
         return
 
-    await add_to_queue(uid, c, m, original_name, is_url=False)
+    await add_to_queue(uid, c, m, original_name, is_url=False, original_caption=m.caption)
 
-# --- HANDLER FUNCTION: Handle file in audio change mode ---
 async def handle_audio_change_file(c: Client, m: Message):
     uid = m.from_user.id
     file_info = m.video or m.document
@@ -2838,7 +2853,7 @@ async def handle_audio_change_file(c: Client, m: Message):
     tmp_path = None
     status_msg = None
     try:
-        original_name = getattr(file_info, 'file_name', f"video_{file_info.file_unique_id}.mkv")
+        original_name = file_info.file_name or f"video_{file_info.file_unique_id}.mkv"
         if not '.' in original_name:
             original_name += '.mkv'
             
@@ -2900,7 +2915,6 @@ async def handle_audio_change_file(c: Client, m: Message):
         except Exception:
             pass
 
-# --- HANDLER FUNCTION: Handle audio remux ---
 async def handle_audio_remux(c: Client, m: Message, in_path: Path, original_name: str, new_stream_map: list, messages_to_delete: list = None, default_caption: str = None):
     uid = m.from_user.id
     cancel_event = asyncio.Event()
@@ -2976,7 +2990,7 @@ async def sequential_remux_upload_task(uid, c, m, in_path, out_name, new_stream_
             all_messages_to_delete = messages_to_delete if messages_to_delete else []
             all_messages_to_delete.append(status_msg.id)
 
-            await process_file_and_upload(c, m, out_path, original_name=out_name, messages_to_delete=all_messages_to_delete, cancel_event_passed=cancel_event, passed_uid=uid, default_caption=default_caption) 
+            await process_file_and_upload(c, m, out_path, original_name=out_name, messages_to_delete=all_messages_to_delete, cancel_event_passed=cancel_event, passed_uid=uid, default_caption=default_caption, original_caption_passed=default_caption) 
 
         except Exception as e:
             logger.error(f"Audio remux process error: {e}")
@@ -3038,7 +3052,7 @@ async def rename_cmd(c, m: Message):
             await m.reply_text("Download complete, uploading with new name...", reply_markup=None)
         
         asyncio.create_task(
-            sequential_upload_task(uid, c, m, tmp_out, new_name, status_msg.id, cancel_event, default_caption=new_name)
+            sequential_upload_task(uid, c, m, tmp_out, new_name, status_msg.id, cancel_event, default_caption=new_name, original_caption=new_name)
         )
     except Exception as e:
         await m.reply_text(f"Rename error: {e}")
@@ -3200,7 +3214,7 @@ def process_dynamic_caption(uid, caption_template):
     return "**" + "\n".join(caption_template.splitlines()) + "**"
 
 
-async def process_file_and_upload(c: Client, m: Message, in_path: Path, original_name: str = None, messages_to_delete: list = None, cancel_event_passed: asyncio.Event = None, passed_uid: int = None, default_caption: str = None):
+async def process_file_and_upload(c: Client, m: Message, in_path: Path, original_name: str = None, messages_to_delete: list = None, cancel_event_passed: asyncio.Event = None, passed_uid: int = None, default_caption: str = None, original_caption_passed: str = None):
     uid = passed_uid if passed_uid else (m.from_user.id if m.from_user else m.chat.id)
     cancel_event = cancel_event_passed
     if not cancel_event:
@@ -3223,7 +3237,7 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
         video_exts = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm"}
         audio_exts = {".mp3", ".m4a", ".flac", ".wav", ".aac"}
         
-        is_video_file = bool(m.video) or any(input_name.lower().endswith(ext) for ext in video_exts)
+        is_video_file = getattr(m, 'video', None) or any(input_name.lower().endswith(ext) for ext in video_exts)
         is_audio_file = any(input_name.lower().endswith(ext) for ext in audio_exts)
         
         orig_metadata = get_video_metadata(in_path) if is_video_file else {'duration': 0}
@@ -3235,10 +3249,14 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
             has_opus = has_opus_audio(in_path)
             
             if is_mp4_container:
-                if has_opus: final_ext = ".mkv" 
-                else: final_ext = ".mp4" 
-            elif is_mkv_container: final_ext = ".mkv" 
-            else: final_ext = ".mkv" 
+                if has_opus:
+                    final_ext = ".mkv" 
+                else:
+                    final_ext = ".mp4" 
+            elif is_mkv_container:
+                final_ext = ".mkv" 
+            else:
+                final_ext = ".mkv" 
             
             target_stem = Path(target_name).stem
             target_name = target_stem + final_ext
@@ -3249,14 +3267,16 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
                 status_text = "Processing video (Metadata & Format Check)..."
                 if messages_to_delete:
                      pass 
-                status_msg = await m.reply_text(status_text, reply_markup=progress_keyboard())
+                status_msg = await c.send_message(m.chat.id, status_text, reply_markup=progress_keyboard())
                 USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
             except Exception:
-                status_msg = await m.reply_text(status_text, reply_markup=progress_keyboard())
+                status_msg = await c.send_message(m.chat.id, status_text, reply_markup=progress_keyboard())
                 USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
             
-            if messages_to_delete: messages_to_delete.append(status_msg.id)
-            else: messages_to_delete = [status_msg.id]
+            if messages_to_delete:
+                messages_to_delete.append(status_msg.id)
+            else:
+                messages_to_delete = [status_msg.id]
 
             cmd = [
                 "ffmpeg", "-y",
@@ -3289,24 +3309,28 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
                         process.terminate()
                         raise Exception("Cancelled")
                     line = await process.stdout.readline()
-                    if not line: break
+                    if not line:
+                        break
                     line = line.decode('utf-8').strip()
                     if line.startswith("out_time_us="):
                         us_str = line.split("=")[1]
                         try:
                             if us_str != "N/A":
                                 out_time_sec = int(us_str) / 1000000.0
-                                await progress_callback(out_time_sec, orig_duration, "Processing video (Metadata & Format Check)...", status_msg, start_t, is_time_based=True, original_name=target_name)
-                        except Exception: pass
+                                await progress_callback(out_time_sec, orig_duration, "Processing video (Metadata & Format Check)...", status_msg, start_t, is_time_based=True, original_name=original_name)
+                        except Exception:
+                            pass
                 await process.wait()
                 if process.returncode == 0 and processed_path.exists() and processed_path.stat().st_size > 0:
                     upload_path = processed_path
-                else: logger.warning("Processing failed. Uploading original.")
+                else:
+                    logger.warning("Processing failed. Uploading original.")
             else:
                 result = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True, check=False, timeout=3600)
                 if result.returncode == 0 and processed_path.exists() and processed_path.stat().st_size > 0:
                     upload_path = processed_path
-                else: logger.warning(f"Processing failed: {result.stderr}. Uploading original.")
+                else:
+                    logger.warning(f"Processing failed: {result.stderr}. Uploading original.")
 
         if is_video_file:
             thumb_path = USER_THUMBS.get(uid)
@@ -3314,37 +3338,49 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
                 temp_thumb_path = TMP / f"thumb_{uid}_{int(datetime.now().timestamp())}.jpg"
                 thumb_time_sec = USER_THUMB_TIME.get(uid, 1) 
                 ok = await generate_video_thumbnail(upload_path, temp_thumb_path, timestamp_sec=thumb_time_sec)
-                if ok: thumb_path = str(temp_thumb_path)
+                if ok:
+                    thumb_path = str(temp_thumb_path)
 
         try:
-            if status_msg: await status_msg.edit("Starting upload...", reply_markup=progress_keyboard())
+            if status_msg:
+                await status_msg.edit("Starting upload...", reply_markup=progress_keyboard())
             else:
-                status_msg = await m.reply_text("Starting upload...", reply_markup=progress_keyboard())
+                status_msg = await c.send_message(m.chat.id, "Starting upload...", reply_markup=progress_keyboard())
                 USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
         except Exception:
-             status_msg = await m.reply_text("Starting upload...", reply_markup=progress_keyboard())
+             status_msg = await c.send_message(m.chat.id, "Starting upload...", reply_markup=progress_keyboard())
              USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
              
         if messages_to_delete:
-            if status_msg.id not in messages_to_delete: messages_to_delete.append(status_msg.id)
-        else: messages_to_delete = [status_msg.id]
+            if status_msg.id not in messages_to_delete:
+                messages_to_delete.append(status_msg.id)
+        else:
+            messages_to_delete = [status_msg.id]
 
-        if cancel_event.is_set(): raise Exception("Cancelled")
+        if cancel_event.is_set():
+            raise Exception("Cancelled")
         
         video_metadata = get_video_metadata(upload_path) if (is_video_file and upload_path.exists()) else {'duration': 0, 'width': 0, 'height': 0}
         duration_sec = video_metadata.get('duration', 0)
         width_px = video_metadata.get('width', 0)
         height_px = video_metadata.get('height', 0)
         
-        # Original caption logic
-        caption_to_use = f"**{target_name}**"
-        if not final_caption_template:
-            if getattr(m, 'caption', None):
-                caption_to_use = m.caption
+        # USE ORIGINAL NAME IN CAPTION
+        caption_to_use = f"**{original_name}**" 
+        
+        # Determine caption logic based on modes
+        use_orig_cap = False
+        if uid not in EDIT_CAPTION_MODE or uid in USE_ORIGINAL_CAPTION_IN_MULTI_GROUP:
+            use_orig_cap = True
+            
+        if use_orig_cap:
+            if original_caption_passed:
+                caption_to_use = original_caption_passed
             elif default_caption:
                 caption_to_use = f"**{default_caption}**"
         else:
-            caption_to_use = process_dynamic_caption(uid, final_caption_template)
+            if final_caption_template:
+                caption_to_use = process_dynamic_caption(uid, final_caption_template)
 
         parts_to_upload = [(upload_path, target_name, None, duration_sec)]
         
@@ -3352,7 +3388,8 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
         LIMIT_SIZE = 2000 * 1024 * 1024 
         if is_video_file and upload_path.exists() and upload_path.stat().st_size > LIMIT_SIZE and duration_sec > 0:
             try:
-                if status_msg: await status_msg.edit("Video size is greater than 2000MB, splitting video into smaller parts...", reply_markup=progress_keyboard())
+                if status_msg:
+                    await status_msg.edit("Video size is greater than 2000MB, splitting video into smaller parts...", reply_markup=progress_keyboard())
             except Exception: pass
             
             num_parts = math.ceil(upload_path.stat().st_size / MAX_SPLIT_SIZE)
@@ -3363,8 +3400,10 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
                 s_time = i * base_chunk
                 e_time = (i + 1) * base_chunk
                 
-                if i > 0: s_time -= 10
-                if i < num_parts - 1: e_time += 10
+                if i > 0:
+                    s_time -= 10
+                if i < num_parts - 1:
+                    e_time += 10
                 
                 s_time = max(0, s_time)
                 e_time = min(duration_sec, e_time)
@@ -3392,7 +3431,8 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
                 if part_path.exists() and part_path.stat().st_size > 0:
                     split_parts.append((part_path, part_target_name, i+1, part_duration))
             
-            if split_parts: parts_to_upload = split_parts
+            if split_parts:
+                parts_to_upload = split_parts
 
         last_exc = None
         for current_upload_path, current_target_name, part_num, current_duration in parts_to_upload:
@@ -3400,8 +3440,10 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
             
             part_caption = caption_to_use
             if part_num is not None:
-                if part_caption.endswith("**"): part_caption = part_caption[:-2] + f"\n✔️ Part - {part_num:02d}**"
-                else: part_caption += f"\n✔️ Part - {part_num:02d}"
+                if part_caption.endswith("**"):
+                    part_caption = part_caption[:-2] + f"\n✔️ Part - {part_num:02d}**"
+                else:
+                    part_caption += f"\n✔️ Part - {part_num:02d}"
             
             try:
                 if status_msg:
@@ -3409,7 +3451,7 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
                     await status_msg.edit(action_text, reply_markup=progress_keyboard())
             except Exception: pass
             
-            upload_attempts = 10
+            upload_attempts = 3
             part_success = False
             for attempt in range(1, upload_attempts + 1):
                 try:
@@ -3417,10 +3459,11 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
 
                     start_t = time.time()
                     async def ul_prog(current, total):
-                        if cancel_event.is_set(): c.stop_transmission()
+                        if cancel_event.is_set():
+                            c.stop_transmission()
                         action_text = f"Uploading... {'(Part ' + str(part_num) + ')' if part_num else ''}"
                         if status_msg:
-                            await progress_callback(current, total, action_text, status_msg, start_t, original_name=current_target_name)
+                            await progress_callback(current, total, action_text, status_msg, start_t, original_name=original_name)
 
                     if is_video_file:
                         await c.send_video(
@@ -3460,45 +3503,44 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
                     break
                 except Exception as e:
                     last_exc = e
-                    if "Cancelled" in str(e): break
+                    if "Cancelled" in str(e):
+                        break
                     logger.warning("Upload attempt %s failed for part %s: %s", attempt, part_num, e)
-                    if attempt < upload_attempts:
-                        if status_msg:
-                            try: await status_msg.edit(f"Upload failed: {e}. Retrying {attempt}/{upload_attempts}...", reply_markup=progress_keyboard())
-                            except: pass
-                        await asyncio.sleep(2 * attempt)
+                    await asyncio.sleep(2 * attempt)
             
-            if not part_success: break 
+            if not part_success:
+                break 
 
         if not last_exc:
             if messages_to_delete:
-                try: await c.delete_messages(chat_id=m.chat.id, message_ids=messages_to_delete)
-                except Exception: pass
+                try:
+                    await c.delete_messages(chat_id=m.chat.id, message_ids=messages_to_delete)
+                except Exception:
+                    pass
         
         if last_exc:
-            msg_text = "Operation cancelled by user." if "Cancelled" in str(last_exc) else f"Upload failed: {last_exc}\n\nQueue Paused."
-            if status_msg:
-                await status_msg.edit(msg_text, reply_markup=error_halt_keyboard() if "Cancelled" not in msg_text else None)
-            else:
-                await m.reply_text(msg_text, reply_markup=error_halt_keyboard() if "Cancelled" not in msg_text else None)
-            QUEUE_PAUSE_EVENTS[uid].clear()
+            raise last_exc
 
     except Exception as e:
-        msg_text = "Operation cancelled by user." if "Cancelled" in str(e) else f"Upload error: {e}\n\nQueue Paused."
-        if status_msg: await status_msg.edit(msg_text, reply_markup=error_halt_keyboard() if "Cancelled" not in msg_text else None)
-        else: await m.reply_text(msg_text, reply_markup=error_halt_keyboard() if "Cancelled" not in msg_text else None)
-        QUEUE_PAUSE_EVENTS[uid].clear()
+        raise e
     finally:
         try:
-            if upload_path != in_path and upload_path.exists(): upload_path.unlink()
-            if in_path.exists(): in_path.unlink()
-            if temp_thumb_path and Path(temp_thumb_path).exists(): Path(temp_thumb_path).unlink()
+            if upload_path != in_path and upload_path.exists():
+                upload_path.unlink()
+            if in_path.exists():
+                in_path.unlink()
+            if temp_thumb_path and Path(temp_thumb_path).exists():
+                Path(temp_thumb_path).unlink()
+            
             for p_path, _, p_num, _ in parts_to_upload:
-                 if p_num is not None and p_path.exists(): p_path.unlink()
+                 if p_num is not None and p_path.exists():
+                      p_path.unlink()
+                      
             if cancel_event in TASKS.get(uid, []): TASKS[uid].remove(cancel_event)
             if status_msg and status_msg.id in USER_TASK_EVENTS.get(uid, {}):
                 USER_TASK_EVENTS[uid].pop(status_msg.id)
-        except Exception: pass
+        except Exception:
+            pass
 
 @app.on_message(filters.command("broadcast") & filters.private)
 async def broadcast_cmd_no_reply(c, m: Message):
