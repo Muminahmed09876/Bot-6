@@ -26,6 +26,8 @@ import urllib.parse
 import zipfile
 import shutil
 import cgi
+import socket
+import tarfile
 
 # For extended archive support (if available in environment)
 try:
@@ -34,6 +36,14 @@ except ImportError:
     pass
 try:
     import py7zr
+except ImportError:
+    pass
+try:
+    from pyunpack import Archive
+except ImportError:
+    pass
+try:
+    import patoolib
 except ImportError:
     pass
 
@@ -337,6 +347,16 @@ def format_size(bytes_size):
     s = round(bytes_size / p, 2)
     return "%s %s" % (s, size_name[i])
 
+def make_bold(text):
+    """Utility to ensure text is bold formatted correctly"""
+    if not text: return text
+    text_str = str(text).strip()
+    if not text_str.startswith("**"):
+        text_str = f"**{text_str}"
+    if not text_str.endswith("**"):
+        text_str = f"{text_str}**"
+    return text_str
+
 PROGRESS_CACHE = {}
 
 def make_progress_bar(percent):
@@ -516,7 +536,9 @@ def generate_post_caption(data: dict) -> str:
 async def get_filename_from_url(url):
     """Accurately detect filename from URL/Headers to fix > 100 chars bug."""
     try:
-        async with aiohttp.ClientSession() as sess:
+        # Optimized with IPv4 forcing to prevent slow DNS timeouts
+        connector = aiohttp.TCPConnector(limit=0, family=socket.AF_INET, use_dns_cache=True, ttl_dns_cache=300)
+        async with aiohttp.ClientSession(connector=connector) as sess:
             async with sess.head(url, allow_redirects=True, timeout=10) as resp:
                 cd = resp.headers.get('Content-Disposition')
                 if cd:
@@ -566,7 +588,8 @@ async def download_url_generic(url: str, out_path: Path, message: Message = None
             downloaded = out_path.stat().st_size
             headers["Range"] = f"bytes={downloaded}-"
             
-        connector = aiohttp.TCPConnector(limit=0, force_close=True)
+        # Cloudflare DNS/IPv4 optimization for faster connection speed
+        connector = aiohttp.TCPConnector(limit=0, family=socket.AF_INET, use_dns_cache=True, ttl_dns_cache=300)
         try:
             async with aiohttp.ClientSession(timeout=timeout, headers=headers, connector=connector) as sess:
                 async with sess.get(url, allow_redirects=True, proxy=proxy) as resp:
@@ -599,7 +622,8 @@ async def download_drive_file(file_id: str, out_path: Path, message: Message = N
             downloaded = out_path.stat().st_size
             headers["Range"] = f"bytes={downloaded}-"
             
-        connector = aiohttp.TCPConnector(limit=0, force_close=True)
+        # DNS optimization for faster connectivity
+        connector = aiohttp.TCPConnector(limit=0, family=socket.AF_INET, use_dns_cache=True, ttl_dns_cache=300)
         try:
             async with aiohttp.ClientSession(timeout=timeout, headers=headers, connector=connector) as sess:
                 async with sess.get(base, allow_redirects=True, proxy=proxy) as resp:
@@ -901,6 +925,10 @@ async def queue_delete_cb(c, cb):
                 ZIP_DL_QUEUES[uid].task_done()
             except: pass
             
+    if uid in USER_WORKERS:
+        USER_WORKERS[uid].cancel()
+        del USER_WORKERS[uid]
+        
     USER_QUEUE_PAUSED.discard(uid)
     await cb.answer("All Queues Deleted & Cancelled!", show_alert=True)
     try: await cb.message.delete()
@@ -1168,8 +1196,11 @@ async def restart_cmd(c, m: Message):
             f"**Total Storage:** `{format_size(total)}`\n"
             f"**Used Storage:** `{format_size(used)}`\n"
             f"**Free Storage:** `{format_size(free)}`\n\n"
-            f"Use the button below to format/clear all temporary bot data.")
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("Clear Data 🗑", callback_data="clear_tmp_data")]])
+            f"Use the buttons below to manage bot data.")
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Clear Tmp Data 🗑", callback_data="clear_tmp_data")],
+        [InlineKeyboardButton("Clean & Reset Bot 🔄", callback_data="full_reset_bot")]
+    ])
     await m.reply_text(text, reply_markup=markup)
 
 @app.on_callback_query(filters.regex("clear_tmp_data"))
@@ -1180,6 +1211,75 @@ async def clear_tmp_data_cb(c, cb):
     TMP.mkdir(parents=True, exist_ok=True)
     await cb.answer("Storage Formatted / Data Cleared!", show_alert=True)
     await cb.message.edit_text(cb.message.text + "\n\n*(Data Successfully Cleared)*")
+
+@app.on_callback_query(filters.regex("full_reset_bot"))
+async def full_reset_bot_cb(c, cb):
+    uid = cb.from_user.id
+    if not is_admin(uid): return
+    
+    # Fully Clear All State Vars
+    USER_THUMBS.clear()
+    TASKS.clear()
+    USER_TASK_EVENTS.clear()
+    SET_THUMB_REQUEST.clear()
+    SUBSCRIBERS.clear()
+    SET_CAPTION_REQUEST.clear()
+    USER_CAPTIONS.clear()
+    USER_COUNTERS.clear()
+    EDIT_CAPTION_MODE.clear()
+    USER_THUMB_TIME.clear()
+    HIDE_PROGRESS_BAR.clear()
+    USER_PROGRESS_INTERVAL.clear()
+    USER_QUEUE_PAUSED.clear()
+    AUTO_UPLOAD_ALL.clear()
+    MKV_AUDIO_CHANGE_MODE.clear()
+    PENDING_AUDIO_ORDERS.clear()
+    CREATE_POST_MODE.clear()
+    POST_CREATION_STATE.clear()
+    BATCH_CAPTION_MODE.clear()
+    BATCH_UPLOAD_MODE.clear()
+    BATCH_DATA.clear()
+    BATCH_STATUS_MSG.clear()
+    
+    if uid in USER_QUEUES:
+        while not USER_QUEUES[uid].empty():
+            try: USER_QUEUES[uid].get_nowait(); USER_QUEUES[uid].task_done()
+            except: pass
+    USER_QUEUES.clear()
+    
+    for worker in USER_WORKERS.values():
+        worker.cancel()
+    USER_WORKERS.clear()
+    USER_UPLOAD_LOCKS.clear()
+    MULTI_GROUP_BATCH_MODE.clear()
+    MULTI_GROUP_DATA.clear()
+    USE_ORIGINAL_CAPTION_IN_MULTI_GROUP.clear()
+    MULTI_GROUP_DONE_MSG.clear()
+    ZIP_DOWNLOAD_MODE.clear()
+    ZIP_NAV_STATE.clear()
+    ZIP_READY_LIST.clear()
+    
+    if uid in ZIP_DL_QUEUES:
+        while not ZIP_DL_QUEUES[uid].empty():
+            try: ZIP_DL_QUEUES[uid].get_nowait(); ZIP_DL_QUEUES[uid].task_done()
+            except: pass
+    ZIP_DL_QUEUES.clear()
+    
+    for worker in ZIP_DL_WORKERS.values():
+        worker.cancel()
+    ZIP_DL_WORKERS.clear()
+    NAV_PATHS.clear()
+    YT_SESSIONS.clear()
+    YT_DLP_MODE.clear()
+    SAVED_YT_QUALITIES.clear()
+    
+    # Clear Files
+    shutil.rmtree(TMP, ignore_errors=True)
+    TMP.mkdir(parents=True, exist_ok=True)
+    
+    await cb.answer("Bot completely reset to fresh state!", show_alert=True)
+    await cb.message.edit_text(cb.message.text + "\n\n*(Bot Fully Reset & Cleaned)*")
+
 
 @app.on_message(filters.command("zip_file_download") & filters.private)
 async def zip_file_download_cmd(c, m: Message):
@@ -1700,8 +1800,12 @@ async def check_and_show_next_zip(c, chat_id, uid):
         if uid in AUTO_UPLOAD_ALL:
             files = ZIP_NAV_STATE[uid]['files_to_upload']
             final_order = list(range(1, len(files) + 1))
-            await c.send_message(chat_id, "Auto Upload All is ON. Starting upload...")
-            # Using asyncio task so it doesn't block
+            msg = await c.send_message(chat_id, "Auto Upload All is ON. Starting upload...")
+            async def auto_delete_msg(m_obj):
+                await asyncio.sleep(5)
+                try: await m_obj.delete()
+                except: pass
+            asyncio.create_task(auto_delete_msg(msg))
             asyncio.create_task(process_zip_uploads(c, chat_id, uid, final_order))
         else:
             await show_files_for_upload(c, chat_id, uid, next_zip['files_to_upload'])
@@ -1822,43 +1926,9 @@ async def zip_cancel_cb(c, cb):
     await cb.message.edit_text("ZIP session cleared. Files are kept and can be accessed via `path`.")
     await check_and_show_next_zip(c, cb.message.chat.id, uid)
 
-
-def get_archive_type(filepath: Path) -> str:
-    """Returns the actual archive type ('zip', 'rar', '7z', 'split') based on magic bytes or extension, or None."""
-    if not filepath.exists() or filepath.is_dir():
-        return None
-    
-    name_lower = filepath.name.lower()
-    ext = filepath.suffix.lower()
-    
-    # Ignore secondary parts of split archives so they aren't processed as starting points
-    if re.search(r'\.part(?:0*[2-9]|[1-9][0-9]+)\.rar$', name_lower): return None
-    if re.search(r'\.r[0-9]{2}$', ext): return None 
-    if re.search(r'\.[0-9]{3}$', ext) and not ext == '.001': return None 
-    
-    try:
-        with open(filepath, 'rb') as f:
-            header = f.read(8)
-            if header.startswith(b'PK\x03\x04'):
-                return 'zip'
-            elif header.startswith(b'Rar!\x1a\x07'):
-                return 'rar'
-            elif header.startswith(b'7z\xbc\xaf\x27\x1c'):
-                return '7z'
-    except Exception:
-        pass
-        
-    if ext == '.zip': return 'zip'
-    if ext == '.rar': return 'rar'
-    if ext == '.7z': return '7z'
-    if ext == '.001' or re.search(r'\.part0*1\.rar$', name_lower):
-        return 'split'
-        
-    return None
-
 def is_archive_file(filepath: Path) -> bool:
-    return get_archive_type(filepath) is not None
-
+    ext = filepath.suffix.lower()
+    return ext in ['.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz']
 
 async def execute_zip_download_and_extract(c, m, url=None):
     uid = m.from_user.id
@@ -1916,64 +1986,43 @@ async def execute_zip_download_and_extract(c, m, url=None):
         
         start_t = time.time()
         
-        # General extraction logic
-        archive_type = get_archive_type(tmp_in)
-        extracted_successfully = False
-        
-        if archive_type == 'zip':
-            try:
-                with zipfile.ZipFile(tmp_in, 'r') as zip_ref:
-                    total_size = sum(info.file_size for info in zip_ref.infolist())
-                    extracted_size = 0
-                    for info in zip_ref.infolist():
-                        if cancel_event.is_set(): break
-                        await asyncio.to_thread(zip_ref.extract, info, ext_dir)
-                        extracted_size += info.file_size
-                        await progress_callback(extracted_size, total_size, "Extracting ZIP...", status_msg, start_t)
-                extracted_successfully = True
-            except Exception as e:
-                logger.warning(f"Python zipfile extraction failed: {e}")
-                
-        elif archive_type == 'rar' and 'rarfile' in globals():
-            try:
-                with rarfile.RarFile(tmp_in, 'r') as rar_ref:
-                    total_size = sum(info.file_size for info in rar_ref.infolist())
-                    extracted_size = 0
-                    for info in rar_ref.infolist():
-                        if cancel_event.is_set(): break
-                        await asyncio.to_thread(rar_ref.extract, info, ext_dir)
-                        extracted_size += info.file_size
-                        await progress_callback(extracted_size, total_size, "Extracting RAR...", status_msg, start_t)
-                extracted_successfully = True
-            except Exception as e:
-                logger.warning(f"Python rarfile extraction failed: {e}")
-                
-        elif archive_type == '7z' and 'py7zr' in globals():
-            try:
-                with py7zr.SevenZipFile(tmp_in, mode='r') as sz_ref:
-                    await asyncio.to_thread(sz_ref.extractall, path=ext_dir)
-                    await status_msg.edit("Extracting 7Z... Please wait.", reply_markup=progress_keyboard())
-                extracted_successfully = True
-            except Exception as e:
-                logger.warning(f"Python py7zr extraction failed: {e}")
-
-        if not extracted_successfully:
-            fallback_cmds = []
-            if archive_type == 'rar':
-                fallback_cmds.append(["unrar", "x", "-y", "-p-", "-kb", str(tmp_in), f"{ext_dir}/"])
-            fallback_cmds.append(["7z", "x", "-y", "-p-", str(tmp_in), f"-o{ext_dir}"])
-            if archive_type != 'rar':
-                fallback_cmds.append(["unrar", "x", "-y", "-p-", "-kb", str(tmp_in), f"{ext_dir}/"])
-            fallback_cmds.append(["bsdtar", "-xf", str(tmp_in), "-C", str(ext_dir)])
-
-            for cmd in fallback_cmds:
-                try:
-                    process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    await process.communicate()
-                    if process.returncode in [0, 1]:
-                        break
-                except Exception:
-                    pass
+        # General extraction logic with extended support
+        ext = tmp_in.suffix.lower()
+        if ext == '.zip':
+            with zipfile.ZipFile(tmp_in, 'r') as zip_ref:
+                total_size = sum(info.file_size for info in zip_ref.infolist())
+                extracted_size = 0
+                for info in zip_ref.infolist():
+                    if cancel_event.is_set(): break
+                    await asyncio.to_thread(zip_ref.extract, info, ext_dir)
+                    extracted_size += info.file_size
+                    await progress_callback(extracted_size, total_size, "Extracting ZIP...", status_msg, start_t)
+        elif ext == '.rar' and 'rarfile' in globals():
+            with rarfile.RarFile(tmp_in, 'r') as rar_ref:
+                total_size = sum(info.file_size for info in rar_ref.infolist())
+                extracted_size = 0
+                for info in rar_ref.infolist():
+                    if cancel_event.is_set(): break
+                    await asyncio.to_thread(rar_ref.extract, info, ext_dir)
+                    extracted_size += info.file_size
+                    await progress_callback(extracted_size, total_size, "Extracting RAR...", status_msg, start_t)
+        elif ext == '.7z' and 'py7zr' in globals():
+            with py7zr.SevenZipFile(tmp_in, mode='r') as sz_ref:
+                await asyncio.to_thread(sz_ref.extractall, path=ext_dir)
+                await status_msg.edit("Extracting 7Z... Please wait.", reply_markup=progress_keyboard())
+        elif ext in ['.tar', '.gz', '.bz2', '.xz']:
+            with tarfile.open(tmp_in, 'r:*') as tar_ref:
+                await asyncio.to_thread(tar_ref.extractall, path=ext_dir)
+                await status_msg.edit("Extracting TAR/GZ... Please wait.", reply_markup=progress_keyboard())
+        elif 'Archive' in globals():
+            await asyncio.to_thread(Archive(str(tmp_in)).extractall, str(ext_dir))
+        elif 'patoolib' in globals():
+            await asyncio.to_thread(patoolib.extract_archive, str(tmp_in), outdir=str(ext_dir))
+        else:
+            # Fallback for systems without specific libs
+            cmd = ["7z", "x", str(tmp_in), f"-o{ext_dir}", "-y"]
+            process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            await process.communicate()
             
         # Recursive archive extraction
         found_zip = True
@@ -1981,83 +2030,42 @@ async def execute_zip_download_and_extract(c, m, url=None):
             found_zip = False
             for root, dirs, files in os.walk(ext_dir):
                 for file in files:
-                    nested_path_to_check = Path(root) / file
-                    if is_archive_file(nested_path_to_check):
-                        nested_zip_path = nested_path_to_check
+                    if is_archive_file(Path(file)):
+                        nested_zip_path = Path(root) / file
                         try:
-                            nested_arc_type = get_archive_type(nested_zip_path)
-                            extracted_nested = False
-                            
-                            if nested_arc_type == 'zip':
-                                try:
-                                    with zipfile.ZipFile(nested_zip_path, 'r') as nested_ref:
-                                        n_total = sum(n_info.file_size for n_info in nested_ref.infolist())
-                                        n_ext = 0
-                                        n_start = time.time()
-                                        for n_info in nested_ref.infolist():
-                                            if cancel_event.is_set(): break
-                                            await asyncio.to_thread(nested_ref.extract, n_info, root)
-                                            n_ext += n_info.file_size
-                                            await progress_callback(n_ext, n_total, f"Extracting Nested Archive: {file[:10]}...", status_msg, n_start)
-                                    extracted_nested = True
-                                except Exception as e:
-                                    logger.warning(f"Nested zipfile extraction failed: {e}")
-                                    
-                            elif nested_arc_type == 'rar' and 'rarfile' in globals():
-                                try:
-                                    with rarfile.RarFile(nested_zip_path, 'r') as nested_ref:
-                                        await asyncio.to_thread(nested_ref.extractall, root)
-                                    extracted_nested = True
-                                except Exception as e:
-                                    logger.warning(f"Nested rarfile extraction failed: {e}")
-                                    
-                            elif nested_arc_type == '7z' and 'py7zr' in globals():
-                                try:
-                                    with py7zr.SevenZipFile(nested_zip_path, mode='r') as sz_ref:
-                                        await asyncio.to_thread(sz_ref.extractall, path=root)
-                                    extracted_nested = True
-                                except Exception as e:
-                                    logger.warning(f"Nested py7zr extraction failed: {e}")
-                            
-                            if not extracted_nested:
-                                fallback_cmds = []
-                                if nested_arc_type == 'rar':
-                                    fallback_cmds.append(["unrar", "x", "-y", "-p-", "-kb", str(nested_zip_path), f"{root}/"])
-                                fallback_cmds.append(["7z", "x", "-y", "-p-", str(nested_zip_path), f"-o{root}"])
-                                if nested_arc_type != 'rar':
-                                    fallback_cmds.append(["unrar", "x", "-y", "-p-", "-kb", str(nested_zip_path), f"{root}/"])
-                                fallback_cmds.append(["bsdtar", "-xf", str(nested_zip_path), "-C", str(root)])
-
-                                for cmd in fallback_cmds:
-                                    try:
-                                        process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                                        await process.communicate()
-                                        if process.returncode in [0, 1]:
-                                            break
-                                    except Exception:
-                                        pass
+                            n_ext = nested_zip_path.suffix.lower()
+                            if n_ext == '.zip':
+                                with zipfile.ZipFile(nested_zip_path, 'r') as nested_ref:
+                                    n_total = sum(n_info.file_size for n_info in nested_ref.infolist())
+                                    n_extr = 0
+                                    n_start = time.time()
+                                    for n_info in nested_ref.infolist():
+                                        if cancel_event.is_set(): break
+                                        await asyncio.to_thread(nested_ref.extract, n_info, root)
+                                        n_extr += n_info.file_size
+                                        await progress_callback(n_extr, n_total, f"Extracting Nested Archive: {file[:10]}...", status_msg, n_start)
+                            elif n_ext == '.rar' and 'rarfile' in globals():
+                                with rarfile.RarFile(nested_zip_path, 'r') as nested_ref:
+                                    await asyncio.to_thread(nested_ref.extractall, root)
+                            elif n_ext == '.7z' and 'py7zr' in globals():
+                                with py7zr.SevenZipFile(nested_zip_path, mode='r') as sz_ref:
+                                    await asyncio.to_thread(sz_ref.extractall, path=root)
+                            elif n_ext in ['.tar', '.gz', '.bz2', '.xz']:
+                                with tarfile.open(nested_zip_path, 'r:*') as tar_ref:
+                                    await asyncio.to_thread(tar_ref.extractall, path=root)
+                            elif 'Archive' in globals():
+                                await asyncio.to_thread(Archive(str(nested_zip_path)).extractall, str(root))
+                            elif 'patoolib' in globals():
+                                await asyncio.to_thread(patoolib.extract_archive, str(nested_zip_path), outdir=str(root))
+                            else:
+                                cmd = ["7z", "x", str(nested_zip_path), f"-o{root}", "-y"]
+                                process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                await process.communicate()
                                 
                             nested_zip_path.unlink()
                             found_zip = True
-                            break
                         except Exception as e:
                             logger.error(f"Nested Archive extraction error: {e}")
-                if found_zip:
-                    break
-
-        # Cleanup secondary split parts
-        for root, dirs, files in os.walk(ext_dir):
-            for file in files:
-                filepath = Path(root) / file
-                name_lower = filepath.name.lower()
-                ext = filepath.suffix.lower()
-                if re.search(r'\.part(?:0*[2-9]|[1-9][0-9]+)\.rar$', name_lower) or \
-                   re.search(r'\.r[0-9]{2}$', ext) or \
-                   (re.search(r'\.[0-9]{3}$', ext) and ext != '.001'):
-                    try:
-                        filepath.unlink()
-                    except Exception:
-                        pass
         
         tmp_in.unlink(missing_ok=True)
         
@@ -2803,15 +2811,15 @@ async def handle_caption_only_upload_with_file(c: Client, m: Message, file_info)
             return
         
         if use_orig_cap:
-            final_caption = caption_to_use
+            final_caption = make_bold(caption_to_use)
             final_entities = caption_entities_to_use
         else:
-            final_caption = process_dynamic_caption(uid, caption_to_use)
+            final_caption = make_bold(process_dynamic_caption(uid, caption_to_use))
             final_entities = None
         
         if file_info.file_id:
             try:
-                parse_mode_arg = None if use_orig_cap else ParseMode.MARKDOWN
+                parse_mode_arg = ParseMode.MARKDOWN
 
                 if source_message.video or (file_info and getattr(file_info, 'duration', 0) > 0): 
                     await c.send_video(
@@ -3212,6 +3220,20 @@ async def cancel_all_cb(c, cb):
                 ZIP_DL_QUEUES[uid].task_done()
             except: pass
             
+    if uid in USER_QUEUES:
+        while not USER_QUEUES[uid].empty():
+            try:
+                item = USER_QUEUES[uid].get_nowait()
+                if 'status_msg' in item and item['status_msg']:
+                    try: await item['status_msg'].delete()
+                    except: pass
+                USER_QUEUES[uid].task_done()
+            except: pass
+            
+    if uid in USER_WORKERS:
+        USER_WORKERS[uid].cancel()
+        del USER_WORKERS[uid]
+            
     if uid in USER_TASK_EVENTS:
         for ev in USER_TASK_EVENTS[uid].values():
             ev.set()
@@ -3492,6 +3514,9 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
         else:
             if final_caption_template:
                 caption_to_use = process_dynamic_caption(uid, final_caption_template)
+                
+        # Make caption bold
+        caption_to_use = make_bold(caption_to_use)
 
         parts_to_upload = [(upload_path, target_name, None, duration_sec)]
         
@@ -3555,6 +3580,8 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, original
                     part_caption = part_caption[:-2] + f"\n✔️ Part - {part_num:02d}**"
                 else:
                     part_caption += f"\n✔️ Part - {part_num:02d}"
+                    
+            part_caption = make_bold(part_caption)
             
             try:
                 if status_msg:
