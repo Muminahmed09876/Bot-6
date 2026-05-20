@@ -1918,33 +1918,54 @@ async def execute_zip_download_and_extract(c, m, url=None):
         
         # General extraction logic
         archive_type = get_archive_type(tmp_in)
+        extracted_successfully = False
+        
         if archive_type == 'zip':
-            with zipfile.ZipFile(tmp_in, 'r') as zip_ref:
-                total_size = sum(info.file_size for info in zip_ref.infolist())
-                extracted_size = 0
-                for info in zip_ref.infolist():
-                    if cancel_event.is_set(): break
-                    await asyncio.to_thread(zip_ref.extract, info, ext_dir)
-                    extracted_size += info.file_size
-                    await progress_callback(extracted_size, total_size, "Extracting ZIP...", status_msg, start_t)
+            try:
+                with zipfile.ZipFile(tmp_in, 'r') as zip_ref:
+                    total_size = sum(info.file_size for info in zip_ref.infolist())
+                    extracted_size = 0
+                    for info in zip_ref.infolist():
+                        if cancel_event.is_set(): break
+                        await asyncio.to_thread(zip_ref.extract, info, ext_dir)
+                        extracted_size += info.file_size
+                        await progress_callback(extracted_size, total_size, "Extracting ZIP...", status_msg, start_t)
+                extracted_successfully = True
+            except Exception as e:
+                logger.warning(f"Python zipfile extraction failed: {e}")
+                
         elif archive_type == 'rar' and 'rarfile' in globals():
-            with rarfile.RarFile(tmp_in, 'r') as rar_ref:
-                total_size = sum(info.file_size for info in rar_ref.infolist())
-                extracted_size = 0
-                for info in rar_ref.infolist():
-                    if cancel_event.is_set(): break
-                    await asyncio.to_thread(rar_ref.extract, info, ext_dir)
-                    extracted_size += info.file_size
-                    await progress_callback(extracted_size, total_size, "Extracting RAR...", status_msg, start_t)
+            try:
+                with rarfile.RarFile(tmp_in, 'r') as rar_ref:
+                    total_size = sum(info.file_size for info in rar_ref.infolist())
+                    extracted_size = 0
+                    for info in rar_ref.infolist():
+                        if cancel_event.is_set(): break
+                        await asyncio.to_thread(rar_ref.extract, info, ext_dir)
+                        extracted_size += info.file_size
+                        await progress_callback(extracted_size, total_size, "Extracting RAR...", status_msg, start_t)
+                extracted_successfully = True
+            except Exception as e:
+                logger.warning(f"Python rarfile extraction failed: {e}")
+                
         elif archive_type == '7z' and 'py7zr' in globals():
-            with py7zr.SevenZipFile(tmp_in, mode='r') as sz_ref:
-                await asyncio.to_thread(sz_ref.extractall, path=ext_dir)
-                await status_msg.edit("Extracting 7Z... Please wait.", reply_markup=progress_keyboard())
-        else:
-            # Fallback for systems without rarfile/py7zr, or for 'split' archives
+            try:
+                with py7zr.SevenZipFile(tmp_in, mode='r') as sz_ref:
+                    await asyncio.to_thread(sz_ref.extractall, path=ext_dir)
+                    await status_msg.edit("Extracting 7Z... Please wait.", reply_markup=progress_keyboard())
+                extracted_successfully = True
+            except Exception as e:
+                logger.warning(f"Python py7zr extraction failed: {e}")
+
+        if not extracted_successfully:
             cmd = ["7z", "x", str(tmp_in), f"-o{ext_dir}", "-y"]
             process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             await process.communicate()
+            if process.returncode != 0 and archive_type == 'rar':
+                # Try unrar direct CLI as ultimate fallback for tricky rar files
+                cmd_unrar = ["unrar", "x", "-y", str(tmp_in), f"{ext_dir}/"]
+                process2 = await asyncio.create_subprocess_exec(*cmd_unrar, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                await process2.communicate()
             
         # Recursive archive extraction
         found_zip = True
@@ -1957,26 +1978,47 @@ async def execute_zip_download_and_extract(c, m, url=None):
                         nested_zip_path = nested_path_to_check
                         try:
                             nested_arc_type = get_archive_type(nested_zip_path)
+                            extracted_nested = False
+                            
                             if nested_arc_type == 'zip':
-                                with zipfile.ZipFile(nested_zip_path, 'r') as nested_ref:
-                                    n_total = sum(n_info.file_size for n_info in nested_ref.infolist())
-                                    n_ext = 0
-                                    n_start = time.time()
-                                    for n_info in nested_ref.infolist():
-                                        if cancel_event.is_set(): break
-                                        await asyncio.to_thread(nested_ref.extract, n_info, root)
-                                        n_ext += n_info.file_size
-                                        await progress_callback(n_ext, n_total, f"Extracting Nested Archive: {file[:10]}...", status_msg, n_start)
+                                try:
+                                    with zipfile.ZipFile(nested_zip_path, 'r') as nested_ref:
+                                        n_total = sum(n_info.file_size for n_info in nested_ref.infolist())
+                                        n_ext = 0
+                                        n_start = time.time()
+                                        for n_info in nested_ref.infolist():
+                                            if cancel_event.is_set(): break
+                                            await asyncio.to_thread(nested_ref.extract, n_info, root)
+                                            n_ext += n_info.file_size
+                                            await progress_callback(n_ext, n_total, f"Extracting Nested Archive: {file[:10]}...", status_msg, n_start)
+                                    extracted_nested = True
+                                except Exception as e:
+                                    logger.warning(f"Nested zipfile extraction failed: {e}")
+                                    
                             elif nested_arc_type == 'rar' and 'rarfile' in globals():
-                                with rarfile.RarFile(nested_zip_path, 'r') as nested_ref:
-                                    await asyncio.to_thread(nested_ref.extractall, root)
+                                try:
+                                    with rarfile.RarFile(nested_zip_path, 'r') as nested_ref:
+                                        await asyncio.to_thread(nested_ref.extractall, root)
+                                    extracted_nested = True
+                                except Exception as e:
+                                    logger.warning(f"Nested rarfile extraction failed: {e}")
+                                    
                             elif nested_arc_type == '7z' and 'py7zr' in globals():
-                                with py7zr.SevenZipFile(nested_zip_path, mode='r') as sz_ref:
-                                    await asyncio.to_thread(sz_ref.extractall, path=root)
-                            else:
+                                try:
+                                    with py7zr.SevenZipFile(nested_zip_path, mode='r') as sz_ref:
+                                        await asyncio.to_thread(sz_ref.extractall, path=root)
+                                    extracted_nested = True
+                                except Exception as e:
+                                    logger.warning(f"Nested py7zr extraction failed: {e}")
+                            
+                            if not extracted_nested:
                                 cmd = ["7z", "x", str(nested_zip_path), f"-o{root}", "-y"]
                                 process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                                 await process.communicate()
+                                if process.returncode != 0 and nested_arc_type == 'rar':
+                                    cmd_unrar = ["unrar", "x", "-y", str(nested_zip_path), f"{root}/"]
+                                    process2 = await asyncio.create_subprocess_exec(*cmd_unrar, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    await process2.communicate()
                                 
                             nested_zip_path.unlink()
                             found_zip = True
