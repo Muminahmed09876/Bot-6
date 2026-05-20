@@ -1,9 +1,9 @@
-aiohttp
+Aiohttp
 hachoir
 numpy
 Pillow
 requests
-tgcrypto
+tgcryptos
 olefile
 motor
 pytz
@@ -16,6 +16,7 @@ loggers
 filetype
 tldextract
 ffmpeg-python
+ffmpeg
 aiofiles
 pyromod
 yt-dlp
@@ -26,7 +27,3 @@ gunicorn
 python-telegram-bot
 python-dotenv
 tor
-rarfile
-tarfile
-pyunpack
-patool
