@@ -7,10 +7,12 @@ tgcrypto
 olefile
 motor
 pytz
+utils
 pymongo
 pyrofork
 dnspython
 psutil
+loggers
 filetype
 tldextract
 ffmpeg-python
