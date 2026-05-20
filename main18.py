@@ -1958,14 +1958,22 @@ async def execute_zip_download_and_extract(c, m, url=None):
                 logger.warning(f"Python py7zr extraction failed: {e}")
 
         if not extracted_successfully:
-            cmd = ["7z", "x", str(tmp_in), f"-o{ext_dir}", "-y"]
-            process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            await process.communicate()
-            if process.returncode != 0 and archive_type == 'rar':
-                # Try unrar direct CLI as ultimate fallback for tricky rar files
-                cmd_unrar = ["unrar", "x", "-y", str(tmp_in), f"{ext_dir}/"]
-                process2 = await asyncio.create_subprocess_exec(*cmd_unrar, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                await process2.communicate()
+            fallback_cmds = []
+            if archive_type == 'rar':
+                fallback_cmds.append(["unrar", "x", "-y", "-p-", "-kb", str(tmp_in), f"{ext_dir}/"])
+            fallback_cmds.append(["7z", "x", "-y", "-p-", str(tmp_in), f"-o{ext_dir}"])
+            if archive_type != 'rar':
+                fallback_cmds.append(["unrar", "x", "-y", "-p-", "-kb", str(tmp_in), f"{ext_dir}/"])
+            fallback_cmds.append(["bsdtar", "-xf", str(tmp_in), "-C", str(ext_dir)])
+
+            for cmd in fallback_cmds:
+                try:
+                    process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    await process.communicate()
+                    if process.returncode in [0, 1]:
+                        break
+                except Exception:
+                    pass
             
         # Recursive archive extraction
         found_zip = True
@@ -2012,13 +2020,22 @@ async def execute_zip_download_and_extract(c, m, url=None):
                                     logger.warning(f"Nested py7zr extraction failed: {e}")
                             
                             if not extracted_nested:
-                                cmd = ["7z", "x", str(nested_zip_path), f"-o{root}", "-y"]
-                                process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                                await process.communicate()
-                                if process.returncode != 0 and nested_arc_type == 'rar':
-                                    cmd_unrar = ["unrar", "x", "-y", str(nested_zip_path), f"{root}/"]
-                                    process2 = await asyncio.create_subprocess_exec(*cmd_unrar, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                                    await process2.communicate()
+                                fallback_cmds = []
+                                if nested_arc_type == 'rar':
+                                    fallback_cmds.append(["unrar", "x", "-y", "-p-", "-kb", str(nested_zip_path), f"{root}/"])
+                                fallback_cmds.append(["7z", "x", "-y", "-p-", str(nested_zip_path), f"-o{root}"])
+                                if nested_arc_type != 'rar':
+                                    fallback_cmds.append(["unrar", "x", "-y", "-p-", "-kb", str(nested_zip_path), f"{root}/"])
+                                fallback_cmds.append(["bsdtar", "-xf", str(nested_zip_path), "-C", str(root)])
+
+                                for cmd in fallback_cmds:
+                                    try:
+                                        process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                        await process.communicate()
+                                        if process.returncode in [0, 1]:
+                                            break
+                                    except Exception:
+                                        pass
                                 
                             nested_zip_path.unlink()
                             found_zip = True
