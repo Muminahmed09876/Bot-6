@@ -25,7 +25,6 @@ import yt_dlp
 import urllib.parse
 import zipfile
 import shutil
-import cgi
 import socket
 import tarfile
 
