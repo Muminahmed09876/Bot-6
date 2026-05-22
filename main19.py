@@ -2339,12 +2339,13 @@ async def handle_convert_input(c, m, url=None, file_info=None):
 async def convert_cb_handler(c: Client, cb: CallbackQuery):
     uid = cb.from_user.id
     parts = cb.data.split('_')
-    action = f"{parts[1]}"
-    if len(parts) >= 4 and (parts[1] == 'vb' or parts[1] == 'ab'):
+    
+    if parts[1] in ('vb', 'ab'):
         action = f"{parts[1]}_{parts[2]}" 
-        session_id = f"{parts[3]}_{parts[4]}"
+        session_id = f"{parts[3]}_{parts[4]}_{parts[5]}"
     else:
-        session_id = f"{parts[2]}_{parts[3]}"
+        action = parts[1]
+        session_id = f"{parts[2]}_{parts[3]}_{parts[4]}"
         
     session = CONVERT_SESSIONS.get(session_id)
     if not session or session['uid'] != uid:
@@ -2352,7 +2353,7 @@ async def convert_cb_handler(c: Client, cb: CallbackQuery):
         return
 
     if action == "res":
-        val = parts[4]
+        val = parts[5]
         if val == "Orig":
             session['curr_res'] = None
         else:
