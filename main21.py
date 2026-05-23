@@ -4151,4 +4151,486 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
                     elif is_audio_file:
                          await c.send_audio(
                             chat_id=m.chat.id,
-                            audio=str(current_upload
+                            audio=str(current_upload_path),
+                            file_name=current_target_name,
+                            caption=part_caption,
+                            parse_mode=ParseMode.MARKDOWN,
+                            progress=ul_prog
+                        )
+                    else:
+                        await c.send_document(
+                            chat_id=m.chat.id,
+                            document=str(current_upload_path),
+                            file_name=current_target_name,
+                            caption=part_caption,
+                            parse_mode=ParseMode.MARKDOWN,
+                            progress=ul_prog
+                        )
+                    
+                    part_success = True
+                    last_exc = None
+                    break
+                except Exception as e:
+                    last_exc = e
+                    if "Cancelled" in str(e):
+                        break
+                    logger.warning("Upload attempt %s failed for part %s: %s", attempt, part_num, e)
+                    await asyncio.sleep(2 * attempt)
+            
+            if not part_success:
+                break 
+
+        if not last_exc:
+            if messages_to_delete:
+                try:
+                    await c.delete_messages(chat_id=m.chat.id, message_ids=messages_to_delete)
+                except Exception:
+                    pass
+        
+        if last_exc:
+            raise last_exc
+
+    except Exception as e:
+        raise e
+    finally:
+        try:
+            if upload_path != in_path and upload_path.exists():
+                upload_path.unlink()
+            if in_path.exists():
+                in_path.unlink()
+            if temp_thumb_path and Path(temp_thumb_path).exists():
+                Path(temp_thumb_path).unlink()
+            
+            for p_path, _, p_num, _ in parts_to_upload:
+                 if p_num is not None and p_path.exists():
+                      p_path.unlink()
+                      
+            if cancel_event in TASKS.get(uid, []): TASKS[uid].remove(cancel_event)
+            if status_msg and status_msg.id in USER_TASK_EVENTS.get(uid, {}):
+                USER_TASK_EVENTS[uid].pop(status_msg.id)
+        except Exception:
+            pass
+
+# --- AUDIO ADD LOGIC AND FUNCTIONS ---
+
+def parse_range_list(s):
+    nums = []
+    for p in s.split(','):
+        if '-' in p:
+            try:
+                start, end = map(int, p.split('-'))
+                nums.extend(list(range(start, end + 1)))
+            except: pass
+        else:
+            try: nums.append(int(p))
+            except: pass
+    return nums
+
+def parse_audio_add_mapping(text, max_l1, max_l2):
+    mapping = {}
+    rules = re.findall(r'([0-9\-,]+)=([0-9\-,]+)', text.replace(' ', ''))
+    for left_str, right_str in rules:
+        left_nums = parse_range_list(left_str)
+        right_nums = parse_range_list(right_str)
+        for i, l_num in enumerate(left_nums):
+            if i < len(right_nums):
+                if 1 <= l_num <= max_l1 and 1 <= right_nums[i] <= max_l2:
+                    mapping[l_num] = right_nums[i]
+            elif len(right_nums) == 1:
+                if 1 <= l_num <= max_l1 and 1 <= right_nums[0] <= max_l2:
+                    mapping[l_num] = right_nums[0]
+    return mapping
+
+async def extract_and_add_to_list2(uid, c, m, url=None, file_info=None):
+    status_msg = await c.send_message(m.chat.id, "Downloading and extracting ZIP for List 2...", reply_markup=progress_keyboard())
+    safe_name = f"audio_zip_{uid}_{int(time.time())}"
+    tmp_in = TMP / f"audio_add_zip_{uid}_{int(time.time())}_{safe_name}"
+    ext_dir = TMP / f"audio_add_ext_{uid}_{int(time.time())}"
+    
+    cancel_event = asyncio.Event()
+    TASKS.setdefault(uid, []).append(cancel_event)
+    USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
+    
+    try:
+        ok = False
+        original_name_pass = url.split("/")[-1] if url else (file_info.file_name if file_info else "archive.zip")
+        if url:
+            original_name_pass = await get_filename_from_url(url)
+            if is_drive_url(url):
+                fid = extract_drive_id(url)
+                if fid: ok, err = await download_drive_file(fid, tmp_in, status_msg, cancel_event, original_name=original_name_pass)
+            else:
+                ok, err = await download_url_generic(url, tmp_in, status_msg, cancel_event, original_name=original_name_pass)
+        else:
+            start_t = time.time()
+            async def dl_prog(current, total):
+                if cancel_event.is_set(): c.stop_transmission()
+                await progress_callback(current, total, "Downloading ZIP...", status_msg, start_t, original_name=original_name_pass)
+            await m.download(file_name=str(tmp_in), progress=dl_prog)
+            ok = True
+            
+        if not ok or not tmp_in.exists():
+            raise Exception("Download Failed")
+            
+        ext_dir.mkdir(parents=True, exist_ok=True)
+        await status_msg.edit("Extracting archive...", reply_markup=progress_keyboard())
+        
+        cmd = ["7z", "x", str(tmp_in), f"-o{ext_dir}", "-y"]
+        process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        await process.communicate()
+        
+        found_zip = True
+        while found_zip:
+            found_zip = False
+            for root, dirs, files in os.walk(ext_dir):
+                for file in files:
+                    if is_archive_file(Path(file)):
+                        nested = Path(root) / file
+                        cmd2 = ["7z", "x", str(nested), f"-o{root}", "-y"]
+                        p2 = await asyncio.create_subprocess_exec(*cmd2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        await p2.communicate()
+                        nested.unlink(missing_ok=True)
+                        found_zip = True
+                        
+        all_files = []
+        video_exts = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm", ".m4a", ".mp3", ".aac"}
+        for root, dirs, files in os.walk(ext_dir):
+            for f in files:
+                if Path(f).suffix.lower() in video_exts:
+                    all_files.append(Path(root) / f)
+        all_files.sort(key=lambda x: x.name.lower())
+        
+        for f in all_files:
+            AUDIO_ADD_DATA[uid]['list2'].append({
+                'type': 'local_extracted',
+                'path': str(f),
+                'message': m,
+                'original_name': f.name
+            })
+            
+        await status_msg.edit(f"Extracted {len(all_files)} files and added to List 2.")
+        await asyncio.sleep(2)
+        await status_msg.delete()
+    except Exception as e:
+        logger.error(f"Audio add zip extract error: {e}")
+        await status_msg.edit(f"Extraction failed: {e}")
+    finally:
+        tmp_in.unlink(missing_ok=True)
+        if cancel_event in TASKS.get(uid, []): TASKS[uid].remove(cancel_event)
+
+async def show_audio_add_lists(c, chat_id, uid):
+    state_data = AUDIO_ADD_DATA.get(uid)
+    if not state_data: return
+    
+    l1 = state_data['list1']
+    l2 = state_data['list2']
+    
+    text_lines = ["**Audio Add - List 1 (Base Videos):**\n"]
+    for i, item in enumerate(l1, 1):
+        text_lines.append(f"{i}. `{item['original_name']}`")
+        
+    text_lines.append("\n**Audio Add - List 2 (Audio Sources):**\n")
+    for i, item in enumerate(l2, 1):
+        text_lines.append(f"{i}. `{item['original_name']}`")
+        
+    text_lines.append("\n**Mapping Instructions:**")
+    text_lines.append("‣ Send mappings like `1=4, 3=2, 5-10=3,5,7-15, 20-30=40-50` to map List 1 videos to List 2 audio sources.")
+    text_lines.append("‣ Click **Upload All** to automatically map 1=1, 2=2, 3=3 sequentially.")
+    
+    full_text = "\n".join(text_lines)
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Upload All 🚀", callback_data="audio_add_upload_all")],
+        [InlineKeyboardButton("Cancel ❌", callback_data="audio_add_cancel_prompt")]
+    ])
+    
+    chunks = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
+    for idx, chunk in enumerate(chunks):
+        reply_markup = markup if idx == len(chunks) - 1 else None
+        await c.send_message(chat_id, chunk, reply_markup=reply_markup)
+        await asyncio.sleep(0.3)
+
+async def start_audio_add_probing(c, chat_id, uid):
+    state_data = AUDIO_ADD_DATA.get(uid)
+    mapping = state_data.get('mapping', {})
+    l2 = state_data['list2']
+    
+    needed_l2_indices = set(mapping.values())
+    state_data['l2_tracks'] = {}
+    state_data['selections'] = {}
+    
+    msg = await c.send_message(chat_id, "Downloading and analyzing audio sources...")
+    
+    for idx in needed_l2_indices:
+        item = l2[idx - 1]
+        tmp_path = None
+        if item['type'] == 'local_extracted':
+            tmp_path = Path(item['path'])
+        else:
+            tmp_path = TMP / f"probe_l2_{uid}_{int(time.time())}_{idx}.mp4"
+            if item['type'] == 'url':
+                ok, _ = await download_url_generic(item['url'], tmp_path)
+                if not ok: continue
+            elif item['type'] == 'file':
+                await item['message'].download(file_name=str(tmp_path))
+                
+        tracks = await asyncio.to_thread(get_audio_tracks_ffprobe, tmp_path)
+        state_data['l2_tracks'][idx] = tracks
+        state_data['selections'][idx] = [] 
+        item['local_probe_path'] = str(tmp_path) 
+        
+    await msg.delete()
+    await send_audio_selection_ui(c, chat_id, uid)
+
+async def send_audio_selection_ui(c, chat_id, uid, msg_id=None):
+    state_data = AUDIO_ADD_DATA.get(uid)
+    if not state_data: return
+    
+    text = "**Select Audio Tracks to Add:**\n\n"
+    keyboard = []
+    
+    for idx, tracks in state_data['l2_tracks'].items():
+        l2_name = state_data['list2'][idx-1]['original_name']
+        text += f"**List 2 - Video {idx}:** `{l2_name}`\n"
+        selections = state_data['selections'].get(idx, [])
+        
+        for t_idx, t in enumerate(tracks):
+            is_sel = t_idx in selections
+            btn_text = f"{'✅' if is_sel else '☑️'} {idx}: {t.get('language', 'und')} - {t.get('title', 'Audio')}"
+            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"aa_sel_{uid}_{idx}_{t_idx}")])
+            
+    keyboard.append([InlineKeyboardButton("Select All 🔄", callback_data=f"aa_selall_{uid}")])
+    keyboard.append([InlineKeyboardButton("Done ✅", callback_data=f"aa_done_{uid}")])
+    
+    markup = InlineKeyboardMarkup(keyboard)
+    if msg_id:
+        try: await c.edit_message_text(chat_id, msg_id, text, reply_markup=markup)
+        except: pass
+    else:
+        msg = await c.send_message(chat_id, text, reply_markup=markup)
+        state_data['ui_msg_id'] = msg.id
+
+@app.on_callback_query(filters.regex(r"^aa_(sel|selall|done)_"))
+async def audio_add_cb(c, cb):
+    uid = cb.from_user.id
+    parts = cb.data.split('_')
+    action = parts[1]
+    
+    if str(uid) != parts[2]:
+        await cb.answer("Not authorized", show_alert=True)
+        return
+        
+    state_data = AUDIO_ADD_DATA.get(uid)
+    if not state_data:
+        await cb.answer("Session expired", show_alert=True)
+        return
+        
+    if action == "sel":
+        l2_idx = int(parts[3])
+        t_idx = int(parts[4])
+        if t_idx in state_data['selections'][l2_idx]:
+            state_data['selections'][l2_idx].remove(t_idx)
+        else:
+            state_data['selections'][l2_idx].append(t_idx)
+        await send_audio_selection_ui(c, cb.message.chat.id, uid, cb.message.id)
+        
+    elif action == "selall":
+        if state_data['selections']:
+            ref_idx = list(state_data['selections'].keys())[0]
+            ref_sels = state_data['selections'][ref_idx]
+            for idx in state_data['selections']:
+                state_data['selections'][idx] = ref_sels.copy()
+        await send_audio_selection_ui(c, cb.message.chat.id, uid, cb.message.id)
+        
+    elif action == "done":
+        await cb.message.delete()
+        await cb.message.reply_text("Audio add processing started...")
+        asyncio.create_task(execute_audio_add(uid, c, cb.message.chat.id))
+
+@app.on_callback_query(filters.regex("audio_add_upload_all"))
+async def aa_upload_all_cb(c, cb):
+    uid = cb.from_user.id
+    state_data = AUDIO_ADD_DATA.get(uid)
+    if not state_data: return
+    
+    max_l1 = len(state_data['list1'])
+    max_l2 = len(state_data['list2'])
+    limit = min(max_l1, max_l2)
+    mapping = {i: i for i in range(1, limit + 1)}
+    state_data['mapping'] = mapping
+    await cb.message.edit_text("Mapping 1=1 sequentially. Analyzing tracks...")
+    await start_audio_add_probing(c, cb.message.chat.id, uid)
+
+@app.on_callback_query(filters.regex("audio_add_cancel_prompt"))
+async def aa_cancel_prompt_cb(c, cb):
+    uid = cb.from_user.id
+    if uid in AUDIO_ADD_DATA:
+        AUDIO_ADD_DATA[uid]['state'] = 'cancel_prompt'
+        await cb.message.edit_text("Are you sure you want to cancel and clear the data?\nReply with `yes` or `no`.")
+
+async def execute_audio_add(uid, c, chat_id):
+    state_data = AUDIO_ADD_DATA.get(uid)
+    if not state_data: return
+    
+    mapping = state_data['mapping']
+    l1 = state_data['list1']
+    l2 = state_data['list2']
+    selections = state_data['selections']
+    
+    for l1_idx, l2_idx in mapping.items():
+        if uid in USER_QUEUE_PAUSED:
+            while uid in USER_QUEUE_PAUSED: await asyncio.sleep(1)
+            
+        try:
+            item1 = l1[l1_idx - 1]
+            item2 = l2[l2_idx - 1]
+            selected_tracks = selections.get(l2_idx, [])
+            if not selected_tracks:
+                continue
+            
+            tmp1 = TMP / f"aa_base_{uid}_{int(time.time())}_{l1_idx}.mp4"
+            if item1['type'] == 'url':
+                await download_url_generic(item1['url'], tmp1)
+            elif item1['type'] == 'file':
+                await item1['message'].download(file_name=str(tmp1))
+                
+            tmp2 = Path(item2.get('local_probe_path'))
+            
+            out_name = generate_new_filename(item1['original_name'])
+            if not out_name.endswith('.mkv'):
+                out_name = Path(out_name).stem + ".mkv"
+                
+            out_path = TMP / f"aa_out_{uid}_{int(time.time())}_{out_name}"
+            
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(tmp1),
+                "-i", str(tmp2),
+                "-map", "0:v", "-map", "0:a?", "-map", "0:s?"
+            ]
+            
+            for t_idx in selected_tracks:
+                actual_stream_idx = state_data['l2_tracks'][l2_idx][t_idx]['stream_index']
+                cmd.extend(["-map", f"1:{actual_stream_idx}"])
+                
+            cmd.extend([
+                "-c", "copy",
+                "-disposition:a", "0",
+                "-disposition:a:0", "default",
+                str(out_path)
+            ])
+            
+            status_msg = await c.send_message(chat_id, f"Merging audio for {item1['original_name']}...")
+            
+            process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            await process.communicate()
+            
+            if out_path.exists() and out_path.stat().st_size > 0:
+                await status_msg.edit("Merge complete, uploading...")
+                cancel_ev = asyncio.Event()
+                TASKS.setdefault(uid, []).append(cancel_ev)
+                
+                final_caption_template = USER_CAPTIONS.get(uid)
+                if not final_caption_template:
+                    cap = item1['original_name']
+                else:
+                    cap = process_dynamic_caption(uid, final_caption_template)
+                
+                await sequential_upload_task(uid, c, item1['message'], out_path, out_name, status_msg.id, cancel_ev, default_caption=cap, original_caption=cap, original_download_name=item1['original_name'])
+            
+            tmp1.unlink(missing_ok=True)
+            
+        except Exception as e:
+            logger.error(f"Audio add execute error: {e}")
+            await c.send_message(chat_id, f"Error merging audio for {l1_idx}: {e}")
+            
+    await c.send_message(chat_id, "Audio add batch process complete.")
+    AUDIO_ADD_DATA.pop(uid, None)
+    AUDIO_ADD_MODE.discard(uid)
+
+# ----------------------------------------
+
+@flask_app.route('/')
+def home():
+    html_content = """
+    <!DOCTYPE-html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Bot Status</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                background-color: #f0f2f5;
+                color: #333;
+                text-align: center;
+                padding-top: 50px;
+            }
+            .container {
+                background-color: #fff;
+                padding: 30px;
+                border-radius: 10px;
+                box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+                display: inline-block;
+            }
+            h1 {
+                color: #28a745;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>TA File Share Bot is running! ✅</h1>
+            <p>This page confirms that the bot's web server is active.</p>
+        </div>
+    </body>
+    </html>
+    """
+    return render_template_string(html_content)
+
+def ping_service():
+    if not RENDER_EXTERNAL_HOSTNAME:
+        print("Render URL is not set. Ping service is disabled.")
+        return
+
+    url = f"http://{RENDER_EXTERNAL_HOSTNAME}"
+    while True:
+        try:
+            response = requests.get(url, timeout=10)
+            print(f"Pinged {url} | Status Code: {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            print(f"Error pinging {url}: {e}")
+        time.sleep(600)
+
+def run_flask_and_ping():
+    flask_thread = threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=PORT, use_reloader=False))
+    flask_thread.start()
+    ping_thread = threading.Thread(target=ping_service)
+    ping_thread.start()
+    print("Flask and Ping services started.")
+
+async def periodic_cleanup():
+    while True:
+        try:
+            now = datetime.now()
+            for p in TMP.iterdir():
+                try:
+                    if p.is_file():
+                        if now - datetime.fromtimestamp(p.stat().st_mtime) > timedelta(days=3):
+                            p.unlink()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        await asyncio.sleep(3600)
+
+if __name__ == "__main__":
+    print("Bot is starting... Starting Flask and Ping threads, then Pyrogram will start.")
+    t = threading.Thread(target=run_flask_and_ping, daemon=True)
+    t.start()
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(periodic_cleanup())
+    except RuntimeError:
+        pass
+    app.run()
