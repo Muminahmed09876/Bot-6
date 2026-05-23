@@ -2443,7 +2443,7 @@ async def execute_conversions(session_id, client):
             if res_val:
                 cmd.extend(["-vf", f"scale=w=-2:h={res_val}"])
                 
-            cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-threads", "0", "-b:v", str(vb)])
+            cmd.extend(["-c:v", "libx264", "-preset", "ultrafast", "-threads", "0", "-b:v", str(vb)])
             
             # Map multiple audios and apply same bitrate to all
             cmd.extend(["-c:a", "aac"])
