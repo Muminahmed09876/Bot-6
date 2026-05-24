@@ -2637,7 +2637,7 @@ async def show_batch_audio_lists(c, chat_id, uid):
 @app.on_callback_query(filters.regex(r"^bam_(upload_all|cancel|yes|no)"))
 async def batch_audio_merge_cb(c, cb):
     uid = cb.from_user.id
-    action = cb.data.split('_')[1]
+    action = cb.data[4:] # Extract everything after 'bam_' precisely
     
     if uid not in BATCH_AUDIO_MODE or uid not in BATCH_AUDIO_STATE:
         await cb.answer("Session expired or invalid.", show_alert=True)
@@ -2757,20 +2757,7 @@ async def batch_audio_worker(uid, c):
         src_dl_path = TMP / f"bam_src_{uid}_{int(time.time())}_{src_item['original_name']}"
         
         try:
-            # Download Base
-            if base_item.get('local_path'):
-                shutil.copy(base_item['local_path'], base_dl_path)
-            elif base_item.get('url'):
-                ok, err = await download_url_generic(base_item['url'], base_dl_path, status_msg, cancel_event, original_name=base_item['original_name'])
-                if not ok: raise Exception(f"Base DL Error: {err}")
-            else:
-                start_t = time.time()
-                async def dl_prog1(cur, tot):
-                    if cancel_event.is_set(): c.stop_transmission()
-                    await progress_callback(cur, tot, "Downloading Base Video...", status_msg, start_t, original_name=base_item['original_name'])
-                await base_item['message'].download(file_name=str(base_dl_path), progress=dl_prog1)
-
-            # Download Src
+            # 1. Download Src FIRST
             if src_item.get('local_path'):
                 shutil.copy(src_item['local_path'], src_dl_path)
             elif src_item.get('url'):
@@ -2780,10 +2767,10 @@ async def batch_audio_worker(uid, c):
                 start_t = time.time()
                 async def dl_prog2(cur, tot):
                     if cancel_event.is_set(): c.stop_transmission()
-                    await progress_callback(cur, tot, "Downloading Audio Source...", status_msg, start_t, original_name=src_item['original_name'])
+                    await progress_callback(cur, tot, "Downloading Audio Source First...", status_msg, start_t, original_name=src_item['original_name'])
                 await src_item['message'].download(file_name=str(src_dl_path), progress=dl_prog2)
                 
-            # Analyze Tracks of Src
+            # 2. Analyze Tracks of Src & Prompt User
             await status_msg.edit("Analyzing audio tracks...", reply_markup=None)
             tracks = await asyncio.to_thread(get_audio_tracks_ffprobe, src_dl_path)
             
@@ -2816,6 +2803,20 @@ async def batch_audio_worker(uid, c):
                 
             src_stream_idx = tracks[selected_track_idx - 1]['stream_index']
             
+            # 3. Download Base AFTER track selection
+            if base_item.get('local_path'):
+                shutil.copy(base_item['local_path'], base_dl_path)
+            elif base_item.get('url'):
+                ok, err = await download_url_generic(base_item['url'], base_dl_path, status_msg, cancel_event, original_name=base_item['original_name'])
+                if not ok: raise Exception(f"Base DL Error: {err}")
+            else:
+                start_t = time.time()
+                async def dl_prog1(cur, tot):
+                    if cancel_event.is_set(): c.stop_transmission()
+                    await progress_callback(cur, tot, "Downloading Base Video...", status_msg, start_t, original_name=base_item['original_name'])
+                await base_item['message'].download(file_name=str(base_dl_path), progress=dl_prog1)
+
+            # 4. Merge Audio
             out_name = generate_new_filename(base_item['original_name'])
             if not out_name.lower().endswith(".mkv"):
                 out_name = Path(out_name).stem + ".mkv"
