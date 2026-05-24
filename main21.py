@@ -811,8 +811,8 @@ async def download_drive_file(file_id: str, out_path: Path, message: Message = N
                                     if attempt < 10:
                                         await asyncio.sleep(2)
                                         continue
-                                if resp2.status not in (200, 206):
-                                    return False, f"HTTP {resp2.status}"
+                                    if resp2.status not in (200, 206):
+                                        return False, f"HTTP {resp2.status}"
                                 ok, err = await download_stream(resp2, out_path, message, cancel_event=cancel_event, original_name=original_name)
                                 if ok: return True, None
                                 if attempt < 10: await asyncio.sleep(2); continue
@@ -2139,7 +2139,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None):
                 if state['phase'] == 1:
                     state['list1'].append({'local_path': str(tmp_in), 'original_name': original_name_pass})
                     await status_msg.edit(f"File added to Batch Audio List 1. Total: {len(state['list1'])}")
-                elif state['phase'] == 3:
+                elif state['phase'] == 2:
                     state['list2'].append({'local_path': str(tmp_in), 'original_name': original_name_pass})
                     await status_msg.edit(f"File added to Batch Audio List 2. Total: {len(state['list2'])}")
                 return
@@ -2277,7 +2277,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None):
                 for f in all_files:
                     state['list1'].append({'local_path': str(f), 'original_name': f.name})
                 await c.send_message(m.chat.id, f"{len(all_files)} files extracted and added to Batch Audio List 1.")
-            elif state['phase'] == 3:
+            elif state['phase'] == 2:
                 for f in all_files:
                     state['list2'].append({'local_path': str(f), 'original_name': f.name})
                 await c.send_message(m.chat.id, f"{len(all_files)} files extracted and added to Batch Audio List 2.")
@@ -3420,8 +3420,17 @@ async def text_handler(c, m: Message):
     if text.startswith("http://") or text.startswith("https://"):
         url = text
         if uid in CONVERT_MODE:
-            await handle_convert_input(c, m, url=url)
-            return
+            if uid in CONVERT_ZIP_MODE:
+                if uid not in ZIP_DL_QUEUES:
+                    ZIP_DL_QUEUES[uid] = asyncio.Queue()
+                queue_msg = await m.reply_text(f"Queue item added. Position: {ZIP_DL_QUEUES[uid].qsize() + 1}")
+                await ZIP_DL_QUEUES[uid].put({'url': url, 'message': m, 'queue_msg': queue_msg})
+                if uid not in ZIP_DL_WORKERS or ZIP_DL_WORKERS[uid].done():
+                    ZIP_DL_WORKERS[uid] = asyncio.create_task(zip_download_worker(uid, c))
+                return
+            else:
+                await handle_convert_input(c, m, url=url)
+                return
             
         if uid in ZIP_DOWNLOAD_MODE:
             if uid not in ZIP_DL_QUEUES:
@@ -3433,14 +3442,12 @@ async def text_handler(c, m: Message):
             return
             
         if uid in BATCH_AUDIO_MODE:
-            original_name = await get_filename_from_url(url)
-            state = BATCH_AUDIO_STATE[uid]
-            if state['phase'] == 1:
-                state['list1'].append({'url': url, 'original_name': original_name, 'message': m})
-                await m.reply_text(f"URL added to List 1. Total: {len(state['list1'])}")
-            elif state['phase'] == 2:
-                state['list2'].append({'url': url, 'original_name': original_name, 'message': m})
-                await m.reply_text(f"URL added to List 2. Total: {len(state['list2'])}")
+            if uid not in ZIP_DL_QUEUES:
+                ZIP_DL_QUEUES[uid] = asyncio.Queue()
+            queue_msg = await m.reply_text(f"Queue item added. Position: {ZIP_DL_QUEUES[uid].qsize() + 1}")
+            await ZIP_DL_QUEUES[uid].put({'url': url, 'message': m, 'queue_msg': queue_msg})
+            if uid not in ZIP_DL_WORKERS or ZIP_DL_WORKERS[uid].done():
+                ZIP_DL_WORKERS[uid] = asyncio.create_task(zip_download_worker(uid, c))
             return
             
         if uid in YT_DLP_MODE or is_youtube_url(url):
@@ -3475,8 +3482,17 @@ async def upload_url_cmd(c, m: Message):
     uid = m.from_user.id
     
     if uid in CONVERT_MODE:
-        await handle_convert_input(c, m, url=url)
-        return
+        if uid in CONVERT_ZIP_MODE:
+            if uid not in ZIP_DL_QUEUES:
+                ZIP_DL_QUEUES[uid] = asyncio.Queue()
+            queue_msg = await m.reply_text(f"Queue item added. Position: {ZIP_DL_QUEUES[uid].qsize() + 1}")
+            await ZIP_DL_QUEUES[uid].put({'url': url, 'message': m, 'queue_msg': queue_msg})
+            if uid not in ZIP_DL_WORKERS or ZIP_DL_WORKERS[uid].done():
+                ZIP_DL_WORKERS[uid] = asyncio.create_task(zip_download_worker(uid, c))
+            return
+        else:
+            await handle_convert_input(c, m, url=url)
+            return
     
     if uid in ZIP_DOWNLOAD_MODE:
         if uid not in ZIP_DL_QUEUES:
@@ -3488,14 +3504,12 @@ async def upload_url_cmd(c, m: Message):
         return
         
     if uid in BATCH_AUDIO_MODE:
-        original_name = await get_filename_from_url(url)
-        state = BATCH_AUDIO_STATE[uid]
-        if state['phase'] == 1:
-            state['list1'].append({'url': url, 'original_name': original_name, 'message': m})
-            await m.reply_text(f"URL added to List 1. Total: {len(state['list1'])}")
-        elif state['phase'] == 2:
-            state['list2'].append({'url': url, 'original_name': original_name, 'message': m})
-            await m.reply_text(f"URL added to List 2. Total: {len(state['list2'])}")
+        if uid not in ZIP_DL_QUEUES:
+            ZIP_DL_QUEUES[uid] = asyncio.Queue()
+        queue_msg = await m.reply_text(f"Queue item added. Position: {ZIP_DL_QUEUES[uid].qsize() + 1}")
+        await ZIP_DL_QUEUES[uid].put({'url': url, 'message': m, 'queue_msg': queue_msg})
+        if uid not in ZIP_DL_WORKERS or ZIP_DL_WORKERS[uid].done():
+            ZIP_DL_WORKERS[uid] = asyncio.create_task(zip_download_worker(uid, c))
         return
         
     if uid in YT_DLP_MODE or is_youtube_url(url):
@@ -3723,8 +3737,17 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
     original_name = file_info.file_name if file_info and file_info.file_name else f"file_{file_info.file_unique_id}"
 
     if uid in CONVERT_MODE:
-        await handle_convert_input(c, m, file_info=file_info)
-        return
+        if uid in CONVERT_ZIP_MODE:
+            if uid not in ZIP_DL_QUEUES:
+                ZIP_DL_QUEUES[uid] = asyncio.Queue()
+            queue_msg = await m.reply_text(f"Queue item added. Position: {ZIP_DL_QUEUES[uid].qsize() + 1}")
+            await ZIP_DL_QUEUES[uid].put({'message': m, 'queue_msg': queue_msg, 'is_telegram_file': True})
+            if uid not in ZIP_DL_WORKERS or ZIP_DL_WORKERS[uid].done():
+                ZIP_DL_WORKERS[uid] = asyncio.create_task(zip_download_worker(uid, c))
+            return
+        else:
+            await handle_convert_input(c, m, file_info=file_info)
+            return
 
     if uid in ZIP_DOWNLOAD_MODE:
         if uid not in ZIP_DL_QUEUES:
@@ -3736,13 +3759,12 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
         return
 
     if uid in BATCH_AUDIO_MODE:
-        state = BATCH_AUDIO_STATE[uid]
-        if state['phase'] == 1:
-            state['list1'].append({'original_name': original_name, 'message': m})
-            await m.reply_text(f"File added to List 1. Total: {len(state['list1'])}")
-        elif state['phase'] == 2:
-            state['list2'].append({'original_name': original_name, 'message': m})
-            await m.reply_text(f"File added to List 2. Total: {len(state['list2'])}")
+        if uid not in ZIP_DL_QUEUES:
+            ZIP_DL_QUEUES[uid] = asyncio.Queue()
+        queue_msg = await m.reply_text(f"Queue item added. Position: {ZIP_DL_QUEUES[uid].qsize() + 1}")
+        await ZIP_DL_QUEUES[uid].put({'message': m, 'queue_msg': queue_msg, 'is_telegram_file': True})
+        if uid not in ZIP_DL_WORKERS or ZIP_DL_WORKERS[uid].done():
+            ZIP_DL_WORKERS[uid] = asyncio.create_task(zip_download_worker(uid, c))
         return
 
     if uid in MKV_AUDIO_CHANGE_MODE:
