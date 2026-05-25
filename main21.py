@@ -97,7 +97,6 @@ CONVERT_SESSIONS = {}
 ACTIVE_CONVERT_SESSION = {} # New: track active session to receive custom bitrate via message
 CONVERT_QUEUE = {} # Queue for ZIP extracted files to process sequentially
 CONVERT_WORKERS = {}
-CONVERT_WORKERS_LOCKS = {} # New: to lock and run one convert ffmpeg process at a time
 # ----------------------------------
 
 # --- NEW STATE FOR POST CREATION ---
@@ -2504,109 +2503,104 @@ async def execute_conversions(session_id, client):
     if not session: return
     
     uid = session['uid']
+    in_path = session['path']
+    original_name = session['original_name']
+    configs = session['configs']
+    meta = session['meta']
+    msg = session['source_message']
+    status_msg_id = session['msg_id']
     
-    if uid not in CONVERT_WORKERS_LOCKS:
-        CONVERT_WORKERS_LOCKS[uid] = asyncio.Lock()
-        
-    async with CONVERT_WORKERS_LOCKS[uid]:
-        in_path = session['path']
-        original_name = session['original_name']
-        configs = session['configs']
-        meta = session['meta']
-        msg = session['source_message']
-        status_msg_id = session['msg_id']
-        
-        cancel_event = asyncio.Event()
-        TASKS.setdefault(uid, []).append(cancel_event)
-        USER_TASK_EVENTS.setdefault(uid, {})[status_msg_id] = cancel_event
+    cancel_event = asyncio.Event()
+    TASKS.setdefault(uid, []).append(cancel_event)
+    USER_TASK_EVENTS.setdefault(uid, {})[status_msg_id] = cancel_event
 
-        try:
-            for idx, config in enumerate(configs, 1):
-                if cancel_event.is_set(): break
-                
-                res_val = config['res']
-                vb = config['v_bitrate']
-                ab = config['a_bitrate']
-                
-                out_ext = in_path.suffix if in_path.suffix else ".mp4"
-                res_str = f"{res_val}p" if res_val else "OrigRes"
-                out_name = f"[Convert_{res_str}_{vb//1000}k] {original_name}"
-                out_path = TMP / f"cv_out_{uid}_{int(time.time())}_{idx}{out_ext}"
-                
-                try:
-                    await client.edit_message_text(
-                        msg.chat.id, status_msg_id, 
-                        f"⚙️ **Converting {idx}/{len(configs)}**\nRes: `{res_str}` | Vid: `{vb//1000}k` | Aud: `{ab//1000}k`\nOriginal: `{original_name}`",
-                        reply_markup=progress_keyboard()
-                    )
-                except: pass
-                
-                cmd = ["ffmpeg", "-y", "-i", str(in_path), "-map", "0:v", "-map", "0:a?", "-map", "0:s?"]
-                
-                if res_val:
-                    cmd.extend(["-vf", f"scale=w=-2:h={res_val}"])
-                    
-                orig_vb = meta['v_bitrate']
-                
-                # CPU and Quality Preset Logic based on Target Bitrate
-                if vb >= orig_vb:
-                    cmd.extend(["-c:v", "libx264", "-preset", "ultrafast", "-threads", "1", "-b:v", str(vb), "-maxrate", str(vb), "-bufsize", str(vb*2)])
-                else:
-                    cmd.extend(["-c:v", "libx264", "-preset", "medium", "-threads", "1", "-b:v", str(vb), "-maxrate", str(vb), "-bufsize", str(vb*2)])
-                
-                # Map multiple audios and apply same bitrate to all
-                cmd.extend(["-c:a", "aac"])
-                for a_idx in range(len(meta['audio_streams'])):
-                    cmd.extend([f"-b:a:{a_idx}", str(ab)])
-                    
-                cmd.extend(["-c:s", "copy", "-progress", "pipe:1", "-nostats", str(out_path)])
-                
-                process = await asyncio.create_subprocess_exec(
-                    *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                )
-                
-                start_t = time.time()
-                dummy_status = type('obj', (object,), {'chat': type('obj', (object,), {'id': msg.chat.id}), 'id': status_msg_id, 'edit_text': lambda text, reply_markup: client.edit_message_text(msg.chat.id, status_msg_id, text, reply_markup=reply_markup)})
-                
-                while True:
-                    if cancel_event.is_set():
-                        process.terminate()
-                        break
-                    line = await process.stdout.readline()
-                    if not line: break
-                    line = line.decode('utf-8').strip()
-                    if line.startswith("out_time_us="):
-                        us_str = line.split("=")[1]
-                        try:
-                            if us_str != "N/A":
-                                out_time_sec = int(us_str) / 1000000.0
-                                action_txt = f"Converting {idx}/{len(configs)} [{res_str}]"
-                                await progress_callback(out_time_sec, meta['duration'], action_txt, dummy_status, start_t, is_time_based=True, original_name=out_name)
-                        except: pass
-                await process.wait()
-                
-                if cancel_event.is_set(): raise Exception("Cancelled by user")
-                
-                if out_path.exists() and out_path.stat().st_size > 0:
-                    await sequential_upload_task(uid, client, msg, out_path, out_name, None, cancel_event, default_caption=out_name, original_caption=None, original_download_name=out_name)
-                else:
-                    logger.error("FFmpeg convert output failed.")
-                    
-            if session['upload_original'] and not cancel_event.is_set():
-                out_name = generate_new_filename(original_name)
-                await sequential_upload_task(uid, client, msg, in_path, out_name, None, cancel_event, default_caption=original_name, original_caption=None, original_download_name=original_name)
-                in_path = None # prevent cleanup in finally block since sequential_upload handles it
-                
-        except Exception as e:
-            logger.error(f"Execution conversions error: {e}")
-            try: await client.edit_message_text(msg.chat.id, status_msg_id, f"Conversion Error: {e}")
-            except: pass
-        finally:
+    try:
+        for idx, config in enumerate(configs, 1):
+            if cancel_event.is_set(): break
+            
+            res_val = config['res']
+            vb = config['v_bitrate']
+            ab = config['a_bitrate']
+            
+            out_ext = in_path.suffix if in_path.suffix else ".mp4"
+            res_str = f"{res_val}p" if res_val else "OrigRes"
+            out_name = f"[Convert_{res_str}_{vb//1000}k] {original_name}"
+            out_path = TMP / f"cv_out_{uid}_{int(time.time())}_{idx}{out_ext}"
+            
             try:
-                if in_path and in_path.exists(): in_path.unlink()
-                if cancel_event in TASKS.get(uid, []): TASKS[uid].remove(cancel_event)
-                await client.delete_messages(msg.chat.id, status_msg_id)
+                await client.edit_message_text(
+                    msg.chat.id, status_msg_id, 
+                    f"⚙️ **Converting {idx}/{len(configs)}**\nRes: `{res_str}` | Vid: `{vb//1000}k` | Aud: `{ab//1000}k`\nOriginal: `{original_name}`",
+                    reply_markup=progress_keyboard()
+                )
             except: pass
+            
+            cmd = ["ffmpeg", "-y", "-i", str(in_path), "-map", "0:v", "-map", "0:a?", "-map", "0:s?"]
+            
+            if res_val:
+                cmd.extend(["-vf", f"scale=w=-2:h={res_val}"])
+                
+            orig_vb = meta['v_bitrate']
+            
+            # CPU and Quality Preset Logic based on Target Bitrate
+            if vb >= orig_vb:
+                cmd.extend(["-c:v", "libx264", "-preset", "ultrafast", "-threads", "1", "-b:v", str(vb), "-maxrate", str(vb), "-bufsize", str(vb*2)])
+            else:
+                cmd.extend(["-c:v", "libx264", "-preset", "medium", "-threads", "1", "-b:v", str(vb), "-maxrate", str(vb), "-bufsize", str(vb*2)])
+            
+            # Map multiple audios and apply same bitrate to all
+            cmd.extend(["-c:a", "aac"])
+            for a_idx in range(len(meta['audio_streams'])):
+                cmd.extend([f"-b:a:{a_idx}", str(ab)])
+                
+            cmd.extend(["-c:s", "copy", "-progress", "pipe:1", "-nostats", str(out_path)])
+            
+            process = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            
+            start_t = time.time()
+            dummy_status = type('obj', (object,), {'chat': type('obj', (object,), {'id': msg.chat.id}), 'id': status_msg_id, 'edit_text': lambda text, reply_markup: client.edit_message_text(msg.chat.id, status_msg_id, text, reply_markup=reply_markup)})
+            
+            while True:
+                if cancel_event.is_set():
+                    process.terminate()
+                    break
+                line = await process.stdout.readline()
+                if not line: break
+                line = line.decode('utf-8').strip()
+                if line.startswith("out_time_us="):
+                    us_str = line.split("=")[1]
+                    try:
+                        if us_str != "N/A":
+                            out_time_sec = int(us_str) / 1000000.0
+                            action_txt = f"Converting {idx}/{len(configs)} [{res_str}]"
+                            await progress_callback(out_time_sec, meta['duration'], action_txt, dummy_status, start_t, is_time_based=True, original_name=out_name)
+                    except: pass
+            await process.wait()
+            
+            if cancel_event.is_set(): raise Exception("Cancelled by user")
+            
+            if out_path.exists() and out_path.stat().st_size > 0:
+                await sequential_upload_task(uid, client, msg, out_path, out_name, None, cancel_event, default_caption=out_name, original_caption=None, original_download_name=out_name)
+            else:
+                logger.error("FFmpeg convert output failed.")
+                
+        if session['upload_original'] and not cancel_event.is_set():
+            out_name = generate_new_filename(original_name)
+            await sequential_upload_task(uid, client, msg, in_path, out_name, None, cancel_event, default_caption=original_name, original_caption=None, original_download_name=original_name)
+            in_path = None # prevent cleanup in finally block since sequential_upload handles it
+            
+    except Exception as e:
+        logger.error(f"Execution conversions error: {e}")
+        try: await client.edit_message_text(msg.chat.id, status_msg_id, f"Conversion Error: {e}")
+        except: pass
+    finally:
+        try:
+            if in_path and in_path.exists(): in_path.unlink()
+            if cancel_event in TASKS.get(uid, []): TASKS[uid].remove(cancel_event)
+            await client.delete_messages(msg.chat.id, status_msg_id)
+        except: pass
 # ----------------------------------------
 
 # --- BATCH AUDIO MERGE CORE FUNCTIONS ---
@@ -2696,86 +2690,47 @@ async def batch_audio_merge_cb(c, cb):
         if uid not in BATCH_AUDIO_WORKERS or BATCH_AUDIO_WORKERS[uid].done():
             BATCH_AUDIO_WORKERS[uid] = asyncio.create_task(batch_audio_worker(uid, c))
 
-@app.on_callback_query(filters.regex(r"^bam_aud_(def|keep|all|done)_"))
+@app.on_callback_query(filters.regex(r"^bam_aud_(sel|all|done)_"))
 async def bam_audio_sel_cb(c, cb):
     uid = cb.from_user.id
     parts = cb.data.split('_')
     action = parts[2]
     track_idx = int(parts[3])
     
-    if uid not in BATCH_AUDIO_MODE or uid not in BATCH_AUDIO_STATE:
+    if uid not in BATCH_AUDIO_MODE:
         return
         
     state = BATCH_AUDIO_STATE[uid]
     
-    if action == "def":
-        state['bam_default_track'] = track_idx
-        if track_idx not in state.setdefault('bam_keep_tracks', set()):
-            state['bam_keep_tracks'].add(track_idx)
-        await cb.answer("Default track set.")
-        await cb.message.edit_reply_markup(build_bam_audio_keyboard(uid, state['current_tracks']))
-    elif action == "keep":
-        keep_set = state.setdefault('bam_keep_tracks', set())
-        if track_idx in keep_set:
-            keep_set.remove(track_idx)
-            if state.get('bam_default_track') == track_idx:
-                state['bam_default_track'] = None
-        else:
-            keep_set.add(track_idx)
-        await cb.answer("Track toggle updated.")
+    if action == "sel":
+        state['current_selected_track'] = track_idx
+        await cb.answer(f"Track {track_idx} selected.")
+        # Re-render keyboard
         await cb.message.edit_reply_markup(build_bam_audio_keyboard(uid, state['current_tracks']))
     elif action == "all":
-        if not state.get('bam_keep_tracks'):
-            await cb.answer("Select at least one track to keep!", show_alert=True)
-            return
-        if state.get('bam_default_track') is None:
-            await cb.answer("Select a default track!", show_alert=True)
-            return
-        state['global_track_override'] = True
-        state['global_keep_tracks'] = state['bam_keep_tracks'].copy()
-        state['global_default_track'] = state['bam_default_track']
-        state['global_track_structure'] = [(t['source'], t['language'], t['title']) for t in state['current_tracks']]
+        state['global_track_override'] = track_idx
         state['audio_ui_event'].set()
-        await cb.answer("Configuration saved for all matching files.")
+        await cb.answer("Track applied to all remaining files.")
     elif action == "done":
-        if not state.get('bam_keep_tracks'):
-            await cb.answer("Select at least one track to keep!", show_alert=True)
-            return
-        if state.get('bam_default_track') is None:
-            await cb.answer("Select a default track!", show_alert=True)
-            return
-        state['global_track_override'] = False
-        state['audio_ui_event'].set()
-        await cb.answer("Processing started.")
+        if 'current_selected_track' in state:
+            state['audio_ui_event'].set()
+            await cb.answer("Track selected.")
+        else:
+            await cb.answer("Select a track first!", show_alert=True)
 
 def build_bam_audio_keyboard(uid, tracks):
     state = BATCH_AUDIO_STATE[uid]
-    keep_tracks = state.get('bam_keep_tracks', set())
-    default_track = state.get('bam_default_track')
-    
+    selected = state.get('current_selected_track')
     keyboard = []
-    for i, track in enumerate(tracks):
-        def_btn = "🟢" if default_track == i else "⚪"
-        keep_btn = "✅" if i in keep_tracks else "🔲"
+    
+    for i, track in enumerate(tracks, 1):
+        text = f"✅ Track {i}" if selected == i else f"Track {i}"
+        keyboard.append([InlineKeyboardButton(text, callback_data=f"bam_aud_sel_{i}")])
         
-        title = track['title']
-        if not title or title.lower() == 'n/a':
-            title = track['language']
-        if not title or title.lower() == 'und':
-            title = f"Track {i+1}"
-            
-        title = title[:20]
-        src_lbl = "B" if track['source'] == 'base' else "S"
+    if selected is not None:
+        keyboard.append([InlineKeyboardButton("Select All 🔄", callback_data=f"bam_aud_all_{selected}")])
+        keyboard.append([InlineKeyboardButton("Done ✅", callback_data=f"bam_aud_done_{selected}")])
         
-        row = [
-            InlineKeyboardButton(def_btn, callback_data=f"bam_aud_def_{i}"),
-            InlineKeyboardButton(f"{src_lbl}: {title}", callback_data="ignore"),
-            InlineKeyboardButton(keep_btn, callback_data=f"bam_aud_keep_{i}")
-        ]
-        keyboard.append(row)
-        
-    keyboard.append([InlineKeyboardButton("Select All 🔄 (Auto)", callback_data="bam_aud_all_0")])
-    keyboard.append([InlineKeyboardButton("Done ✅", callback_data="bam_aud_done_0")])
     return InlineKeyboardMarkup(keyboard)
 
 async def batch_audio_worker(uid, c):
@@ -2814,8 +2769,41 @@ async def batch_audio_worker(uid, c):
                     if cancel_event.is_set(): c.stop_transmission()
                     await progress_callback(cur, tot, "Downloading Audio Source First...", status_msg, start_t, original_name=src_item['original_name'])
                 await src_item['message'].download(file_name=str(src_dl_path), progress=dl_prog2)
+                
+            # 2. Analyze Tracks of Src & Prompt User
+            await status_msg.edit("Analyzing audio tracks...", reply_markup=None)
+            tracks = await asyncio.to_thread(get_audio_tracks_ffprobe, src_dl_path)
+            
+            if not tracks:
+                raise Exception("No audio tracks found in source video.")
+                
+            selected_track_idx = None
+            
+            if state.get('global_track_override'):
+                selected_track_idx = state['global_track_override']
+            else:
+                state['current_tracks'] = tracks
+                state['current_selected_track'] = None
+                state['audio_ui_event'] = asyncio.Event()
+                
+                track_text = f"**Pair {idx}**\nBase: `{base_item['original_name']}`\nSrc: `{src_item['original_name']}`\n\n**Select Audio Track from Source:**\n"
+                for i, t in enumerate(tracks, 1):
+                    track_text += f"{i}. Lang: {t['language']}, Title: {t['title']}\n"
+                    
+                await status_msg.edit(track_text, reply_markup=build_bam_audio_keyboard(uid, tracks))
+                await state['audio_ui_event'].wait()
+                
+                if state.get('global_track_override'):
+                    selected_track_idx = state['global_track_override']
+                else:
+                    selected_track_idx = state.get('current_selected_track', 1)
 
-            # 2. Download Base AFTER Src, but before Analysis so we can fetch all tracks
+            if selected_track_idx is None or selected_track_idx > len(tracks):
+                selected_track_idx = 1
+                
+            src_stream_idx = tracks[selected_track_idx - 1]['stream_index']
+            
+            # 3. Download Base AFTER track selection
             if base_item.get('local_path'):
                 shutil.copy(base_item['local_path'], base_dl_path)
             elif base_item.get('url'):
@@ -2828,103 +2816,26 @@ async def batch_audio_worker(uid, c):
                     await progress_callback(cur, tot, "Downloading Base Video...", status_msg, start_t, original_name=base_item['original_name'])
                 await base_item['message'].download(file_name=str(base_dl_path), progress=dl_prog1)
 
-            # 3. Analyze Tracks of Both
-            await status_msg.edit("Analyzing audio tracks...", reply_markup=None)
-            base_tracks_raw = await asyncio.to_thread(get_audio_tracks_ffprobe, base_dl_path)
-            src_tracks_raw = await asyncio.to_thread(get_audio_tracks_ffprobe, src_dl_path)
-            
-            all_tracks = []
-            for t in base_tracks_raw:
-                all_tracks.append({'source': 'base', 'file_index': 0, 'stream_index': t['stream_index'], 'language': t['language'], 'title': t['title']})
-            for t in src_tracks_raw:
-                all_tracks.append({'source': 'src', 'file_index': 1, 'stream_index': t['stream_index'], 'language': t['language'], 'title': t['title']})
-                
-            if not all_tracks:
-                raise Exception("No audio tracks found in either video.")
-                
-            state['current_tracks'] = all_tracks
-            current_structure = [(t['source'], t['language'], t['title']) for t in all_tracks]
-
-            # 4. Check Global Override Match
-            use_override = False
-            if state.get('global_track_override'):
-                if current_structure == state.get('global_track_structure'):
-                    use_override = True
-                else:
-                    state['global_track_override'] = False # Mismatch, cancel auto
-                    
-            if use_override:
-                keep_tracks = state.get('global_keep_tracks', set())
-                default_track = state.get('global_default_track', 0)
-            else:
-                state['bam_keep_tracks'] = set()
-                state['bam_default_track'] = None
-                state['audio_ui_event'] = asyncio.Event()
-                
-                track_text = f"**Pair {idx}**\nBase: `{base_item['original_name']}`\nSrc: `{src_item['original_name']}`\n\n**Select Audio Tracks:**\n*(🟢 Default Play | Title | ✅ Keep)*\n"
-                    
-                await status_msg.edit(track_text, reply_markup=build_bam_audio_keyboard(uid, all_tracks))
-                await state['audio_ui_event'].wait()
-                
-                if state.get('global_track_override'):
-                    keep_tracks = state.get('global_keep_tracks', set())
-                    default_track = state.get('global_default_track', 0)
-                else:
-                    keep_tracks = state.get('bam_keep_tracks', set())
-                    default_track = state.get('bam_default_track', 0)
-
+            # 4. Merge Audio
             out_name = generate_new_filename(base_item['original_name'])
             if not out_name.lower().endswith(".mkv"):
                 out_name = Path(out_name).stem + ".mkv"
                 
             out_path = TMP / f"bam_out_{uid}_{int(time.time())}_{out_name}"
             
-            # 5. FFmpeg Command Build
             cmd = [
                 "ffmpeg", "-y",
                 "-i", str(base_dl_path),
                 "-i", str(src_dl_path),
                 "-map", "0:v:0",
-                "-map", "0:s?" # keep base subtitles
-            ]
-            
-            audio_idx = 0
-            metadata_args = []
-            seen_titles = set()
-            
-            for i, track in enumerate(all_tracks):
-                if i in keep_tracks:
-                    cmd.extend(["-map", f"{track['file_index']}:{track['stream_index']}"])
-                    
-                    disp = "default" if i == default_track else "0"
-                    cmd.extend([f"-disposition:a:{audio_idx}", disp])
-                    
-                    title = track['title']
-                    if not title or title.lower() == 'n/a':
-                        title = "Audio"
-                        
-                    if track['source'] == 'src':
-                        base_title = title
-                        count = 2
-                        while title.lower() in seen_titles:
-                            title = f"{base_title}{count}"
-                            count += 1
-                            
-                    seen_titles.add(title.lower())
-                    
-                    metadata_args.extend([f"-metadata:s:a:{audio_idx}", f"title={title}"])
-                    if track['language'] and track['language'].lower() != 'und':
-                        metadata_args.extend([f"-metadata:s:a:{audio_idx}", f"language={track['language']}"])
-                        
-                    audio_idx += 1
-            
-            cmd.extend(["-c", "copy"])
-            cmd.extend([
+                "-map", f"1:{src_stream_idx}",
+                "-map", "0:s?",
+                "-c", "copy",
                 "-metadata", "title=[@TA_HD_Anime] Telegram Channel",
                 "-metadata:s:v", "title=[@TA_HD_Anime] Telegram Channel",
-            ])
-            cmd.extend(metadata_args)
-            cmd.append(str(out_path))
+                "-metadata:s:a", "title=[@TA_HD_Anime] Telegram Channel",
+                str(out_path)
+            ]
             
             await status_msg.edit("Merging Audio...", reply_markup=progress_keyboard())
             
