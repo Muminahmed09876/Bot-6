@@ -2797,12 +2797,18 @@ async def text_handler(c, m: Message):
                 list1_text = "List 1 (Base Videos):\n" + "\n".join([f"{i+1}. {Path(p).name}" for i,p in enumerate(BATCH_AUDIO_LIST1[uid])])
                 list2_text = "\nList 2 (Audio Sources):\n" + "\n".join([f"{i+1}. {Path(p).name}" for i,p in enumerate(BATCH_AUDIO_LIST2[uid])])
                 
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Upload All 🚀", callback_data="baud_list_ok")],
+                    [InlineKeyboardButton("Cancel ❌", callback_data="baud_list_cancel")]
+                ])
+                
                 await m.reply_text(
                     f"{list1_text}\n{list2_text}\n\n"
                     "**Mapping Rules:**\n"
                     "‣ Default matches 1 to 1, 2 to 2.\n"
                     "‣ Custom mapping: send `1=4, 3=2, 5-10=3,5,7-15, 20-30=40-50`\n"
-                    "‣ Type `ok` to use default mapping, or send your custom string."
+                    "‣ Click Upload All or send custom string.",
+                    reply_markup=keyboard
                 )
             return
         elif text_lower == "off":
@@ -3623,32 +3629,63 @@ async def show_batch_audio_ui(c, chat_id, uid):
             msg = await c.send_message(chat_id, "Analyzing tracks...")
             BATCH_AUDIO_UI_MSG[uid] = msg.id
             
-        # Get tracks for the second video (the audio source)
-        tracks = await asyncio.to_thread(get_audio_tracks_ffprobe, vid_path2)
+        # Get tracks for both the base video and the audio source
+        tracks1 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid_path1)
+        tracks2 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid_path2)
+        
+        # Combine tracks, keeping track of their source (1 or 2)
+        combined_tracks = [{'src': 1, 'data': t} for t in tracks1] + [{'src': 2, 'data': t} for t in tracks2]
         
         if str(pair_idx) not in BATCH_AUDIO_TRACK_CONFIGS[uid]:
-            # Default state: keep all, default is first
+            # Keep all tracks from both lists by default
             BATCH_AUDIO_TRACK_CONFIGS[uid][str(pair_idx)] = {
-                'keep': list(range(len(tracks))),
-                'default': 0 if len(tracks) > 0 else -1,
-                'tracks': tracks
+                'keep': list(range(len(combined_tracks))),
+                'default': 0 if len(combined_tracks) > 0 else -1,
+                'tracks': combined_tracks
             }
             
         config = BATCH_AUDIO_TRACK_CONFIGS[uid][str(pair_idx)]
         
+        # Build text message with full names as requested
+        text = (
+            f"**🎵 Batch Audio Selection ({pair_idx + 1}/{len(pairs)})**\n\n"
+            f"**Base Video:** `{Path(vid_path1).name}`\n"
+            f"**Audio Source:** `{Path(vid_path2).name}`\n\n"
+        )
+        
+        if tracks1:
+            text += "**List 1 Audios:**\n"
+            for t in tracks1:
+                title_str = t['title'] if t['title'] and t['title'] != 'N/A' else 'Unknown'
+                text += f"‣ Audio track - {title_str} ({t['language']})\n"
+                
+        if tracks2:
+            text += "\n**List 2 Audios:**\n"
+            for t in tracks2:
+                title_str = t['title'] if t['title'] and t['title'] != 'N/A' else 'Unknown'
+                text += f"‣ Audio track - {title_str} ({t['language']})\n"
+                
+        text += "\nSelect which tracks to keep and which should play by default:"
+        
+        # Build buttons with short names (List 1 will be first/top, List 2 below)
         keyboard = []
-        for i, track in enumerate(tracks):
+        for i, track_wrap in enumerate(combined_tracks):
             is_def = config['default'] == i
             is_keep = i in config['keep']
             
             def_text = "🔘 Default" if is_def else "📻 Set Def"
             keep_text = "✅ Keep" if is_keep else "❌ Drop"
             
-            title = track['title'] if track['title'] and track['title'] != 'N/A' else f"Audio {i+1}"
-            
+            t_data = track_wrap['data']
+            # Short name for the button: take the first word of the title, or language
+            if t_data['title'] and t_data['title'].lower() != 'n/a':
+                short_name = t_data['title'].split()[0][:12]
+            else:
+                short_name = t_data['language'].upper()[:12]
+                
             keyboard.append([
                 InlineKeyboardButton(def_text, callback_data=f"baud_def_{uid}_{pair_idx}_{i}"),
-                InlineKeyboardButton(title, callback_data="ignore"),
+                InlineKeyboardButton(short_name, callback_data="ignore"),
                 InlineKeyboardButton(keep_text, callback_data=f"baud_keep_{uid}_{pair_idx}_{i}")
             ])
             
@@ -3658,25 +3695,63 @@ async def show_batch_audio_ui(c, chat_id, uid):
             InlineKeyboardButton("Next / Done ✅", callback_data=f"baud_done_{uid}_{pair_idx}")
         ])
         
-        text = (
-            f"**🎵 Batch Audio Selection ({pair_idx + 1}/{len(pairs)})**\n\n"
-            f"**Base Video:** `{Path(vid_path1).name}`\n"
-            f"**Audio Source:** `{Path(vid_path2).name}`\n\n"
-            f"Select which tracks to keep and which should play by default:"
-        )
-        
         await c.edit_message_text(chat_id, msg.id, text, reply_markup=InlineKeyboardMarkup(keyboard))
         
     except Exception as e:
         logger.error(f"Batch Audio UI Error: {e}")
         await c.send_message(chat_id, f"Error: {e}")
 
-@app.on_callback_query(filters.regex(r"^baud_(def|keep|all|done|cancel)"))
+@app.on_callback_query(filters.regex(r"^baud_"))
 async def batch_audio_callback(c: Client, cb: CallbackQuery):
     uid = cb.from_user.id
     parts = cb.data.split('_')
     action = parts[1]
     
+    # Handle list actions which don't have pair_idx
+    if action == "list":
+        sub_action = parts[2]
+        if sub_action == "ok":
+            count = min(len(BATCH_AUDIO_LIST1[uid]), len(BATCH_AUDIO_LIST2[uid]))
+            pairs = [(i, i) for i in range(count)]
+            if not pairs:
+                await cb.answer("Lists are empty!", show_alert=True)
+                return
+            BATCH_AUDIO_MAPPING[uid] = pairs
+            BATCH_AUDIO_STATE[uid] = 'ui'
+            BATCH_AUDIO_CURRENT_PAIR_IDX[uid] = 0
+            BATCH_AUDIO_TRACK_CONFIGS[uid] = {}
+            await show_batch_audio_ui(c, cb.message.chat.id, uid)
+        elif sub_action == "cancel":
+            if len(parts) == 3: # baud_list_cancel
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Yes ✅", callback_data="baud_list_cancel_yes"),
+                     InlineKeyboardButton("No ❌", callback_data="baud_list_cancel_no")]
+                ])
+                await cb.message.edit_text("Are you sure you want to cancel and clear the list?", reply_markup=keyboard)
+            elif parts[3] == "yes": # baud_list_cancel_yes
+                BATCH_AUDIO_MODE.discard(uid)
+                BATCH_AUDIO_STATE.pop(uid, None)
+                BATCH_AUDIO_LIST1.pop(uid, None)
+                BATCH_AUDIO_LIST2.pop(uid, None)
+                await cb.message.edit_text("Batch Audio Add Mode cancelled and data cleared.")
+            elif parts[3] == "no": # baud_list_cancel_no
+                list1_text = "List 1 (Base Videos):\n" + "\n".join([f"{i+1}. {Path(p).name}" for i,p in enumerate(BATCH_AUDIO_LIST1[uid])])
+                list2_text = "\nList 2 (Audio Sources):\n" + "\n".join([f"{i+1}. {Path(p).name}" for i,p in enumerate(BATCH_AUDIO_LIST2[uid])])
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Upload All 🚀", callback_data="baud_list_ok")],
+                    [InlineKeyboardButton("Cancel ❌", callback_data="baud_list_cancel")]
+                ])
+                await cb.message.edit_text(
+                    f"{list1_text}\n{list2_text}\n\n"
+                    "**Mapping Rules:**\n"
+                    "‣ Default matches 1 to 1, 2 to 2.\n"
+                    "‣ Custom mapping: send `1=4, 3=2, 5-10=3,5,7-15, 20-30=40-50`\n"
+                    "‣ Click Upload All or send custom string.",
+                    reply_markup=keyboard
+                )
+        return
+
+    # Handle track selection actions
     if action == "cancel":
         BATCH_AUDIO_MODE.discard(uid)
         BATCH_AUDIO_STATE.pop(uid, None)
@@ -3724,18 +3799,24 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
         
         for i in range(pair_idx + 1, len(pairs)):
             idx1, idx2 = pairs[i]
+            vid1 = BATCH_AUDIO_LIST1[uid][idx1]
             vid2 = BATCH_AUDIO_LIST2[uid][idx2]
-            tracks = await asyncio.to_thread(get_audio_tracks_ffprobe, vid2)
-            if len(tracks) != target_count:
+            
+            # Reconstruct combined tracks for this pair to check count
+            t1 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid1)
+            t2 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid2)
+            c_tracks = [{'src': 1, 'data': t} for t in t1] + [{'src': 2, 'data': t} for t in t2]
+            
+            if len(c_tracks) != target_count:
                 # Stop auto applying if mismatch
                 BATCH_AUDIO_CURRENT_PAIR_IDX[uid] = i
-                await cb.message.reply_text(f"Track mismatch at pair {i+1}. Found {len(tracks)} tracks instead of {target_count}. Manual selection required.")
+                await cb.message.reply_text(f"Track mismatch at pair {i+1}. Found {len(c_tracks)} tracks instead of {target_count}. Manual selection required.")
                 await show_batch_audio_ui(c, cb.message.chat.id, uid)
                 return
             BATCH_AUDIO_TRACK_CONFIGS[uid][str(i)] = {
                 'keep': keep_idxs.copy(),
                 'default': def_idx,
-                'tracks': tracks
+                'tracks': c_tracks
             }
             
         BATCH_AUDIO_CURRENT_PAIR_IDX[uid] = len(pairs)
@@ -3772,10 +3853,12 @@ async def execute_batch_audio_remux(uid, c, chat_id):
             "-map", "0:v", "-map", "0:s?", "-map", "0:d?"
         ]
         
-        # Audio mapping
+        # Audio mapping considering the source index
         for k in keep_tracks:
-            stream_idx = tracks_data[k]['stream_index']
-            cmd.extend(["-map", f"1:{stream_idx}"])
+            track_wrap = tracks_data[k]
+            stream_idx = track_wrap['data']['stream_index']
+            src_file_idx = 0 if track_wrap['src'] == 1 else 1
+            cmd.extend(["-map", f"{src_file_idx}:{stream_idx}"])
             
         cmd.extend(["-disposition:a", "0"])
         
@@ -3784,17 +3867,20 @@ async def execute_batch_audio_remux(uid, c, chat_id):
             new_idx = keep_tracks.index(def_track)
             cmd.extend([f"-disposition:a:{new_idx}", "default"])
             
-        # Metadata
+        # Metadata renaming logic to handle duplicates
         used_titles = set()
         for idx, k in enumerate(keep_tracks):
-            t = tracks_data[k]['title']
+            t = tracks_data[k]['data']['title']
             if not t or t == 'N/A': t = "Audio"
-            # Rename duplicates
+            
+            # Handle duplicate names gracefully
+            original_t = t
             if t in used_titles:
                 j = 2
-                while f"{t} {j}" in used_titles: j += 1
-                t = f"{t} {j}"
+                while f"{original_t}{j}" in used_titles: j += 1
+                t = f"{original_t}{j}"
             used_titles.add(t)
+            
             cmd.extend([f"-metadata:s:a:{idx}", f"title={t}"])
             cmd.extend([f"-metadata:s:a:{idx}", "handler_name=[@TA_HD_Anime] Telegram Channel"])
             
