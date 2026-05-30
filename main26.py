@@ -4329,9 +4329,7 @@ async def execute_batch_audio_remux(uid, c, chat_id):
             "-metadata:s:a", "handler_name=[@TA_HD_Anime] Telegram Channel",
             "-metadata:s:s", "title=[@TA_HD_Anime] Telegram Channel",
             "-metadata:s:s", "handler_name=[@TA_HD_Anime] Telegram Channel",
-            "-c:v", "copy",
-            "-c:a", "aac", "-ac", "2", "-b:a", "128k", # Re-encoding audio to fix weird voices Issue
-            "-c:s", "copy",
+            "-c", "copy",
             "-shortest", # Fixed Lag/Desync issue for batch audio
             str(out_path)
         ])
@@ -4382,10 +4380,11 @@ async def execute_batch_audio_remux(uid, c, chat_id):
         try: Path(p).unlink(missing_ok=True)
         except: pass
         
-    BATCH_AUDIO_MODE.discard(uid)
-    BATCH_AUDIO_STATE.pop(uid, None)
-    BATCH_AUDIO_LIST1.pop(uid, None)
-    BATCH_AUDIO_LIST2.pop(uid, None)
+    BATCH_AUDIO_STATE[uid] = 'list1'
+    BATCH_AUDIO_LIST1[uid] = []
+    BATCH_AUDIO_LIST2[uid] = []
+    try: await c.send_message(chat_id, "Batch processing complete. Batch Audio Add Mode is still ON.\nSend Base Videos for List 1, or type `off` to exit.")
+    except Exception: pass
 # -----------------------------
 
 async def handle_audio_change_file(c: Client, m: Message):
@@ -4505,9 +4504,7 @@ async def sequential_remux_upload_task(uid, c, m, in_path, out_name, new_stream_
             "-metadata:s:a", "handler_name=[@TA_HD_Anime] Telegram Channel",
             "-metadata:s:s", "title=[@TA_HD_Anime] Telegram Channel",
             "-metadata:s:s", "handler_name=[@TA_HD_Anime] Telegram Channel",
-            "-c:v", "copy",
-            "-c:a", "aac", "-ac", "2", "-b:a", "128k", # MX Player compatibility & voice loss fix
-            "-c:s", "copy",
+            "-c", "copy",
             str(out_path)
         ]
 
@@ -4637,10 +4634,7 @@ async def cancel_single_cb(c, cb):
         try: await cb.message.delete()
         except: pass
     else:
-        await cb.answer("Task not found or already completed.",
-                        show_alert=True)
-        try: await cb.message.delete()
-        except: pass
+        await cb.answer("Task not found or already completed.", show_alert=True)
 
 @app.on_callback_query(filters.regex("cancel_all"))
 async def cancel_all_cb(c, cb):
@@ -4672,7 +4666,7 @@ async def cancel_all_cb(c, cb):
     if uid in USER_WORKERS:
         USER_WORKERS[uid].cancel()
         del USER_WORKERS[uid]
-
+            
     if uid in BATCH_AUDIO_QUEUES:
         while not BATCH_AUDIO_QUEUES[uid].empty():
             try:
