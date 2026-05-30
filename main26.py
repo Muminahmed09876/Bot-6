@@ -141,8 +141,8 @@ SAVED_YT_QUALITIES = {}
 # --- NEW STATE FOR BATCH AUDIO ADD MODE ---
 BATCH_AUDIO_MODE = set()
 BATCH_AUDIO_STATE = {} # uid -> 'list1', 'list2', 'mapping', 'ui'
-BATCH_AUDIO_LIST1 = {} # uid -> list of paths
-BATCH_AUDIO_LIST2 = {} # uid -> list of paths
+BATCH_AUDIO_LIST1 = {} # uid -> list of dicts: {'path': str, 'name': str}
+BATCH_AUDIO_LIST2 = {} # uid -> list of dicts: {'path': str, 'name': str}
 BATCH_AUDIO_MAPPING = {} # uid -> dict mapping pairs
 BATCH_AUDIO_CURRENT_PAIR_IDX = {}
 BATCH_AUDIO_TRACK_CONFIGS = {}
@@ -649,9 +649,9 @@ async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_d
     
     try:
         if is_yt_dlp:
-            status_msg = await m.reply_text(f"Queue: YT-DLP processing started for `{title}` ({res}p)...")
+            status_msg = await m.reply_text(f"Queue item added for `{title}` ({res}p)...")
         else:
-            status_msg = await m.reply_text(f"Queue: Processing started for `{original_name}`...", reply_markup=progress_keyboard())
+            status_msg = await m.reply_text(f"Queue item added for `{original_name}`...", reply_markup=progress_keyboard())
     except:
         status_msg = None
 
@@ -1248,7 +1248,7 @@ async def queue_yt_dlp(uid, c, m, url, fmt, title, res):
     if uid not in USER_QUEUES:
         USER_QUEUES[uid] = asyncio.Queue()
     try:
-        status_msg = await m.reply_text(f"Queue: YT-DLP added to queue for `{title}` ({res}p)...")
+        status_msg = await m.reply_text(f"Queue item added for `{title}` ({res}p)...")
     except:
         status_msg = None
 
@@ -1633,6 +1633,7 @@ async def toggle_convert_mode(c, m: Message):
     if uid in CONVERT_MODE:
         CONVERT_MODE.discard(uid)
         CONVERT_ZIP_MODE.discard(uid)
+        ACTIVE_CONVERT_SESSION.pop(uid, None)
         await m.reply_text("Convert Mode **OFF**.")
     else:
         CONVERT_MODE.add(uid)
@@ -1912,8 +1913,18 @@ async def batch_audio_add_mode(c, m: Message):
     if uid in BATCH_AUDIO_MODE:
         BATCH_AUDIO_MODE.discard(uid)
         BATCH_AUDIO_STATE.pop(uid, None)
+        for item in BATCH_AUDIO_LIST1.get(uid, []):
+            try: Path(item['path']).unlink(missing_ok=True)
+            except: pass
+        for item in BATCH_AUDIO_LIST2.get(uid, []):
+            try: Path(item['path']).unlink(missing_ok=True)
+            except: pass
         BATCH_AUDIO_LIST1.pop(uid, None)
         BATCH_AUDIO_LIST2.pop(uid, None)
+        if uid in BATCH_AUDIO_QUEUES:
+            while not BATCH_AUDIO_QUEUES[uid].empty():
+                try: BATCH_AUDIO_QUEUES[uid].get_nowait(); BATCH_AUDIO_QUEUES[uid].task_done()
+                except: pass
         await m.reply_text("Batch Audio Add Mode **OFF**.")
     else:
         BATCH_AUDIO_MODE.add(uid)
@@ -1932,6 +1943,11 @@ async def toggle_audio_change_mode(c, m: Message):
 
     if uid in MKV_AUDIO_CHANGE_MODE:
         MKV_AUDIO_CHANGE_MODE.discard(uid)
+        for msg_id in list(PENDING_AUDIO_ORDERS.keys()):
+            if PENDING_AUDIO_ORDERS[msg_id]['uid'] == uid:
+                file_data = PENDING_AUDIO_ORDERS.pop(msg_id)
+                try: Path(file_data['path']).unlink(missing_ok=True)
+                except: pass
         await m.reply_text("MKV audio change mode has been **TURNED OFF**.")
     else:
         MKV_AUDIO_CHANGE_MODE.add(uid)
@@ -2024,6 +2040,11 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
     if action == "toggle_audio_mode":
         if uid in MKV_AUDIO_CHANGE_MODE:
             MKV_AUDIO_CHANGE_MODE.discard(uid)
+            for msg_id in list(PENDING_AUDIO_ORDERS.keys()):
+                if PENDING_AUDIO_ORDERS[msg_id]['uid'] == uid:
+                    file_data = PENDING_AUDIO_ORDERS.pop(msg_id)
+                    try: Path(file_data['path']).unlink(missing_ok=True)
+                    except: pass
             message = "MKV Audio Change Mode OFF."
         else:
             MKV_AUDIO_CHANGE_MODE.add(uid)
@@ -2032,6 +2053,13 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
     elif action == "toggle_caption_mode":
         if uid in EDIT_CAPTION_MODE:
             EDIT_CAPTION_MODE.discard(uid)
+            BATCH_CAPTION_MODE.discard(uid)
+            BATCH_DATA.pop(uid, None)
+            MULTI_GROUP_BATCH_MODE.discard(uid)
+            MULTI_GROUP_DATA.pop(uid, None)
+            BATCH_STATUS_MSG.pop(uid, None)
+            MULTI_GROUP_DONE_MSG.pop(uid, None)
+            USE_ORIGINAL_CAPTION_IN_MULTI_GROUP.discard(uid)
             message = "Edit Caption Mode OFF."
         else:
             EDIT_CAPTION_MODE.add(uid)
@@ -2048,6 +2076,13 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
     elif action == "toggle_zip_mode":
         if uid in ZIP_DOWNLOAD_MODE:
             ZIP_DOWNLOAD_MODE.discard(uid)
+            ZIP_READY_LIST.pop(uid, None)
+            ZIP_NAV_STATE.pop(uid, None)
+            AUTO_UPLOAD_ALL.discard(uid)
+            if uid in ZIP_DL_QUEUES:
+                while not ZIP_DL_QUEUES[uid].empty():
+                    try: ZIP_DL_QUEUES[uid].get_nowait(); ZIP_DL_QUEUES[uid].task_done()
+                    except: pass
             message = "ZIP Download Mode OFF."
         else:
             ZIP_DOWNLOAD_MODE.add(uid)
@@ -2056,6 +2091,8 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
     elif action == "toggle_convert_mode":
         if uid in CONVERT_MODE:
             CONVERT_MODE.discard(uid)
+            CONVERT_ZIP_MODE.discard(uid)
+            ACTIVE_CONVERT_SESSION.pop(uid, None)
             message = "Convert Mode OFF."
         else:
             CONVERT_MODE.add(uid)
@@ -2065,6 +2102,18 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
         if uid in BATCH_AUDIO_MODE:
             BATCH_AUDIO_MODE.discard(uid)
             BATCH_AUDIO_STATE.pop(uid, None)
+            for item in BATCH_AUDIO_LIST1.get(uid, []):
+                try: Path(item['path']).unlink(missing_ok=True)
+                except: pass
+            for item in BATCH_AUDIO_LIST2.get(uid, []):
+                try: Path(item['path']).unlink(missing_ok=True)
+                except: pass
+            BATCH_AUDIO_LIST1.pop(uid, None)
+            BATCH_AUDIO_LIST2.pop(uid, None)
+            if uid in BATCH_AUDIO_QUEUES:
+                while not BATCH_AUDIO_QUEUES[uid].empty():
+                    try: BATCH_AUDIO_QUEUES[uid].get_nowait(); BATCH_AUDIO_QUEUES[uid].task_done()
+                    except: pass
             message = "Batch Audio Add Mode OFF."
         else:
             BATCH_AUDIO_MODE.add(uid)
@@ -2276,7 +2325,15 @@ async def zip_cancel_cb(c, cb):
 
 def is_archive_file(filepath: Path) -> bool:
     ext = filepath.suffix.lower()
-    return ext in ['.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz']
+    if ext in ['.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz']:
+        return True
+    try:
+        with open(filepath, 'rb') as f:
+            header = f.read(4)
+            if header.startswith(b'PK\x03\x04') or header.startswith(b'Rar!') or header.startswith(b'7z\xbc\xaf'):
+                return True
+    except: pass
+    return False
 
 async def execute_zip_download_and_extract(c, m, url=None, local_path=None, target_list=None):
     uid = m.from_user.id
@@ -2330,7 +2387,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
             if target_list is not None:
                 new_path = tmp_in.parent / original_name_pass
                 shutil.move(tmp_in, new_path)
-                target_list.append(new_path)
+                target_list.append({'path': str(new_path), 'name': original_name_pass})
                 await status_msg.edit(f"File added to list. Total: {len(target_list)}")
                 return
             ZIP_READY_LIST.setdefault(uid, []).append({
@@ -2389,7 +2446,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
             if target_list is not None:
                 new_path = tmp_in.parent / original_name_pass
                 shutil.move(tmp_in, new_path)
-                target_list.append(new_path)
+                target_list.append({'path': str(new_path), 'name': original_name_pass})
                 return
             ZIP_READY_LIST.setdefault(uid, []).append({
                 'root_dir': None,
@@ -2459,7 +2516,8 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
             return
 
         if target_list is not None:
-            target_list.extend(all_files)
+            for f in all_files:
+                target_list.append({'path': str(f), 'name': f.name})
             await status_msg.edit(f"Extracted {len(all_files)} files to list. Total: {len(target_list)}")
             return
 
@@ -2504,7 +2562,7 @@ async def send_batch_audio_list_page(c, chat_id, uid, list_id, page=0, msg_id=No
         text += "List is empty."
     else:
         for i in range(start_idx, end_idx):
-            f_name = Path(target_list[i]).name
+            f_name = target_list[i]['name']
             text += f"**{i+1}.** `{f_name}`\n"
             keyboard.append([
                 InlineKeyboardButton(f"{i+1}. {f_name[:20]}...", callback_data="ignore"),
@@ -3069,7 +3127,7 @@ async def text_handler(c, m: Message):
                     chunks = []
                     curr = f"**{title}:**\n"
                     for i, p in enumerate(lst):
-                        line = f"{i+1}. {Path(p).name}\n"
+                        line = f"{i+1}. {p['name']}\n"
                         if len(curr) + len(line) > 3500:
                             chunks.append(curr)
                             curr = f"**{title} (Cont):**\n"
@@ -3099,6 +3157,12 @@ async def text_handler(c, m: Message):
         elif text_lower == "off":
             BATCH_AUDIO_MODE.discard(uid)
             BATCH_AUDIO_STATE.pop(uid, None)
+            for item in BATCH_AUDIO_LIST1.get(uid, []):
+                try: Path(item['path']).unlink(missing_ok=True)
+                except: pass
+            for item in BATCH_AUDIO_LIST2.get(uid, []):
+                try: Path(item['path']).unlink(missing_ok=True)
+                except: pass
             BATCH_AUDIO_LIST1.pop(uid, None)
             BATCH_AUDIO_LIST2.pop(uid, None)
             if uid in BATCH_AUDIO_QUEUES:
@@ -3574,7 +3638,7 @@ async def process_batch_audio_input(uid, c, m, url=None, file_info=None, target_
                 else:
                     target_path = tmp_in.parent / original_name
                     shutil.move(tmp_in, target_path)
-                    target_list.append(target_path)
+                    target_list.append({'path': str(target_path), 'name': original_name})
                     await status_msg.edit(f"URL/File added to List {list_num}. Total: {len(target_list)}")
             else:
                 await status_msg.edit("Failed to download file.")
@@ -3956,8 +4020,10 @@ async def show_batch_audio_ui(c, chat_id, uid):
         return
         
     idx1, idx2 = pairs[pair_idx]
-    vid_path1 = BATCH_AUDIO_LIST1[uid][idx1]
-    vid_path2 = BATCH_AUDIO_LIST2[uid][idx2]
+    vid_path1 = BATCH_AUDIO_LIST1[uid][idx1]['path']
+    vid_path2 = BATCH_AUDIO_LIST2[uid][idx2]['path']
+    name1 = BATCH_AUDIO_LIST1[uid][idx1]['name']
+    name2 = BATCH_AUDIO_LIST2[uid][idx2]['name']
     
     msg = None
     if str(pair_idx) not in BATCH_AUDIO_TRACK_CONFIGS[uid]:
@@ -3998,8 +4064,8 @@ async def show_batch_audio_ui(c, chat_id, uid):
     # Build text message with full names as requested
     text = (
         f"**🎵 Batch Audio Selection ({pair_idx + 1}/{len(pairs)})**\n\n"
-        f"**Base Video:** `{Path(vid_path1).name}`\n"
-        f"**Audio Source:** `{Path(vid_path2).name}`\n\n"
+        f"**Base Video:** `{name1}`\n"
+        f"**Audio Source:** `{name2}`\n\n"
     )
     
     tracks1_display = [t for t in combined_tracks if t['src'] == 1]
@@ -4092,8 +4158,8 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
             page = int(parts[5])
             target_list = BATCH_AUDIO_LIST1.get(uid, []) if list_id == 'list1' else BATCH_AUDIO_LIST2.get(uid, [])
             if 0 <= index < len(target_list):
-                file_path = target_list.pop(index)
-                try: Path(file_path).unlink(missing_ok=True)
+                file_info = target_list.pop(index)
+                try: Path(file_info['path']).unlink(missing_ok=True)
                 except Exception: pass
                 await cb.answer("Deleted from list.", show_alert=False)
             await send_batch_audio_list_page(c, cb.message.chat.id, uid, list_id, page, cb.message.id)
@@ -4126,6 +4192,12 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
             elif parts[3] == "yes": # baud_list_cancel_yes
                 BATCH_AUDIO_MODE.discard(uid)
                 BATCH_AUDIO_STATE.pop(uid, None)
+                for item in BATCH_AUDIO_LIST1.get(uid, []):
+                    try: Path(item['path']).unlink(missing_ok=True)
+                    except: pass
+                for item in BATCH_AUDIO_LIST2.get(uid, []):
+                    try: Path(item['path']).unlink(missing_ok=True)
+                    except: pass
                 BATCH_AUDIO_LIST1.pop(uid, None)
                 BATCH_AUDIO_LIST2.pop(uid, None)
                 if uid in BATCH_AUDIO_QUEUES:
@@ -4142,7 +4214,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
                     chunks = []
                     curr = f"**{title}:**\n"
                     for i, p in enumerate(lst):
-                        line = f"{i+1}. {Path(p).name}\n"
+                        line = f"{i+1}. {p['name']}\n"
                         if len(curr) + len(line) > 3500:
                             chunks.append(curr)
                             curr = f"**{title} (Cont):**\n"
@@ -4175,6 +4247,12 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
     if action == "cancel":
         BATCH_AUDIO_MODE.discard(uid)
         BATCH_AUDIO_STATE.pop(uid, None)
+        for item in BATCH_AUDIO_LIST1.get(uid, []):
+            try: Path(item['path']).unlink(missing_ok=True)
+            except: pass
+        for item in BATCH_AUDIO_LIST2.get(uid, []):
+            try: Path(item['path']).unlink(missing_ok=True)
+            except: pass
         BATCH_AUDIO_LIST1.pop(uid, None)
         BATCH_AUDIO_LIST2.pop(uid, None)
         if uid in BATCH_AUDIO_QUEUES:
@@ -4228,8 +4306,8 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
         
         for i in range(pair_idx + 1, len(pairs)):
             idx1, idx2 = pairs[i]
-            vid1 = BATCH_AUDIO_LIST1[uid][idx1]
-            vid2 = BATCH_AUDIO_LIST2[uid][idx2]
+            vid1 = BATCH_AUDIO_LIST1[uid][idx1]['path']
+            vid2 = BATCH_AUDIO_LIST2[uid][idx2]['path']
             
             # Reconstruct combined tracks for this pair to check count
             t1 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid1)
@@ -4258,15 +4336,15 @@ async def execute_batch_audio_remux(uid, c, chat_id):
     status_msg = await c.send_message(chat_id, f"Starting remux for {len(pairs)} files...")
     
     for i, (idx1, idx2) in enumerate(pairs):
-        vid1 = BATCH_AUDIO_LIST1[uid][idx1]
-        vid2 = BATCH_AUDIO_LIST2[uid][idx2]
+        vid1 = BATCH_AUDIO_LIST1[uid][idx1]['path']
+        vid2 = BATCH_AUDIO_LIST2[uid][idx2]['path']
+        base_name = BATCH_AUDIO_LIST1[uid][idx1]['name']
         
         config = BATCH_AUDIO_TRACK_CONFIGS[uid][str(i)]
         keep_tracks = config['keep']
         def_track = config['default']
         tracks_data = config['tracks']
         
-        base_name = Path(vid1).name
         out_name = get_dynamic_filename(uid, base_name)
         if not out_name.lower().endswith(".mkv"):
             out_name = Path(out_name).stem + ".mkv"
@@ -4329,7 +4407,9 @@ async def execute_batch_audio_remux(uid, c, chat_id):
             "-metadata:s:a", "handler_name=[@TA_HD_Anime] Telegram Channel",
             "-metadata:s:s", "title=[@TA_HD_Anime] Telegram Channel",
             "-metadata:s:s", "handler_name=[@TA_HD_Anime] Telegram Channel",
-            "-c", "copy",
+            "-c:v", "copy",
+            "-c:a", "aac", "-ac", "2", "-b:a", "128k", # Re-encoding audio to fix weird voices Issue
+            "-c:s", "copy",
             "-shortest", # Fixed Lag/Desync issue for batch audio
             str(out_path)
         ])
@@ -4374,10 +4454,10 @@ async def execute_batch_audio_remux(uid, c, chat_id):
     
     # Cleanup files
     for p in BATCH_AUDIO_LIST1.get(uid, []):
-        try: Path(p).unlink(missing_ok=True)
+        try: Path(p['path']).unlink(missing_ok=True)
         except: pass
     for p in BATCH_AUDIO_LIST2.get(uid, []):
-        try: Path(p).unlink(missing_ok=True)
+        try: Path(p['path']).unlink(missing_ok=True)
         except: pass
         
     BATCH_AUDIO_STATE[uid] = 'list1'
@@ -4436,7 +4516,7 @@ async def handle_audio_change_file(c: Client, m: Message):
         )
             
         track_list_text += (
-            "\nIf you don't want to change audio, use the `Cancel` button below or type `/mkv_video_audio_change` to turn off the mode."
+        "\nIf you don't want to change audio, use the `Cancel` button below or type `/mkv_video_audio_change` to turn off the mode."
         )
         
         await status_msg.edit(track_list_text, reply_markup=progress_keyboard()) 
@@ -4504,7 +4584,9 @@ async def sequential_remux_upload_task(uid, c, m, in_path, out_name, new_stream_
             "-metadata:s:a", "handler_name=[@TA_HD_Anime] Telegram Channel",
             "-metadata:s:s", "title=[@TA_HD_Anime] Telegram Channel",
             "-metadata:s:s", "handler_name=[@TA_HD_Anime] Telegram Channel",
-            "-c", "copy",
+            "-c:v", "copy",
+            "-c:a", "aac", "-ac", "2", "-b:a", "128k", # MX Player compatibility & voice loss fix
+            "-c:s", "copy",
             str(out_path)
         ]
 
