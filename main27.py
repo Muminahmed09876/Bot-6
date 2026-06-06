@@ -15,7 +15,7 @@ from hachoir.parser import createParser
 from hachoir.metadata import extractMetadata
 import subprocess
 import traceback
-import json
+import json 
 from flask import Flask, render_template_string, send_from_directory, Response, request
 import requests
 import time
@@ -50,7 +50,7 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-PORT = int(os.getenv("PORT", "10000"))
+PORT = int(os.getenv("PORT", "10000")) 
 
 # FIX 1: Auto detect Public IP for Direct Links if Render Hostname is not provided
 RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
@@ -100,7 +100,7 @@ AUTO_UPLOAD_ALL = set()
 
 # --- STATE FOR AUDIO CHANGE ---
 MKV_AUDIO_CHANGE_MODE = set()
-PENDING_AUDIO_ORDERS = {}
+PENDING_AUDIO_ORDERS = {} 
 # ------------------------------
 
 # --- NEW STATE FOR CONVERT MODE ---
@@ -115,24 +115,24 @@ CONVERT_BATCH_UI_MSG = {}
 
 # --- NEW STATE FOR POST CREATION ---
 CREATE_POST_MODE = set()
-POST_CREATION_STATE = {}
+POST_CREATION_STATE = {} 
 
 DEFAULT_POST_DATA = {
     'image_name': "Image Name",
     'genres': "",
-    'season_list_raw': "1, 2"
+    'season_list_raw': "1, 2" 
 }
 # ------------------------------------------------
 
 # --- NEW STATE FOR BATCH CAPTION & QUEUE ---
-BATCH_CAPTION_MODE = set()
+BATCH_CAPTION_MODE = set()  
 BATCH_UPLOAD_MODE = set()
-BATCH_DATA = {}
-BATCH_STATUS_MSG = {}
+BATCH_DATA = {}            
+BATCH_STATUS_MSG = {}      
 
-USER_QUEUES = {}
-USER_WORKERS = {}
-USER_UPLOAD_LOCKS = {}
+USER_QUEUES = {}           
+USER_WORKERS = {}          
+USER_UPLOAD_LOCKS = {}     
 
 # --- NEW STATE FOR MULTI GROUP BATCH & CAPTION OVERRIDE & ZIP ---
 MULTI_GROUP_BATCH_MODE = set()
@@ -224,7 +224,7 @@ def extract_drive_id(url: str) -> str:
 def advance_dynamic_counters(uid):
     if uid not in USER_COUNTERS:
         USER_COUNTERS[uid] = {'uploads': 0, 'episode_numbers': {}, 'dynamic_counters': {}, 're_options_count': 0}
-
+        
     USER_COUNTERS[uid]['uploads'] += 1
 
     if USER_COUNTERS[uid]['re_options_count'] > 0:
@@ -238,7 +238,7 @@ def advance_dynamic_counters(uid):
 def process_dynamic_caption(uid, caption_template, is_first_setup=False):
     if uid not in USER_COUNTERS:
         USER_COUNTERS[uid] = {'uploads': 0, 'episode_numbers': {}, 'dynamic_counters': {}, 're_options_count': 0}
-
+        
     counter_matches = re.findall(r"\[\s*(\(?\d+\)?)\s*\]", caption_template)
     if USER_COUNTERS[uid]['uploads'] <= 1 or is_first_setup:
         for match in counter_matches:
@@ -251,10 +251,10 @@ def process_dynamic_caption(uid, caption_template, is_first_setup=False):
     if quality_match:
         options_str = quality_match.group(1)
         options = [opt.strip() for opt in options_str.split(',')]
-
+        
         if not USER_COUNTERS[uid]['re_options_count']:
             USER_COUNTERS[uid]['re_options_count'] = len(options)
-
+        
         current_index = max(0, (USER_COUNTERS[uid]['uploads'] - 1)) % len(options)
         current_quality = options[current_index]
         caption_template = caption_template.replace(quality_match.group(0), current_quality)
@@ -273,15 +273,15 @@ def process_dynamic_caption(uid, caption_template, is_first_setup=False):
 
     conditional_matches = re.findall(r"\[([a-zA-Z0-9\s]+)\s*\((.*?)\)\]", caption_template)
     for match in conditional_matches:
-        text_to_add = match[0].strip()
-        target_num_str = re.sub(r'[^0-9]', '', match[1]).strip()
+        text_to_add = match[0].strip() 
+        target_num_str = re.sub(r'[^0-9]', '', match[1]).strip() 
         placeholder = re.escape(f"[{match[0].strip()} ({match[1].strip()})]")
         try:
             target_num = int(target_num_str)
         except ValueError:
             caption_template = re.sub(placeholder, "", caption_template)
             continue
-
+        
         if current_episode_num == target_num:
             caption_template = re.sub(placeholder, text_to_add, caption_template)
         else:
@@ -294,17 +294,17 @@ def generate_new_filename(original_name: str, uid: int = None) -> str:
     """Generates the new standardized filename while preserving the original extension."""
     file_path = Path(original_name)
     file_ext = file_path.suffix.lower()
-
+    
     file_ext = "." + file_ext.lstrip('.') if file_ext else ".mp4"
-
+    
     if not file_ext or file_ext == '.':
         file_ext = ".mp4"
-
+        
     if uid and uid in USER_FILENAMES:
         base_name = process_dynamic_caption(uid, USER_FILENAMES[uid], is_first_setup=True)
     else:
         base_name = "[@TA_HD_Anime] Telegram Channel"
-
+        
     return base_name + file_ext
 
 def get_video_metadata(file_path: Path) -> dict:
@@ -316,34 +316,34 @@ def get_video_metadata(file_path: Path) -> dict:
             "-v", "quiet",
             "-print_format", "json",
             "-show_streams",
-            "-show_format",
+            "-show_format", 
             str(file_path)
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
         metadata = json.loads(result.stdout)
-
+        
         video_stream = None
         for stream in metadata.get('streams', []):
             if stream.get('codec_type') == 'video':
                 video_stream = stream
                 break
-
+        
         if video_stream:
             data['width'] = int(video_stream.get('width', 0))
             data['height'] = int(video_stream.get('height', 0))
-
+        
         duration_str = metadata.get('format', {}).get('duration')
-
+        
         if not duration_str and video_stream:
             duration_str = video_stream.get('duration')
-
+            
         if duration_str:
             try:
                 data['duration'] = int(float(duration_str))
             except (ValueError, TypeError):
                 logger.warning(f"Could not parse duration string: {duration_str}")
-                data['duration'] = 0
-
+                data['duration'] = 0 
+        
         if data['width'] == 0 or data['height'] == 0:
             raise Exception("FFprobe returned 0 dimensions, trying Hachoir")
 
@@ -352,12 +352,12 @@ def get_video_metadata(file_path: Path) -> dict:
         try:
             parser = createParser(str(file_path))
             if not parser:
-                return data
+                return data 
             with parser:
                 h_metadata = extractMetadata(parser)
             if not h_metadata:
-                return data
-
+                return data 
+            
             if h_metadata.has("duration") and data['duration'] == 0:
                 data['duration'] = int(h_metadata.get("duration").total_seconds())
             if h_metadata.has("width") and data['width'] == 0:
@@ -367,7 +367,7 @@ def get_video_metadata(file_path: Path) -> dict:
             logger.info(f"Hachoir fallback successful for {file_path}")
         except Exception as he:
             logger.error(f"Hachoir fallback ALSO failed: {he}")
-
+    
     return data
 
 def get_detailed_metadata(file_path: Path) -> dict:
@@ -381,10 +381,10 @@ def get_detailed_metadata(file_path: Path) -> dict:
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
         metadata = json.loads(result.stdout)
-
+        
         duration_str = metadata.get('format', {}).get('duration', '0')
         data['duration'] = float(duration_str) if duration_str else 0
-
+        
         total_bitrate = float(metadata.get('format', {}).get('bitrate', 0))
         if total_bitrate == 0 and data['duration'] > 0:
             total_bitrate = (data['filesize'] * 8) / data['duration']
@@ -404,12 +404,12 @@ def get_detailed_metadata(file_path: Path) -> dict:
                     'codec': stream.get('codec_name'),
                     'bitrate': ab_val
                 })
-
+                
         # Estimate video bitrate if missing
         if data['v_bitrate'] == 0 and total_bitrate > 0:
             audio_total = sum([a['bitrate'] for a in data['audio_streams']])
             data['v_bitrate'] = max(100000, int(total_bitrate - audio_total))
-
+            
     except Exception as e:
         logger.error(f"Detailed FFprobe error: {e}")
     return data
@@ -422,18 +422,18 @@ def calculate_estimated_size(duration, v_bitrate_kbps, a_bitrate_kbps, num_audio
 def build_convert_ui(session_id):
     session = CONVERT_SESSIONS.get(session_id)
     if not session: return None, None
-
+    
     meta = session['meta']
     configs = session['configs']
-
+    
     v_kbps = session['curr_v_bitrate'] // 1000
     a_kbps = session['curr_a_bitrate'] // 1000
     res = session['curr_res']
-
+    
     est_size = calculate_estimated_size(meta['duration'], v_kbps, a_kbps, len(meta['audio_streams']))
-
+    
     orig_v_kbps = meta['v_bitrate'] // 1000
-
+    
     text = (
         f"**🎥 Video Convert Options**\n\n"
         f"**File:** `{session['original_name']}`\n"
@@ -447,43 +447,43 @@ def build_convert_ui(session_id):
         f"**Estimated Size:** `{format_size(est_size)}`\n\n"
         f"*(You can also send a number like `200` to set video bitrate directly)*"
     )
-
+    
     orig_h = meta['height']
     res_buttons = []
-    if orig_h > 0 or True:
+    if orig_h > 0 or True: 
         res_buttons.append(InlineKeyboardButton(f"✅ Orig" if res is None else "Orig", callback_data=f"cv_res_{session_id}_Orig"))
         for r in [2160, 1440, 1080, 720, 480, 360, 240, 144]:
             res_buttons.append(InlineKeyboardButton(f"✅ {r}p" if res == r else f"{r}p", callback_data=f"cv_res_{session_id}_{r}"))
-
+    
     keyboard = []
     # Splitting resolution buttons into chunks of 4 for better UI
     for i in range(0, len(res_buttons), 4):
         keyboard.append(res_buttons[i:i+4])
-
+        
     keyboard.append([
         InlineKeyboardButton("➖ 100 kbps", callback_data=f"cv_vb_minus_{session_id}"),
         InlineKeyboardButton(f"🎬 Vid Bitrate: {v_kbps}k", callback_data="ignore"),
         InlineKeyboardButton("➕ 100 kbps", callback_data=f"cv_vb_plus_{session_id}")
     ])
-
+    
     keyboard.append([
         InlineKeyboardButton("➖ 32 kbps", callback_data=f"cv_ab_minus_{session_id}"),
         InlineKeyboardButton(f"🎵 All Audio: {a_kbps}k", callback_data="ignore"),
         InlineKeyboardButton("➕ 32 kbps", callback_data=f"cv_ab_plus_{session_id}")
     ])
-
+    
     orig_toggle_text = "✅ Original: Uploading" if session['upload_original'] else "❌ Original: Skipped"
-
+    
     keyboard.append([
         InlineKeyboardButton(orig_toggle_text, callback_data=f"cv_orig_{session_id}")
     ])
-
+    
     keyboard.append([
         InlineKeyboardButton("Select All & Convert 🚀", callback_data=f"cv_all_{session_id}"),
         InlineKeyboardButton("Next ✅", callback_data=f"cv_ok_{session_id}")
     ])
     keyboard.append([InlineKeyboardButton("Cancel ❌", callback_data="cancel_single")])
-
+    
     return text, InlineKeyboardMarkup(keyboard)
 
 def parse_time(time_str: str) -> int:
@@ -527,10 +527,10 @@ def mode_check_keyboard(uid: int) -> InlineKeyboardMarkup:
     convert_status = "✅ ON" if uid in CONVERT_MODE else "❌ OFF"
     batch_audio_status = "✅ ON" if uid in BATCH_AUDIO_MODE else "❌ OFF"
     dl_only_status = "✅ ON" if uid in DOWNLOAD_ONLY_MODE else "❌ OFF"
-
+    
     waiting_count = sum(1 for data in PENDING_AUDIO_ORDERS.values() if data['uid'] == uid)
     waiting_status = f" ({waiting_count} orders pending)" if waiting_count > 0 else ""
-
+    
     keyboard = [
         [InlineKeyboardButton(f"Convert Mode {convert_status}", callback_data="toggle_convert_mode")],
         [InlineKeyboardButton(f"MKV Audio Change Mode {audio_status}{waiting_status}", callback_data="toggle_audio_mode")],
@@ -554,13 +554,13 @@ def get_audio_tracks_ffprobe(file_path: Path) -> list:
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
         metadata = json.loads(result.stdout)
-
+        
         audio_tracks = []
         for stream in metadata.get('streams', []):
             if stream.get('codec_type') == 'audio':
-                stream_index = stream.get('index')
+                stream_index = stream.get('index') 
                 title = stream.get('tags', {}).get('title', 'N/A')
-                language = stream.get('tags', {}).get('language', 'und')
+                language = stream.get('tags', {}).get('language', 'und') 
                 audio_tracks.append({
                     'stream_index': stream_index,
                     'title': title,
@@ -618,19 +618,19 @@ async def progress_callback(current, total, action, message, start_time, is_time
     if total == 0: return
     now = time.time()
     msg_id = message.id
-
+    
     interval = USER_PROGRESS_INTERVAL.get(message.chat.id, 5)
-
+    
     if msg_id in PROGRESS_CACHE:
-        if now - PROGRESS_CACHE[msg_id] < interval:
+        if now - PROGRESS_CACHE[msg_id] < interval: 
             return
     PROGRESS_CACHE[msg_id] = now
-
+    
     percent = (current / total) * 100
     if percent > 100: percent = 100
-
+    
     elapsed = now - start_time
-
+    
     if is_time_based:
         speed = current / elapsed if elapsed > 0 else 0
         eta = (total - current) / speed if speed > 0 else 0
@@ -641,10 +641,10 @@ async def progress_callback(current, total, action, message, start_time, is_time
         eta = (total - current) / speed if speed > 0 else 0
         size_str = f"{format_size(current)} / {format_size(total)}"
         speed_str = f"{format_size(speed)}/s"
-
+    
     # Original Name added to progress bar
     orig_name_str = f"**File:** `{original_name}`\n" if original_name else ""
-
+    
     text = (
         f"**{action}**\n"
         f"{orig_name_str}"
@@ -675,7 +675,7 @@ async def update_batch_status(c, m, uid, status_text, reply_markup=None):
         BATCH_STATUS_MSG[uid] = msg.id
         async def auto_delete(msg_obj, u):
             await asyncio.sleep(15)
-            try:
+            try: 
                 await msg_obj.delete()
                 if u in BATCH_STATUS_MSG:
                     del BATCH_STATUS_MSG[u]
@@ -685,7 +685,7 @@ async def update_batch_status(c, m, uid, status_text, reply_markup=None):
 async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_dlp=False, fmt=None, title=None, res=None, original_caption=None):
     if uid not in USER_QUEUES:
         USER_QUEUES[uid] = asyncio.Queue()
-
+    
     try:
         if is_yt_dlp:
             status_msg = await m.reply_text(f"Queue item added for `{title}` ({res}p)...")
@@ -706,7 +706,7 @@ async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_d
         'res': res,
         'original_caption': original_caption
     })
-
+    
     if uid not in USER_WORKERS or USER_WORKERS[uid].done():
          USER_WORKERS[uid] = asyncio.create_task(process_queue_handler(uid, c))
 
@@ -716,7 +716,7 @@ def generate_post_caption(data: dict) -> str:
     season_list_raw = data.get('season_list_raw', DEFAULT_POST_DATA['season_list_raw'])
 
     season_entries = []
-
+    
     parts = re.split(r'[,\s]+', season_list_raw.strip())
     parts = [p.strip() for p in parts if p.strip()]
 
@@ -727,7 +727,7 @@ def generate_post_caption(data: dict) -> str:
                 if start > end:
                     start, end = end, start
                 for i in range(start, end + 1):
-                    season_entries.append(f"**{image_name} Season {i:02d}**")
+                    season_entries.append(f"**{image_name} Season {i:02d}**") 
             except ValueError:
                 continue
         else:
@@ -742,7 +742,7 @@ def generate_post_caption(data: dict) -> str:
         unique_season_entries.append("**Coming Soon...**")
     elif unique_season_entries[-1] != "**Coming Soon...**" and unique_season_entries[0] != "**Coming Soon...**":
         unique_season_entries.append("**Coming Soon...**")
-
+        
     season_text = "\n".join(unique_season_entries)
 
     base_caption = (
@@ -755,20 +755,20 @@ def generate_post_caption(data: dict) -> str:
     )
 
     collapsible_text_parts = [
-        f"> **{image_name} All Season List :-**",
-        "> "
+        f"> **{image_name} All Season List :-**", 
+        "> " 
     ]
-
+    
     for line in season_text.split('\n'):
         collapsible_text_parts.append(f"> {line}")
-        collapsible_text_parts.append("> ")
-
+        collapsible_text_parts.append("> ") 
+        
     if collapsible_text_parts and collapsible_text_parts[-1] == "> ":
         collapsible_text_parts.pop()
-
+        
     collapsible_text = "\n".join(collapsible_text_parts)
     final_caption = f"{base_caption}\n\n{collapsible_text}"
-
+    
     return final_caption
 
 # FIX 4: Robust filename parsing from URLs to prevent truncation
@@ -791,16 +791,16 @@ async def get_filename_from_url(url):
                         return extracted_name
     except Exception:
         pass
-
+        
     fname = url.split("/")[-1].split("?")[0]
     fname = urllib.parse.unquote(fname)
-
+    
     if len(fname) > 200:
         ext = Path(fname).suffix
-        if not ext or len(ext) > 20:
+        if not ext or len(ext) > 20: 
             ext = ".mp4"
         fname = fname[:200 - len(ext)] + ext
-
+        
     return fname
 
 async def download_stream(resp, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
@@ -825,7 +825,7 @@ async def download_stream(resp, out_path: Path, message: Message = None, cancel_
                     return False, "File size cannot exceed limit."
                 total += len(chunk)
                 f.write(chunk)
-
+                
                 if message and size > 0:
                     await progress_callback(total, size, "Downloading...", message, start_t, original_name=original_name)
     except Exception as e:
@@ -839,7 +839,7 @@ async def download_url_generic(url: str, out_path: Path, message: Message = None
         if out_path.exists():
             downloaded = out_path.stat().st_size
             headers["Range"] = f"bytes={downloaded}-"
-
+            
         connector = aiohttp.TCPConnector(limit=0, family=socket.AF_INET, use_dns_cache=True, ttl_dns_cache=300)
         try:
             async with aiohttp.ClientSession(timeout=timeout, headers=headers, connector=connector) as sess:
@@ -867,11 +867,11 @@ async def download_drive_file(file_id: str, out_path: Path, message: Message = N
     for attempt in range(1, 11):
         timeout = aiohttp.ClientTimeout(total=7200, sock_connect=120)
         headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"}
-
+        
         if out_path.exists():
             downloaded = out_path.stat().st_size
             headers["Range"] = f"bytes={downloaded}-"
-
+            
         connector = aiohttp.TCPConnector(limit=0, family=socket.AF_INET, use_dns_cache=True, ttl_dns_cache=300)
         try:
             async with aiohttp.ClientSession(timeout=timeout, headers=headers, connector=connector) as sess:
@@ -880,7 +880,7 @@ async def download_drive_file(file_id: str, out_path: Path, message: Message = N
                         ok, err = await download_stream(resp, out_path, message, cancel_event=cancel_event, original_name=original_name)
                         if ok: return True, None
                         if attempt < 10: await asyncio.sleep(2); continue
-
+                        
                     if resp.status == 404 or resp.status >= 500:
                         if attempt < 10:
                             await asyncio.sleep(2)
@@ -900,7 +900,7 @@ async def download_drive_file(file_id: str, out_path: Path, message: Message = N
                             ok, err = await download_stream(resp2, out_path, message, cancel_event=cancel_event, original_name=original_name)
                             if ok: return True, None
                             if attempt < 10: await asyncio.sleep(2); continue
-
+                            
                     for k, v in resp.cookies.items():
                         if k.startswith("download_warning"):
                             token = v.value
@@ -915,7 +915,7 @@ async def download_drive_file(file_id: str, out_path: Path, message: Message = N
                                 ok, err = await download_stream(resp2, out_path, message, cancel_event=cancel_event, original_name=original_name)
                                 if ok: return True, None
                                 if attempt < 10: await asyncio.sleep(2); continue
-
+                    
                     if attempt < 10 and resp.status not in (200, 206):
                         await asyncio.sleep(2)
                         continue
@@ -930,9 +930,9 @@ async def download_drive_file(file_id: str, out_path: Path, message: Message = N
 def process_dynamic_text_no_increment(uid, caption_template):
     if uid not in USER_COUNTERS:
         return caption_template
-
+    
     uploads = USER_COUNTERS[uid].get('uploads', 1)
-
+    
     quality_match = re.search(r"\[re\s*\((.*?)\)\]", caption_template)
     if quality_match:
         options_str = quality_match.group(1)
@@ -956,15 +956,15 @@ def process_dynamic_text_no_increment(uid, caption_template):
 
     conditional_matches = re.findall(r"\[([a-zA-Z0-9\s]+)\s*\((.*?)\)\]", caption_template)
     for match in conditional_matches:
-        text_to_add = match[0].strip()
-        target_num_str = re.sub(r'[^0-9]', '', match[1]).strip()
+        text_to_add = match[0].strip() 
+        target_num_str = re.sub(r'[^0-9]', '', match[1]).strip() 
         placeholder = re.escape(f"[{match[0].strip()} ({match[1].strip()})]")
         try:
             target_num = int(target_num_str)
         except ValueError:
             caption_template = re.sub(placeholder, "", caption_template)
             continue
-
+        
         if current_episode_num == target_num:
             caption_template = re.sub(placeholder, text_to_add, caption_template)
         else:
@@ -976,7 +976,7 @@ def get_dynamic_filename(uid, original_name):
     file_path = Path(original_name)
     file_ext = file_path.suffix.lower()
     file_ext = "." + file_ext.lstrip('.') if file_ext and file_ext != '.' else ".mp4"
-
+    
     if uid in USER_FILENAMES:
         base_name = process_dynamic_text_no_increment(uid, USER_FILENAMES[uid])
     else:
@@ -1003,8 +1003,8 @@ async def set_bot_commands():
         BotCommand("mkv_video_audio_change", "Single MKV audio track change mode (admin only)"),
         BotCommand("yt_dlp", "Toggle YT-DLP mode for all URLs (admin only)"),
         BotCommand("convert", "Convert Video/Audio quality, bitrate & format (admin only)"),
-        BotCommand("create_post", "Create new post (admin only)"),
-        BotCommand("mode_check", "Check current mode status (admin only)"),
+        BotCommand("create_post", "Create new post (admin only)"), 
+        BotCommand("mode_check", "Check current mode status (admin only)"), 
         BotCommand("progress_bar", "Toggle progress bar ON/OFF or Custom Interval (admin only)"),
         BotCommand("continue", "Resume paused queue / Restore buttons"),
         BotCommand("restart", "Show Storage info and Clear Data"),
@@ -1019,7 +1019,7 @@ async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, s
     """Background task that waits for upload lock to ensure sequential uploads."""
     if uid not in USER_UPLOAD_LOCKS:
         USER_UPLOAD_LOCKS[uid] = asyncio.Lock()
-
+    
     async with USER_UPLOAD_LOCKS[uid]:
         if cancel_event.is_set():
             if tmp_path.exists(): tmp_path.unlink()
@@ -1033,32 +1033,32 @@ async def process_queue_handler(uid, client):
     while not queue.empty():
         while uid in USER_QUEUE_PAUSED:
             await asyncio.sleep(1)
-
+            
         task_data = await queue.get()
         try:
             m = task_data.get('message')
             original_name = task_data.get('original_name')
-            status_msg = task_data.get('status_msg')
+            status_msg = task_data.get('status_msg') 
             is_url = task_data.get('is_url', False)
             is_yt_dlp = task_data.get('is_yt_dlp', False)
             original_caption = task_data.get('original_caption')
-
+            
             cancel_event = asyncio.Event()
             TASKS.setdefault(uid, []).append(cancel_event)
             if status_msg:
                 USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
-
+            
             if is_yt_dlp:
                 url = task_data.get('url')
                 fmt = task_data.get('fmt')
                 title = task_data.get('title')
                 res = task_data.get('res', 'Unknown')
-
+                
                 safe_title = re.sub(r"[\\/*?\"<>|:]", "_", title)
                 if len(safe_title) > 100: safe_title = safe_title[:100]
-
+                
                 out_tmpl = str(TMP / f"{safe_title}.%(ext)s") # FIX 2: Download strictly without dl_uid_prefix
-
+                
                 ydl_opts = {
                     'format': fmt,
                     'outtmpl': out_tmpl,
@@ -1069,7 +1069,7 @@ async def process_queue_handler(uid, client):
 
                 if COOKIES_TXT and os.path.exists(COOKIES_TXT):
                     ydl_opts['cookiefile'] = COOKIES_TXT
-
+                    
                 last_edit = 0
                 loop = asyncio.get_running_loop()
                 start_t = time.time()
@@ -1090,7 +1090,7 @@ async def process_queue_handler(uid, client):
                                     loop
                                 )
                 ydl_opts['progress_hooks'] = [my_hook]
-
+                
                 try:
                     def run_dl():
                         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -1098,54 +1098,54 @@ async def process_queue_handler(uid, client):
                             if 'requested_downloads' in info:
                                 return info['requested_downloads'][0]['filepath']
                             return ydl.prepare_filename(info)
-
+                    
                     if status_msg:
                         await status_msg.edit(f"Starting YT-DLP Download for {res}p...", reply_markup=progress_keyboard())
                     downloaded_file = await asyncio.to_thread(run_dl)
                     actual_path = Path(downloaded_file)
-
+                    
                     if cancel_event.is_set() or not actual_path.exists():
                          raise Exception("Cancelled or download failed.")
-
+                         
                     if status_msg:
                         await status_msg.edit_text(f"Download complete ({res}p), uploading to Telegram...", reply_markup=None)
-
+                    
                     original_name = actual_path.name
                     renamed_file = get_dynamic_filename(uid, original_name)
-
+                    
                     yt_caption = f"{title} - {res}p" if title else original_name
-
+                    
                     asyncio.create_task(
                         sequential_upload_task(uid, client, m, actual_path, renamed_file, status_msg.id if status_msg else None, cancel_event, default_caption=yt_caption, original_caption=original_caption, original_download_name=original_name)
                     )
                 except Exception as e:
                     logger.error(f"YT-DLP Queue DL Error: {e}")
                     raise e
-
+                        
             elif is_url:
                 url = task_data.get('url')
                 await download_and_process_generic(client, m, url, status_msg, cancel_event)
             else:
                 # Start Processing
                 file_info = m.video or m.document
-
+                
                 tmp_path = get_unique_path(TMP, original_name) # FIX 2: Maintains original name downloaded
-
+                
                 try:
                     if status_msg:
                         try:
                             await status_msg.edit("Downloading...", reply_markup=progress_keyboard())
                         except: pass
-
+                    
                     start_t = time.time()
                     async def dl_prog(current, total):
                         if cancel_event.is_set():
                             client.stop_transmission()
                         if status_msg:
                             await progress_callback(current, total, "Downloading...", status_msg, start_t, original_name=original_name)
-
+                            
                     await m.download(file_name=str(tmp_path), progress=dl_prog)
-
+                    
                     if cancel_event.is_set():
                          if tmp_path.exists(): tmp_path.unlink()
                          if cancel_event in TASKS.get(uid, []):
@@ -1159,12 +1159,12 @@ async def process_queue_handler(uid, client):
                         pass
 
                     renamed_file = get_dynamic_filename(uid, tmp_path.name)
-
+                    
                     # 2. Upload Phase (Pipelined)
                     asyncio.create_task(
                         sequential_upload_task(uid, client, m, tmp_path, renamed_file, status_msg.id if status_msg else None, cancel_event, default_caption=original_name, original_caption=original_caption, original_download_name=original_name)
                     )
-
+                
                 except Exception as e:
                     if tmp_path.exists():
                         tmp_path.unlink()
@@ -1186,7 +1186,7 @@ async def process_queue_handler(uid, client):
                 except: pass
         finally:
             queue.task_done()
-
+    
     if uid in USER_WORKERS: del USER_WORKERS[uid]
     if uid in USER_QUEUES: del USER_QUEUES[uid]
 
@@ -1208,28 +1208,28 @@ async def queue_delete_cb(c, cb):
     uid = cb.from_user.id
     if uid in USER_QUEUES:
         while not USER_QUEUES[uid].empty():
-            try:
+            try: 
                 item = USER_QUEUES[uid].get_nowait()
                 if 'status_msg' in item and item['status_msg']:
                     try: await item['status_msg'].delete()
                     except: pass
                 USER_QUEUES[uid].task_done()
             except: pass
-
+            
     if uid in ZIP_DL_QUEUES:
         while not ZIP_DL_QUEUES[uid].empty():
-            try:
+            try: 
                 item = ZIP_DL_QUEUES[uid].get_nowait()
                 if 'queue_msg' in item and item['queue_msg']:
                     try: await item['queue_msg'].delete()
                     except: pass
                 ZIP_DL_QUEUES[uid].task_done()
             except: pass
-
+            
     if uid in USER_WORKERS:
         USER_WORKERS[uid].cancel()
         del USER_WORKERS[uid]
-
+        
     if uid in BATCH_AUDIO_QUEUES:
         while not BATCH_AUDIO_QUEUES[uid].empty():
             try: BATCH_AUDIO_QUEUES[uid].get_nowait(); BATCH_AUDIO_QUEUES[uid].task_done()
@@ -1249,21 +1249,21 @@ def build_yt_keyboard(session_id):
     session = YT_SESSIONS.get(session_id)
     if not session: return []
     keyboard = []
-
+    
     sorted_res = sorted(session['formats'].keys(), reverse=True)
     for res in sorted_res:
         fmt_data = session['formats'][res]
         size_str = fmt_data['size_str']
         is_selected = res in session['selected']
-
+        
         sel_text = f"✅ {res}p" if is_selected else f"🔲 Select {res}p"
-
+        
         row = [
             InlineKeyboardButton(f"⬇️ {res}p ({size_str})", callback_data=f"ytdir_{session_id}_{res}"),
             InlineKeyboardButton(sel_text, callback_data=f"ytsel_{session_id}_{res}")
         ]
         keyboard.append(row)
-
+        
     keyboard.append([InlineKeyboardButton("OK ✅", callback_data=f"ytok_{session_id}")])
     keyboard.append([InlineKeyboardButton("Add Save Quality 💾", callback_data=f"ytsave_{session_id}")])
     keyboard.append([InlineKeyboardButton("Load Saved Quality 🔄", callback_data=f"ytload_{session_id}")])
@@ -1282,21 +1282,21 @@ async def queue_yt_dlp(uid, c, m, url, fmt, title, res):
         'message': m,
         'original_name': title,
         'status_msg': status_msg,
-        'is_url': True,
+        'is_url': True, 
         'is_yt_dlp': True,
         'url': url,
         'fmt': fmt,
         'title': title,
         'res': res
     })
-
+    
     if uid not in USER_WORKERS or USER_WORKERS[uid].done():
          USER_WORKERS[uid] = asyncio.create_task(process_queue_handler(uid, c))
 
 async def fetch_youtube_formats(c, m, url):
     uid = m.from_user.id
     status_msg = await m.reply_text("Fetching YouTube formats...", quote=True)
-
+    
     try:
         ydl_opts = {'quiet': True, 'no_warnings': True}
 
@@ -1306,26 +1306,26 @@ async def fetch_youtube_formats(c, m, url):
         def extract():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 return ydl.extract_info(url, download=False)
-
+        
         info = await asyncio.to_thread(extract)
         formats = info.get('formats', [])
-
+        
         ts = int(time.time())
         session_id = f"{uid}_{ts}"
-
+        
         YT_SESSIONS[session_id] = {
             'url': url,
             'title': info.get('title', 'Video'),
             'formats': {},
             'selected': []
         }
-
+        
         for f in formats:
             ext = f.get('ext', '')
             res = f.get('height')
             size = f.get('filesize') or f.get('filesize_approx')
             vcodec = f.get('vcodec', 'none')
-
+            
             if vcodec != 'none' and res and size:
                 if res not in YT_SESSIONS[session_id]['formats']:
                     format_id = f.get('format_id')
@@ -1335,11 +1335,11 @@ async def fetch_youtube_formats(c, m, url):
                         'size_str': format_size(size),
                         'ext': ext
                     }
-
+        
         if not YT_SESSIONS[session_id]['formats']:
             await status_msg.edit("No suitable video formats found.")
             return
-
+        
         await status_msg.edit(
             f"**Title:** {info.get('title')}\n\nSelect Qualities:",
             reply_markup=build_yt_keyboard(session_id)
@@ -1356,18 +1356,18 @@ async def yt_multi_callback(c: Client, cb: CallbackQuery):
     uid_str = data[1]
     ts = data[2]
     session_id = f"{uid_str}_{ts}"
-
+    
     if cb.from_user.id != int(uid_str):
         await cb.answer("You are not authorized for this action.", show_alert=True)
         return
-
+        
     session = YT_SESSIONS.get(session_id)
     if not session:
         await cb.answer("Session expired or invalid.", show_alert=True)
         return
-
+        
     uid = cb.from_user.id
-
+    
     if action == "ytsel":
         res = int(data[3])
         if res in session['selected']:
@@ -1375,13 +1375,13 @@ async def yt_multi_callback(c: Client, cb: CallbackQuery):
         else:
             session['selected'].append(res)
         await cb.message.edit_reply_markup(build_yt_keyboard(session_id))
-
+        
     elif action == "ytdir":
         res = int(data[3])
         fmt_data = session['formats'][res]
         await queue_yt_dlp(uid, c, cb.message, session['url'], fmt_data['format_id'], session['title'], res)
         await cb.message.edit_text(f"Added {res}p to processing queue.")
-
+        
     elif action == "ytok":
         if not session['selected']:
             await cb.answer("Select at least one quality!", show_alert=True)
@@ -1390,7 +1390,7 @@ async def yt_multi_callback(c: Client, cb: CallbackQuery):
             fmt_data = session['formats'][res]
             await queue_yt_dlp(uid, c, cb.message, session['url'], fmt_data['format_id'], session['title'], res)
         await cb.message.edit_text(f"Added {len(session['selected'])} selected qualities to queue.")
-
+        
     elif action == "ytsave":
         if not session['selected']:
             await cb.answer("Select at least one quality to save!", show_alert=True)
@@ -1400,7 +1400,7 @@ async def yt_multi_callback(c: Client, cb: CallbackQuery):
             fmt_data = session['formats'][res]
             await queue_yt_dlp(uid, c, cb.message, session['url'], fmt_data['format_id'], session['title'], res)
         await cb.message.edit_text(f"Saved {len(session['selected'])} qualities and added to queue.")
-
+        
     elif action == "ytload":
         saved = SAVED_YT_QUALITIES.get(uid, [])
         if not saved:
@@ -1435,10 +1435,10 @@ async def multi_group_done_cb(c, cb):
         try:
             await cb.message.delete()
         except Exception: pass
-
+        
         if uid in MULTI_GROUP_DONE_MSG:
             MULTI_GROUP_DONE_MSG.pop(uid, None)
-
+            
         await c.send_message(cb.message.chat.id, f"New group created (Group {group_num}). Forward/send videos for this group.")
         await cb.answer("New group created.", show_alert=False)
     else:
@@ -1469,8 +1469,8 @@ async def start_handler(c, m: Message):
         "/mkv_video_audio_change - Single MKV audio track change mode (admin only)\n"
         "/yt_dlp - Toggle YT-DLP mode for all URLs (admin only)\n"
         "/convert - Convert Video/Audio quality, bitrate & format (admin only)\n"
-        "/create_post - Create new post (admin only)\n"
-        "/mode_check - Check current mode status (admin only)\n"
+        "/create_post - Create new post (admin only)\n" 
+        "/mode_check - Check current mode status (admin only)\n" 
         "/progress_bar - Toggle progress bar ON/OFF or Custom Interval (admin only)\n"
         "/continue - Resume paused queue / Restore buttons\n"
         "/restart - Show Storage info and Clear Data\n"
@@ -1525,7 +1525,7 @@ async def clear_tmp_data_cb(c, cb):
 async def full_reset_bot_cb(c, cb):
     uid = cb.from_user.id
     if not is_admin(uid): return
-
+    
     # Fully Clear All State Vars
     USER_THUMBS.clear()
     TASKS.clear()
@@ -1567,13 +1567,13 @@ async def full_reset_bot_cb(c, cb):
     DOWNLOAD_ONLY_MODE.clear()
     DOWNLOAD_LINK_MODE.clear()
     DOWNLOAD_T_MODE.clear()
-
+    
     if uid in USER_QUEUES:
         while not USER_QUEUES[uid].empty():
             try: USER_QUEUES[uid].get_nowait(); USER_QUEUES[uid].task_done()
             except: pass
     USER_QUEUES.clear()
-
+    
     for worker in USER_WORKERS.values():
         worker.cancel()
     USER_WORKERS.clear()
@@ -1585,17 +1585,17 @@ async def full_reset_bot_cb(c, cb):
     ZIP_DOWNLOAD_MODE.clear()
     ZIP_NAV_STATE.clear()
     ZIP_READY_LIST.clear()
-
+    
     if uid in ZIP_DL_QUEUES:
         while not ZIP_DL_QUEUES[uid].empty():
             try: ZIP_DL_QUEUES[uid].get_nowait(); ZIP_DL_QUEUES[uid].task_done()
             except: pass
     ZIP_DL_QUEUES.clear()
-
+    
     for worker in ZIP_DL_WORKERS.values():
         worker.cancel()
     ZIP_DL_WORKERS.clear()
-
+    
     if uid in BATCH_AUDIO_QUEUES:
         while not BATCH_AUDIO_QUEUES[uid].empty():
             try: BATCH_AUDIO_QUEUES[uid].get_nowait(); BATCH_AUDIO_QUEUES[uid].task_done()
@@ -1603,16 +1603,16 @@ async def full_reset_bot_cb(c, cb):
     for worker in BATCH_AUDIO_WORKERS.values():
         worker.cancel()
     BATCH_AUDIO_WORKERS.clear()
-
+    
     NAV_PATHS.clear()
     YT_SESSIONS.clear()
     YT_DLP_MODE.clear()
     SAVED_YT_QUALITIES.clear()
-
+    
     # Clear Files
     shutil.rmtree(TMP, ignore_errors=True)
     TMP.mkdir(parents=True, exist_ok=True)
-
+    
     await cb.answer("Bot completely reset to fresh state!", show_alert=True)
     await cb.message.edit_text(cb.message.text + "\n\n*(Bot Fully Reset & Cleaned)*")
 
@@ -1630,7 +1630,7 @@ async def zip_file_download_cmd(c, m: Message):
         AUTO_UPLOAD_ALL.discard(uid)
         if uid in ZIP_DL_QUEUES:
             while not ZIP_DL_QUEUES[uid].empty():
-                try:
+                try: 
                     item = ZIP_DL_QUEUES[uid].get_nowait()
                     if 'queue_msg' in item and item['queue_msg']:
                         try: await item['queue_msg'].delete()
@@ -1694,7 +1694,7 @@ async def progress_bar_cmd(c, m: Message):
     if not is_admin(uid):
         await m.reply_text("You are not authorized to use this command.")
         return
-
+    
     if len(m.command) > 1:
         time_str = " ".join(m.command[1:])
         if time_str.lower() in ['off', 'hide']:
@@ -1724,7 +1724,7 @@ async def setthumb_prompt(c, m):
     if not is_admin(m.from_user.id):
         await m.reply_text("You are not authorized to use this command.")
         return
-
+    
     uid = m.from_user.id
     if len(m.command) > 1:
         time_str = " ".join(m.command[1:])
@@ -1747,7 +1747,7 @@ async def view_thumb_cmd(c, m: Message):
     uid = m.from_user.id
     thumb_path = USER_THUMBS.get(uid)
     thumb_time = USER_THUMB_TIME.get(uid)
-
+    
     if thumb_path and Path(thumb_path).exists():
         await c.send_photo(chat_id=m.chat.id, photo=thumb_path, caption="This is your saved thumbnail.")
     elif thumb_time:
@@ -1768,7 +1768,7 @@ async def del_thumb_cmd(c, m: Message):
         except Exception:
             pass
         USER_THUMBS.pop(uid, None)
-
+    
     if uid in USER_THUMB_TIME:
         USER_THUMB_TIME.pop(uid)
 
@@ -1783,38 +1783,38 @@ async def photo_handler(c, m: Message):
     if not is_admin(m.from_user.id):
         return
     uid = m.from_user.id
-
+    
     # --- Handle Create Post Mode ---
     if uid in CREATE_POST_MODE and uid in POST_CREATION_STATE and POST_CREATION_STATE[uid]['state'] == 'awaiting_image':
-
+        
         state_data = POST_CREATION_STATE[uid]
-        state_data['message_ids'].append(m.id)
-
+        state_data['message_ids'].append(m.id) 
+        
         out = TMP / f"post_img_{uid}.jpg"
         try:
             download_msg = await m.reply_text("Downloading image...")
             state_data['message_ids'].append(download_msg.id)
-
+            
             await m.download(file_name=str(out))
             img = Image.open(out)
-            img.thumbnail((1080, 1080))
+            img.thumbnail((1080, 1080)) 
             img = img.convert("RGB")
             img.save(out, "JPEG")
-
+            
             state_data['image_path'] = str(out)
             state_data['state'] = 'awaiting_name_change'
-
+            
             initial_caption = generate_post_caption(state_data['post_data'])
-
+            
             post_msg = await c.send_photo(
-                chat_id=m.chat.id,
-                photo=str(out),
-                caption=initial_caption,
+                chat_id=m.chat.id, 
+                photo=str(out), 
+                caption=initial_caption, 
                 parse_mode=ParseMode.MARKDOWN
             )
-            state_data['post_message_id'] = post_msg.id
-            state_data['message_ids'].append(post_msg.id)
-
+            state_data['post_message_id'] = post_msg.id 
+            state_data['message_ids'].append(post_msg.id) 
+            
             prompt_msg = await m.reply_text(
                 f"✅ Post image has been set.\n\n**Now change the image name.**\n"
                 f"Current name: `{state_data['post_data']['image_name']}`\n"
@@ -1829,7 +1829,7 @@ async def photo_handler(c, m: Message):
             POST_CREATION_STATE.pop(uid, None)
             if out.exists(): out.unlink(missing_ok=True)
         return
-
+    
     if uid in SET_THUMB_REQUEST:
         SET_THUMB_REQUEST.discard(uid)
         out = TMP / f"thumb_{uid}.jpg"
@@ -1855,7 +1855,7 @@ async def set_caption_prompt(c, m: Message):
         return
     SET_CAPTION_REQUEST.add(m.from_user.id)
     USER_COUNTERS.pop(m.from_user.id, None)
-
+    
     await m.reply_text(
         "Provide a caption. You can use these codes:\n"
         "1. **Number Increment:** `[01]`, `[(01)]` (Number will auto-increment)\n"
@@ -1883,7 +1883,7 @@ async def delete_caption_cb(c, cb):
         return
     if uid in USER_CAPTIONS:
         USER_CAPTIONS.pop(uid)
-        USER_COUNTERS.pop(uid, None)
+        USER_COUNTERS.pop(uid, None) 
         await cb.message.edit_text("Your caption has been deleted.")
     else:
         await cb.answer("You don't have any saved caption.", show_alert=True)
@@ -1943,9 +1943,9 @@ async def toggle_edit_caption_mode(c, m: Message):
             BATCH_STATUS_MSG.pop(uid, None)
         if uid in MULTI_GROUP_DONE_MSG:
             MULTI_GROUP_DONE_MSG.pop(uid, None)
-
+            
         USE_ORIGINAL_CAPTION_IN_MULTI_GROUP.discard(uid)
-
+            
         await m.reply_text("edit video caption mode **OFF**.\nFrom now on, uploaded videos will be renamed, thumbnails changed, and saved caption added.")
     else:
         EDIT_CAPTION_MODE.add(uid)
@@ -2020,19 +2020,19 @@ async def toggle_create_post_mode(c, m: Message):
                 messages_to_delete = state_data.get('message_ids', [])
                 post_id = state_data.get('post_message_id')
                 if post_id and post_id in messages_to_delete:
-                    messages_to_delete.remove(post_id)
+                    messages_to_delete.remove(post_id) 
                 if messages_to_delete:
                     await c.delete_messages(m.chat.id, messages_to_delete)
             except Exception as e:
                 logger.warning(f"Post mode OFF cleanup error: {e}")
-
+                
         await m.reply_text("Create Post Mode has been **TURNED OFF**.")
     else:
         CREATE_POST_MODE.add(uid)
         POST_CREATION_STATE[uid] = {
-            'image_path': None,
-            'message_ids': [m.id],
-            'state': 'awaiting_image',
+            'image_path': None, 
+            'message_ids': [m.id], 
+            'state': 'awaiting_image', 
             'post_data': DEFAULT_POST_DATA.copy(),
             'post_message_id': None
         }
@@ -2047,7 +2047,7 @@ async def mode_check_cmd(c, m: Message):
     if not is_admin(uid):
         await m.reply_text("You are not authorized to use this command.")
         return
-
+    
     audio_status = "✅ ON" if uid in MKV_AUDIO_CHANGE_MODE else "❌ OFF"
     caption_status = "✅ ON" if uid in EDIT_CAPTION_MODE else "❌ OFF"
     yt_dlp_status = "✅ ON" if uid in YT_DLP_MODE else "❌ OFF"
@@ -2055,10 +2055,10 @@ async def mode_check_cmd(c, m: Message):
     convert_status = "✅ ON" if uid in CONVERT_MODE else "❌ OFF"
     batch_audio_status = "✅ ON" if uid in BATCH_AUDIO_MODE else "❌ OFF"
     dl_only_status = "✅ ON" if uid in DOWNLOAD_ONLY_MODE else "❌ OFF"
-
+    
     waiting_count = sum(1 for data in PENDING_AUDIO_ORDERS.values() if data['uid'] == uid)
     waiting_status_text = f"{waiting_count} file(s) waiting for track order." if waiting_count > 0 else "No files are waiting."
-
+    
     status_text = (
         "🤖 **Current Mode Status:**\n\n"
         f"1. **Convert Mode:** `{convert_status}`\n"
@@ -2075,7 +2075,7 @@ async def mode_check_cmd(c, m: Message):
         f"7. **Download Only Mode:** `{dl_only_status}`\n"
         "Click the buttons below to toggle modes."
     )
-
+    
     await m.reply_text(status_text, reply_markup=mode_check_keyboard(uid), parse_mode=ParseMode.MARKDOWN)
 
 # --- CALLBACK: Mode Toggle Buttons ---
@@ -2087,7 +2087,7 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
         return
 
     action = cb.data
-
+    
     if action == "toggle_audio_mode":
         if uid in MKV_AUDIO_CHANGE_MODE:
             MKV_AUDIO_CHANGE_MODE.discard(uid)
@@ -2100,7 +2100,7 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
         else:
             MKV_AUDIO_CHANGE_MODE.add(uid)
             message = "MKV Audio Change Mode ON."
-
+            
     elif action == "toggle_caption_mode":
         if uid in EDIT_CAPTION_MODE:
             EDIT_CAPTION_MODE.discard(uid)
@@ -2138,7 +2138,7 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
         else:
             ZIP_DOWNLOAD_MODE.add(uid)
             message = "ZIP Download Mode ON."
-
+            
     elif action == "toggle_convert_mode":
         if uid in CONVERT_MODE:
             CONVERT_MODE.discard(uid)
@@ -2150,7 +2150,7 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
             CONVERT_MODE.add(uid)
             CONVERT_BATCH_LIST[uid] = []
             message = "Convert Mode ON."
-
+            
     elif action == "toggle_batch_audio_mode":
         if uid in BATCH_AUDIO_MODE:
             BATCH_AUDIO_MODE.discard(uid)
@@ -2174,7 +2174,7 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
             BATCH_AUDIO_LIST1[uid] = []
             BATCH_AUDIO_LIST2[uid] = []
             message = "Batch Audio Add Mode ON."
-
+            
     elif action == "toggle_dl_only_mode":
         if uid in DOWNLOAD_ONLY_MODE:
             DOWNLOAD_ONLY_MODE.discard(uid)
@@ -2184,7 +2184,7 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
         else:
             DOWNLOAD_ONLY_MODE.add(uid)
             message = "Download Only Mode ON."
-
+            
     try:
         audio_status = "✅ ON" if uid in MKV_AUDIO_CHANGE_MODE else "❌ OFF"
         caption_status = "✅ ON" if uid in EDIT_CAPTION_MODE else "❌ OFF"
@@ -2193,7 +2193,7 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
         convert_status = "✅ ON" if uid in CONVERT_MODE else "❌ OFF"
         batch_audio_status = "✅ ON" if uid in BATCH_AUDIO_MODE else "❌ OFF"
         dl_only_status = "✅ ON" if uid in DOWNLOAD_ONLY_MODE else "❌ OFF"
-
+        
         waiting_count = sum(1 for data in PENDING_AUDIO_ORDERS.values() if data['uid'] == uid)
         waiting_status_text = f"{waiting_count} file(s) waiting for track order." if waiting_count > 0 else "No files are waiting."
 
@@ -2213,7 +2213,7 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
             f"7. **Download Only Mode:** `{dl_only_status}`\n"
             "Click the buttons below to toggle modes."
         )
-
+        
         await cb.message.edit_text(status_text, reply_markup=mode_check_keyboard(uid), parse_mode=ParseMode.MARKDOWN)
         await cb.answer(message, show_alert=True)
     except Exception as e:
@@ -2225,7 +2225,7 @@ async def zip_download_worker(uid, c):
     while uid in ZIP_DL_QUEUES and not ZIP_DL_QUEUES[uid].empty():
         while uid in USER_QUEUE_PAUSED:
             await asyncio.sleep(1)
-
+        
         task_data = await ZIP_DL_QUEUES[uid].get()
         try:
             queue_msg = task_data.get('queue_msg')
@@ -2257,7 +2257,7 @@ async def check_and_show_next_zip(c, chat_id, uid):
             'state': 'awaiting_selection',
             'garbage_msgs': []
         }
-
+        
         if uid in AUTO_UPLOAD_ALL:
             files = ZIP_NAV_STATE[uid]['files_to_upload']
             final_order = list(range(1, len(files) + 1))
@@ -2276,19 +2276,19 @@ async def show_files_for_upload(c, chat_id, uid, files, status_msg=None):
     text_lines = ["**Files extracted and ready for upload:**\n"]
     for i, f in enumerate(files, 1):
         text_lines.append(f"**{i}.** `{f.name}`")
-
+        
     text_lines.append("\n**Upload Options:**")
     text_lines.append("‣ Send file numbers (e.g., `1,3,5,8-15`) to upload in that exact order.")
     text_lines.append("‣ Send `e <number>` (e.g., `e 1`) to manually extract an archive.")
     text_lines.append("‣ Or click **Upload All 🚀** below to upload all videos serially.")
-
+    
     full_text = "\n".join(text_lines)
-
+    
     markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("Upload All 🚀", callback_data="zip_upload_all")],
         [InlineKeyboardButton("Cancel / Clear ❌", callback_data="zip_cancel")]
     ])
-
+    
     chunks = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
     for idx, chunk in enumerate(chunks):
         reply_markup = markup if idx == len(chunks) - 1 else None
@@ -2313,22 +2313,22 @@ async def process_zip_uploads(c, message_or_chat_id, uid, final_order):
     files = state['files_to_upload']
     root_dir = state['root_dir']
     garbage_msgs = state.get('garbage_msgs', [])
-
+    
     upload_status = await c.send_message(chat_id, f"Starting upload of {len(final_order)} files in specified order...")
-
+    
     for idx in final_order:
         while uid in USER_QUEUE_PAUSED:
              await asyncio.sleep(1)
         if uid not in ZIP_NAV_STATE or ZIP_NAV_STATE[uid].get('state') != 'uploading':
             break # Cancelled or cleared during upload
-
+            
         fpath = files[idx - 1]
         if not fpath.exists(): continue
         original_name = fpath.name
         renamed_file = get_dynamic_filename(uid, original_name)
         cancel_event = asyncio.Event()
         TASKS.setdefault(uid, []).append(cancel_event)
-
+        
         # Creating a fake message object if message_or_chat_id is just an ID (for auto upload)
         class FakeMessage:
             def __init__(self, cid):
@@ -2338,7 +2338,7 @@ async def process_zip_uploads(c, message_or_chat_id, uid, final_order):
                 self.from_user = None
                 self.id = 0
         m_obj = message_or_chat_id if hasattr(message_or_chat_id, 'chat') else FakeMessage(chat_id)
-
+        
         try:
             await sequential_upload_task(uid, c, m_obj, fpath, renamed_file, None, cancel_event, default_caption=original_name, original_caption=original_name, original_download_name=original_name)
         except Exception as e:
@@ -2349,13 +2349,13 @@ async def process_zip_uploads(c, message_or_chat_id, uid, final_order):
                  InlineKeyboardButton("Delete 🗑️", callback_data="queue_delete")]
             ])
             await c.send_message(chat_id, f"Upload Failed: {e}\nQueue Paused.", reply_markup=markup)
-
+    
     if root_dir:
         shutil.rmtree(root_dir, ignore_errors=True)
-
+    
     try: await c.delete_messages(chat_id, garbage_msgs)
     except: pass
-
+    
     if uid in ZIP_NAV_STATE and ZIP_NAV_STATE[uid].get('state') == 'uploading':
         ZIP_NAV_STATE.pop(uid, None)
         complete_msg = await c.send_message(chat_id, "All ZIP files queued/uploaded successfully.")
@@ -2376,7 +2376,7 @@ async def zip_upload_all_cb(c, cb):
     final_order = list(range(1, len(files) + 1))
     await cb.answer("Starting upload for all files...", show_alert=False)
     await process_zip_uploads(c, cb.message, uid, final_order)
-
+    
 @app.on_callback_query(filters.regex("zip_cancel"))
 async def zip_cancel_cb(c, cb):
     uid = cb.from_user.id
@@ -2404,20 +2404,20 @@ def is_archive_file(filepath: Path) -> bool:
 async def execute_zip_download_and_extract(c, m, url=None, local_path=None, target_list=None, is_dl_only=False):
     uid = m.from_user.id
     status_msg = await c.send_message(m.chat.id, "Downloading Queue Item..." if url else "Processing Local Archive...", reply_markup=progress_keyboard())
-
+    
     safe_name = f"zip_dl_{uid}_{int(time.time())}"
     if url:
         original_name = await get_filename_from_url(url)
         safe_name = re.sub(r"[\\/*?\"<>|:]", "_", original_name)
     elif local_path:
         safe_name = Path(local_path).name
-
+            
     tmp_in = get_unique_path(TMP, safe_name)
-
+    
     cancel_event = asyncio.Event()
     TASKS.setdefault(uid, []).append(cancel_event)
     USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
-
+    
     try:
         ok, err = False, None
         original_name_pass = safe_name
@@ -2441,10 +2441,10 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                 await progress_callback(current, total, "Downloading...", status_msg, start_t, original_name=original_name_pass)
             await m.download(file_name=str(tmp_in), progress=dl_prog)
             ok = True
-
+            
         if not ok or not tmp_in.exists():
             raise Exception(f"Download Failed: {err}")
-
+            
         if not is_archive_file(tmp_in):
             if is_dl_only:
                 if uid in DOWNLOAD_LINK_MODE:
@@ -2470,9 +2470,9 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
         await status_msg.edit("Extracting Archive file...", reply_markup=progress_keyboard())
         ext_dir = TMP / f"zip_ext_{uid}_{int(time.time())}"
         ext_dir.mkdir(parents=True, exist_ok=True)
-
+        
         start_t = time.time()
-
+        
         # FIX 3: Extended Extraction with Zip/Tar/Py7zr Python Native Fallbacks
         try:
             ext = tmp_in.suffix.lower()
@@ -2531,7 +2531,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
             })
             await check_and_show_next_zip(c, m.chat.id, uid)
             return
-
+            
         # Recursive archive extraction
         found_zip = True
         while found_zip:
@@ -2566,10 +2566,10 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                             found_zip = True
                         except Exception as e:
                             logger.error(f"Nested Archive extraction error: {e}")
-
+        
         # Extract source archive delete
         tmp_in.unlink(missing_ok=True)
-
+        
         all_files = []
         video_exts = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm"}
         for root, dirs, files in os.walk(ext_dir):
@@ -2579,7 +2579,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                     continue # only add videos to lists if from zip in convert/batch
                 all_files.append(p)
         all_files.sort(key=lambda x: x.name.lower())
-
+        
         if not all_files:
             await status_msg.edit("No suitable files found in the extracted archive.")
             shutil.rmtree(ext_dir, ignore_errors=True)
@@ -2613,7 +2613,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
             'files_to_upload': all_files
         })
         await check_and_show_next_zip(c, m.chat.id, uid)
-
+        
     except Exception as e:
         logger.error(f"Archive Mode Error: {e}")
         raise e
@@ -2634,21 +2634,21 @@ async def send_batch_audio_list_page(c, chat_id, uid, list_id, page=0, msg_id=No
     else:
         target_list = CONVERT_BATCH_LIST.get(uid, [])
         list_name = "Convert Batch List"
-
+        
     per_page = 10
     total_items = len(target_list)
     total_pages = max(1, math.ceil(total_items / per_page))
-
+    
     if page >= total_pages: page = total_pages - 1
     if page < 0: page = 0
-
+    
     start_idx = page * per_page
     end_idx = min(start_idx + per_page, total_items)
-
+    
     text = f"**{list_name} - Page {page + 1}/{total_pages}**\n\n"
-
+    
     keyboard = []
-
+    
     if total_items == 0:
         text += "List is empty."
     else:
@@ -2659,20 +2659,20 @@ async def send_batch_audio_list_page(c, chat_id, uid, list_id, page=0, msg_id=No
                 InlineKeyboardButton(f"{i+1}. {f_name[:20]}...", callback_data="ignore"),
                 InlineKeyboardButton("Delete 🗑️", callback_data=f"baud_list_del_{list_id}_{i}_{page}")
             ])
-
+            
     nav_buttons = []
     if page > 0:
         nav_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"baud_list_page_{list_id}_{page-1}"))
     if page < total_pages - 1:
         nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"baud_list_page_{list_id}_{page+1}"))
-
+        
     if nav_buttons:
         keyboard.append(nav_buttons)
-
+        
     keyboard.append([InlineKeyboardButton("Close ❌", callback_data="baud_list_close")])
-
+    
     markup = InlineKeyboardMarkup(keyboard)
-
+    
     if msg_id:
         try: await c.edit_message_text(chat_id, msg_id, text, reply_markup=markup)
         except Exception: pass
@@ -2689,22 +2689,22 @@ async def send_path_ui(c, chat_id, uid, msg_id=None, page=0):
         items.sort(key=lambda x: (not x.is_dir(), x.name.lower()))
     except Exception as e:
         items = []
-
+    
     NAV_PATHS[uid]['items'] = items
     NAV_PATHS[uid]['page'] = page
-
+    
     per_page = 20
     total_items = len(items)
     total_pages = max(1, math.ceil(total_items / per_page))
     if page >= total_pages: page = total_pages - 1
     if page < 0: page = 0
-
+    
     start_idx = page * per_page
     end_idx = min(start_idx + per_page, total_items)
-
+    
     text_lines = [f"**File Manager (Page {page+1}/{total_pages})**\n**Current Path:** `{current}`\n"]
     text_lines.append("**b.** ⬆️ Go Back (Up)")
-
+    
     for i in range(start_idx, end_idx):
         item = items[i]
         name = item.name
@@ -2712,7 +2712,7 @@ async def send_path_ui(c, chat_id, uid, msg_id=None, page=0):
             text_lines.append(f"**{i+1}.** 📁 `{name}`")
         else:
             text_lines.append(f"**{i+1}.** 📄 `{name}`")
-
+            
     text_lines.append("\n**Options:**")
     text_lines.append("‣ Send `b` to go back up.")
     text_lines.append("‣ Send a number to open folder/select file (e.g., `1`).")
@@ -2723,9 +2723,9 @@ async def send_path_ui(c, chat_id, uid, msg_id=None, page=0):
     text_lines.append("‣ Send `r 1-3,all` to rename based on saved file name format.")
     text_lines.append("‣ Send `np` or `pp` for Next/Prev Page.")
     text_lines.append("‣ Send `close` to exit manager.")
-
+    
     full_text = "\n".join(text_lines)
-
+    
     chunks = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
     for idx, chunk in enumerate(chunks):
         if msg_id and idx == 0:
@@ -2763,18 +2763,18 @@ async def process_convert_queue_worker(uid, client):
     """Processes covert tasks serially for a user to avoid CPU overload"""
     if uid not in CONVERT_LOCKS:
         CONVERT_LOCKS[uid] = asyncio.Lock()
-
+    
     # We will just use the global lock during execution.
     pass
 
 async def handle_convert_input(c, m, url=None, file_info=None, override_path=None):
     uid = m.from_user.id
     status_msg = await m.reply_text("📥 Initializing file for conversion...", reply_markup=progress_keyboard())
-
+    
     cancel_event = asyncio.Event()
     TASKS.setdefault(uid, []).append(cancel_event)
     USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
-
+    
     try:
         original_name = "video.mp4"
         if url:
@@ -2783,10 +2783,10 @@ async def handle_convert_input(c, m, url=None, file_info=None, override_path=Non
             original_name = file_info.file_name if file_info.file_name else "telegram_video.mp4"
         elif override_path:
             original_name = Path(override_path).name
-
+            
         # FIX 2: Do not use prefix on local file download to keep path manager clean
         tmp_in = get_unique_path(TMP, original_name)
-
+        
         ok = False
         if override_path:
             tmp_in = Path(override_path)
@@ -2805,32 +2805,32 @@ async def handle_convert_input(c, m, url=None, file_info=None, override_path=Non
                 await progress_callback(current, total, "📥 Downloading to prepare convert...", status_msg, start_t, original_name=original_name)
             await m.download(file_name=str(tmp_in), progress=dl_prog)
             ok = True
-
+            
         if cancel_event.is_set(): raise Exception("Cancelled by user.")
-
+        
         await status_msg.edit("⚙️ Extracting metadata for Convert...", reply_markup=None)
         meta = await asyncio.to_thread(get_detailed_metadata, tmp_in)
-
+        
         if meta['duration'] == 0:
             raise Exception("Could not determine duration/invalid video file.")
 
         session_id = f"cvs_{uid}_{int(time.time())}"
         ACTIVE_CONVERT_SESSION[uid] = session_id
-
+        
         CONVERT_SESSIONS[session_id] = {
             'uid': uid,
             'path': tmp_in,
             'original_name': tmp_in.name,
             'meta': meta,
             'configs': [],
-            'curr_res': None,
+            'curr_res': None, 
             'curr_v_bitrate': meta['v_bitrate'],
             'curr_a_bitrate': 128000 if not meta['audio_streams'] else meta['audio_streams'][0]['bitrate'],
             'upload_original': False,
             'msg_id': status_msg.id,
             'source_message': m
         }
-
+        
         text, markup = build_convert_ui(session_id)
         await status_msg.edit(text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
 
@@ -2848,14 +2848,14 @@ async def handle_convert_input(c, m, url=None, file_info=None, override_path=Non
 async def convert_cb_handler(c: Client, cb: CallbackQuery):
     uid = cb.from_user.id
     parts = cb.data.split('_')
-
+    
     if parts[1] in ('vb', 'ab'):
-        action = f"{parts[1]}_{parts[2]}"
+        action = f"{parts[1]}_{parts[2]}" 
         session_id = f"{parts[3]}_{parts[4]}_{parts[5]}"
     else:
         action = parts[1]
         session_id = f"{parts[2]}_{parts[3]}_{parts[4]}"
-
+        
     session = CONVERT_SESSIONS.get(session_id)
     if not session or session['uid'] != uid:
         await cb.answer("Session expired or invalid.", show_alert=True)
@@ -2906,14 +2906,14 @@ async def convert_cb_handler(c: Client, cb: CallbackQuery):
 async def execute_conversions(session_id, client, batch_apply=False):
     session = CONVERT_SESSIONS.pop(session_id, None)
     if not session: return
-
+    
     uid = session['uid']
     configs = session['configs']
     msg = session['source_message']
     status_msg_id = session['msg_id']
-
+    
     target_files = [{'path': session['path'], 'name': session['original_name'], 'meta': session['meta']}]
-
+    
     if batch_apply and uid in CONVERT_BATCH_LIST and CONVERT_BATCH_LIST[uid]:
         try: await client.edit_message_text(msg.chat.id, status_msg_id, "Extracting metadata for all batch files...")
         except: pass
@@ -2925,10 +2925,10 @@ async def execute_conversions(session_id, client, batch_apply=False):
                 if f_meta['duration'] > 0:
                     target_files.append({'path': f_path, 'name': f_path.name, 'meta': f_meta})
         CONVERT_BATCH_LIST[uid] = [] # Clear list
-
+    
     if uid not in CONVERT_LOCKS:
         CONVERT_LOCKS[uid] = asyncio.Lock()
-
+        
     # Creating a dedicated event for this batch to avoid cancelling other downloads
     cancel_event = asyncio.Event()
     TASKS.setdefault(uid, []).append(cancel_event)
@@ -2938,59 +2938,59 @@ async def execute_conversions(session_id, client, batch_apply=False):
         total_files = len(target_files)
         for f_idx, file_data in enumerate(target_files, 1):
             if cancel_event.is_set(): break
-
+            
             in_path = file_data['path']
             original_name = file_data['name']
             meta = file_data['meta']
-
+            
             # Use lock to process one conversion sequentially
             async with CONVERT_LOCKS[uid]:
                 if cancel_event.is_set(): break
                 for idx, config in enumerate(configs, 1):
                     if cancel_event.is_set(): break
-
+                    
                     res_val = config['res']
                     vb = config['v_bitrate']
                     ab = config['a_bitrate']
                     orig_vb = meta['v_bitrate']
-
+                    
                     out_ext = in_path.suffix if in_path.suffix else ".mp4"
                     res_str = f"{res_val}p" if res_val else "OrigRes"
                     out_name = f"[Convert_{res_str}_{vb//1000}k] {original_name}"
                     out_path = TMP / f"cv_out_{uid}_{int(time.time())}_{f_idx}_{idx}{out_ext}"
-
+                    
                     try:
                         await client.edit_message_text(
-                            msg.chat.id, status_msg_id,
+                            msg.chat.id, status_msg_id, 
                             f"⚙️ **Converting Video {f_idx}/{total_files}**\nRes: `{res_str}` | Vid: `{vb//1000}k` | Aud: `{ab//1000}k`\nOriginal: `{original_name}`",
                             reply_markup=progress_keyboard()
                         )
                     except: pass
-
+                    
                     cmd = ["ffmpeg", "-y", "-i", str(in_path), "-map", "0:v", "-map", "0:a?", "-map", "0:s?"]
-
+                    
                     if res_val:
                         cmd.extend(["-vf", f"scale=w=-2:h={res_val}"])
-
+                    
                     if vb > orig_vb and orig_vb > 0:
-                        cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "high", "-preset", "ultrafast", "-threads", "0",
+                        cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "high", "-preset", "ultrafast", "-threads", "0", 
                                     "-b:v", str(vb), "-minrate", str(vb), "-maxrate", str(vb), "-bufsize", str(vb*2)])
                     else:
                         cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-profile:v", "high", "-preset", "medium", "-threads", "0", "-b:v", str(vb)])
-
+                    
                     cmd.extend(["-c:a", "aac"])
                     for a_idx in range(len(meta['audio_streams'])):
                         cmd.extend([f"-b:a:{a_idx}", str(ab)])
-
+                        
                     cmd.extend(["-c:s", "copy", "-progress", "pipe:1", "-nostats", str(out_path)])
-
+                    
                     process = await asyncio.create_subprocess_exec(
                         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                     )
-
+                    
                     start_t = time.time()
                     dummy_status = type('obj', (object,), {'chat': type('obj', (object,), {'id': msg.chat.id}), 'id': status_msg_id, 'edit_text': lambda text, reply_markup: client.edit_message_text(msg.chat.id, status_msg_id, text, reply_markup=reply_markup)})
-
+                    
                     while True:
                         if cancel_event.is_set():
                             process.terminate()
@@ -3007,22 +3007,22 @@ async def execute_conversions(session_id, client, batch_apply=False):
                                     await progress_callback(out_time_sec, meta['duration'], action_txt, dummy_status, start_t, is_time_based=True, original_name=out_name)
                             except: pass
                     await process.wait()
-
+                    
                     if cancel_event.is_set(): raise Exception("Cancelled by user")
-
+                    
                     if out_path.exists() and out_path.stat().st_size > 0:
                         # Queue for upload, don't wait for upload to finish before starting next conversion
                         asyncio.create_task(sequential_upload_task(uid, client, msg, out_path, out_name, None, cancel_event, default_caption=out_name, original_caption=None, original_download_name=out_name))
                     else:
                         logger.error("FFmpeg convert output failed.")
-
+                        
                 if session['upload_original'] and not cancel_event.is_set():
                     out_name = get_dynamic_filename(uid, original_name)
                     asyncio.create_task(sequential_upload_task(uid, client, msg, in_path, out_name, None, cancel_event, default_caption=original_name, original_caption=None, original_download_name=original_name))
                 else:
                     # Clean original if not uploading
                     in_path.unlink(missing_ok=True)
-
+            
     except Exception as e:
         logger.error(f"Execution conversions error: {e}")
         try: await client.edit_message_text(msg.chat.id, status_msg_id, f"Conversion Error: {e}")
@@ -3041,13 +3041,13 @@ async def text_handler(c, m: Message):
     if not is_admin(uid):
         return
     text = m.text.strip()
-
+    
     if uid in SET_FILENAME_REQUEST:
         SET_FILENAME_REQUEST.discard(uid)
         USER_FILENAMES[uid] = text
         await m.reply_text("Your file name format has been saved. Uploaded/renamed videos will use this format.")
         return
-
+    
     if text.isdigit() and uid in ACTIVE_CONVERT_SESSION:
         session_id = ACTIVE_CONVERT_SESSION[uid]
         session = CONVERT_SESSIONS.get(session_id)
@@ -3064,7 +3064,7 @@ async def text_handler(c, m: Message):
             return
 
     text_lower = text.lower()
-
+    
     # UI Delete List support
     if text_lower == "list":
         if uid in BATCH_AUDIO_MODE:
@@ -3125,7 +3125,7 @@ async def text_handler(c, m: Message):
         ZIP_READY_LIST.pop(uid, None)
         if uid in ZIP_DL_QUEUES:
             while not ZIP_DL_QUEUES[uid].empty():
-                try:
+                try: 
                     item = ZIP_DL_QUEUES[uid].get_nowait()
                     if 'queue_msg' in item and item['queue_msg']:
                         try: await item['queue_msg'].delete()
@@ -3163,7 +3163,7 @@ async def text_handler(c, m: Message):
                     err_msg = await m.reply_text("Invalid format for manual extract. Use `e 1`.")
                     state['garbage_msgs'].append(err_msg.id)
                     return
-
+            
             files = state['files_to_upload']
             selected_indices = []
             try:
@@ -3182,15 +3182,15 @@ async def text_handler(c, m: Message):
                 err_msg = await m.reply_text("Invalid format. Use numbers, ranges like 1,3,5,8-15, or `e 1` for manual extract.")
                 state['garbage_msgs'].append(err_msg.id)
                 return
-
+            
             valid_selected = [i for i in selected_indices if 1 <= i <= len(files)]
             all_indices = list(range(1, len(files) + 1))
             unselected = [i for i in all_indices if i not in valid_selected]
             final_order = valid_selected + unselected
-
+            
             await process_zip_uploads(c, m, uid, final_order)
             return
-
+    
     if uid in NAV_PATHS:
         if text_lower == 'close':
             NAV_PATHS.pop(uid)
@@ -3210,19 +3210,19 @@ async def text_handler(c, m: Message):
                 NAV_PATHS[uid]['current'] = current.parent
             await send_path_ui(c, m.chat.id, uid, page=0)
             return
-
+            
         is_delete = text_lower.startswith('d ')
         is_link = text_lower.startswith('l ')
         is_rename = text_lower.startswith('r ')
         is_extract = text_lower.startswith('e ')
-
+        
         target_str = text_lower
         if is_delete or is_link or is_rename or is_extract:
             target_str = text_lower.split(' ', 1)[1] if len(text_lower.split(' ', 1)) > 1 else ""
-
+            
         items = NAV_PATHS[uid].get('items', [])
         selected_indices = []
-
+        
         if target_str == 'all':
             selected_indices = list(range(1, len(items) + 1))
         else:
@@ -3240,7 +3240,7 @@ async def text_handler(c, m: Message):
                         if num not in selected_indices: selected_indices.append(num)
             except Exception:
                 pass
-
+            
         if selected_indices:
             if len(selected_indices) == 1 and 1 <= selected_indices[0] <= len(items) and not (is_delete or is_link or is_rename or is_extract):
                 idx = selected_indices[0] - 1
@@ -3249,12 +3249,12 @@ async def text_handler(c, m: Message):
                     NAV_PATHS[uid]['current'] = selected_item
                     await send_path_ui(c, m.chat.id, uid, page=0)
                     return
-
+                    
             files_to_process = []
             for i in selected_indices:
                 if 1 <= i <= len(items):
                     files_to_process.append(items[i-1])
-
+            
             if files_to_process:
                 if is_delete:
                     for f in files_to_process:
@@ -3336,7 +3336,7 @@ async def text_handler(c, m: Message):
                     await m.reply_text("List 2 is empty. Please send Audio Sources first.")
                     return
                 BATCH_AUDIO_STATE[uid] = 'mapping'
-
+                
                 # Chunking Lists to avoid Message limit
                 def chunk_and_send(lst, title):
                     chunks = []
@@ -3355,12 +3355,12 @@ async def text_handler(c, m: Message):
 
                 for c_msg in list1_chunks: await m.reply_text(c_msg)
                 for c_msg in list2_chunks: await m.reply_text(c_msg)
-
+                
                 keyboard = InlineKeyboardMarkup([
                     [InlineKeyboardButton("Upload All 🚀", callback_data="baud_list_ok")],
                     [InlineKeyboardButton("Cancel ❌", callback_data="baud_list_cancel")]
                 ])
-
+                
                 await m.reply_text(
                     "**Mapping Rules:**\n"
                     "‣ Default matches 1 to 1, 2 to 2.\n"
@@ -3401,7 +3401,7 @@ async def text_handler(c, m: Message):
                             l_str, r_str = part.split('=')
                         else:
                             l_str, r_str = part, part
-
+                        
                         def parse_indices(s):
                             res = []
                             if '-' in s:
@@ -3410,29 +3410,29 @@ async def text_handler(c, m: Message):
                             else:
                                 res.append(int(s)-1)
                             return res
-
+                            
                         l_idx = parse_indices(l_str)
                         r_idx = parse_indices(r_str)
-
+                        
                         if len(r_idx) == 1 and len(l_idx) > 1:
                             r_idx = r_idx * len(l_idx)
-
+                            
                         for l, r in zip(l_idx, r_idx):
                             if 0 <= l < len(BATCH_AUDIO_LIST1[uid]) and 0 <= r < len(BATCH_AUDIO_LIST2[uid]):
                                 pairs.append((l, r))
                 except Exception as e:
                     await m.reply_text(f"Invalid mapping format: {e}. Please try again or type `ok` for default. \nExample: `1-5=1-5, 6=8, 7=9`")
                     return
-
+            
             if not pairs:
                 await m.reply_text("No valid mappings found. Try again.")
                 return
-
+                
             BATCH_AUDIO_MAPPING[uid] = pairs
             BATCH_AUDIO_STATE[uid] = 'ui'
             BATCH_AUDIO_CURRENT_PAIR_IDX[uid] = 0
             BATCH_AUDIO_TRACK_CONFIGS[uid] = {}
-
+            
             await show_batch_audio_ui(c, m.chat.id, uid)
             return
 
@@ -3498,21 +3498,21 @@ async def text_handler(c, m: Message):
                     groups = MULTI_GROUP_DATA[uid]
                     total_items = sum(len(g) for g in groups)
                     await m.reply_text(f"Multi-group processing started for {len(groups)} groups ({total_items} items total)...")
-
+                    
                     queues = [list(g) for g in groups]
-
+                    
                     while any(queues):
                         for idx, q in enumerate(queues):
                             group_num = idx + 1
                             weight = group_weights.get(group_num, 1)
-
+                            
                             for _ in range(weight):
                                 if not q:
                                     break
                                 item = q.pop(0)
                                 await handle_caption_only_upload_with_file(c, item['message'], item['file_info'])
                                 await asyncio.sleep(0.5)
-
+                    
                     MULTI_GROUP_DATA[uid] = [[]]
                     if uid in BATCH_STATUS_MSG:
                         try:
@@ -3523,33 +3523,33 @@ async def text_handler(c, m: Message):
                         try: await c.delete_messages(m.chat.id, MULTI_GROUP_DONE_MSG[uid])
                         except: pass
                         MULTI_GROUP_DONE_MSG.pop(uid, None)
-
+                    
                     complete_msg = await m.reply_text("Multi-group batch processing complete.")
                     async def auto_delete():
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(5) 
                         try: await complete_msg.delete()
                         except: pass
                     asyncio.ensure_future(auto_delete())
                 elif uid in BATCH_CAPTION_MODE and uid in BATCH_DATA and BATCH_DATA[uid]:
                     items = BATCH_DATA[uid]
                     await m.reply_text(f"Processing started for {len(items)} items...")
-
+                    
                     for item in items:
                         msg_obj = item['message']
                         file_info_obj = item['file_info']
                         await handle_caption_only_upload_with_file(c, msg_obj, file_info_obj)
                         await asyncio.sleep(0.5)
-
+                    
                     BATCH_DATA[uid] = []
                     if uid in BATCH_STATUS_MSG:
                         try:
                             await c.delete_messages(m.chat.id, BATCH_STATUS_MSG[uid])
                         except: pass
                         BATCH_STATUS_MSG.pop(uid, None)
-
+                    
                     complete_msg = await m.reply_text("Batch processing complete.")
                     async def auto_delete():
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(5) 
                         try: await complete_msg.delete()
                         except: pass
                     asyncio.ensure_future(auto_delete())
@@ -3570,24 +3570,24 @@ async def text_handler(c, m: Message):
                 if uid in BATCH_UPLOAD_MODE and uid in BATCH_DATA and BATCH_DATA[uid]:
                     items = BATCH_DATA[uid]
                     await m.reply_text(f"Batch processing started for {len(items)} items...")
-
+                    
                     for item in items:
                         if item.get('is_url'):
                             await add_to_queue(uid, c, item['message'], item['original_name'], is_url=True, url=item['url'])
                         else:
                             await add_to_queue(uid, c, item['message'], item['original_name'], is_url=False, original_caption=item['message'].caption)
                         await asyncio.sleep(0.5)
-
+                    
                     BATCH_DATA[uid] = []
                     if uid in BATCH_STATUS_MSG:
                         try:
                             await c.delete_messages(m.chat.id, BATCH_STATUS_MSG[uid])
                         except: pass
                         BATCH_STATUS_MSG.pop(uid, None)
-
+                    
                     complete_msg = await m.reply_text("Batch queueing complete.")
                     async def auto_delete():
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(5) 
                         try: await complete_msg.delete()
                         except: pass
                     asyncio.ensure_future(auto_delete())
@@ -3598,14 +3598,14 @@ async def text_handler(c, m: Message):
     if uid in SET_CAPTION_REQUEST:
         SET_CAPTION_REQUEST.discard(uid)
         USER_CAPTIONS[uid] = text
-        USER_COUNTERS.pop(uid, None)
+        USER_COUNTERS.pop(uid, None) 
         await m.reply_text("Your caption has been saved. Uploaded videos will use this caption.")
         return
 
     if m.reply_to_message and m.reply_to_message.id in PENDING_AUDIO_ORDERS:
         prompt_message_id = m.reply_to_message.id
         file_data = PENDING_AUDIO_ORDERS.get(prompt_message_id)
-
+        
         if file_data['uid'] != uid:
              await m.reply_text("You cannot provide orders for this file.")
              return
@@ -3614,34 +3614,34 @@ async def text_handler(c, m: Message):
         try:
             new_order_str = [x.strip() for x in text.split(',') if x.strip()]
             num_tracks_in_file = len(tracks)
-
+            
             if not new_order_str:
                  await m.reply_text("You must provide at least one track number.")
                  return
 
             new_stream_map = []
             valid_user_indices = list(range(1, num_tracks_in_file + 1))
-
+            
             for user_track_num_str in new_order_str:
-                user_track_num = int(user_track_num_str)
+                user_track_num = int(user_track_num_str) 
                 if user_track_num not in valid_user_indices:
                      await m.reply_text(f"Invalid track number: {user_track_num}. Track numbers must be: {', '.join(map(str, valid_user_indices))}")
                      return
-
+                
                 stream_index_to_map = tracks[user_track_num - 1]['stream_index']
-                new_stream_map.append(f"0:{stream_index_to_map}")
+                new_stream_map.append(f"0:{stream_index_to_map}") 
 
             asyncio.create_task(
                 handle_audio_remux(
-                    c, m, file_data['path'],
-                    file_data['original_name'],
-                    new_stream_map,
+                    c, m, file_data['path'], 
+                    file_data['original_name'], 
+                    new_stream_map, 
                     messages_to_delete=[prompt_message_id, m.id],
                     default_caption=file_data.get('default_caption')
                 )
             )
 
-            PENDING_AUDIO_ORDERS.pop(prompt_message_id, None)
+            PENDING_AUDIO_ORDERS.pop(prompt_message_id, None) 
             return
 
         except ValueError:
@@ -3650,7 +3650,7 @@ async def text_handler(c, m: Message):
         except Exception as e:
             logger.error(f"Audio remux preparation error: {e}")
             await m.reply_to_message.reply_text(f"Error starting audio change process: {e}")
-
+            
             try: Path(file_data['path']).unlink(missing_ok=True)
             except Exception: pass
             PENDING_AUDIO_ORDERS.pop(prompt_message_id, None)
@@ -3658,19 +3658,19 @@ async def text_handler(c, m: Message):
 
     if uid in CREATE_POST_MODE and uid in POST_CREATION_STATE:
         state_data = POST_CREATION_STATE[uid]
-        state_data['message_ids'].append(m.id)
-
+        state_data['message_ids'].append(m.id) 
+        
         current_state = state_data['state']
-
+        
         if current_state == 'awaiting_name_change':
             if not text:
                 prompt_msg = await m.reply_text("Name cannot be empty. Provide a valid name.")
                 state_data['message_ids'].append(prompt_msg.id)
                 return
-
+            
             state_data['post_data']['image_name'] = text
             state_data['state'] = 'awaiting_genres_add'
-
+            
             new_caption = generate_post_caption(state_data['post_data'])
             try:
                 await c.edit_message_caption(m.chat.id, state_data['post_message_id'], caption=new_caption, parse_mode=ParseMode.MARKDOWN)
@@ -3684,11 +3684,11 @@ async def text_handler(c, m: Message):
                 f"Example: `Comedy, Romance, Action`"
             )
             state_data['message_ids'].append(prompt_msg.id)
-
+            
         elif current_state == 'awaiting_genres_add':
-            state_data['post_data']['genres'] = text
+            state_data['post_data']['genres'] = text 
             state_data['state'] = 'awaiting_season_list'
-
+            
             new_caption = generate_post_caption(state_data['post_data'])
             try:
                 await c.edit_message_caption(m.chat.id, state_data['post_message_id'], caption=new_caption, parse_mode=ParseMode.MARKDOWN)
@@ -3707,13 +3707,13 @@ async def text_handler(c, m: Message):
                 f"‣ `1-2 4-5` or `1-2, 4-5` (Season 01-02 and 04-05)"
             )
             state_data['message_ids'].append(prompt_msg.id)
-
+            
         elif current_state == 'awaiting_season_list':
             if not text.strip():
                 state_data['post_data']['season_list_raw'] = ""
             else:
                 state_data['post_data']['season_list_raw'] = text
-
+            
             new_caption = generate_post_caption(state_data['post_data'])
             try:
                 await c.edit_message_caption(m.chat.id, state_data['post_message_id'], caption=new_caption, parse_mode=ParseMode.MARKDOWN)
@@ -3725,20 +3725,20 @@ async def text_handler(c, m: Message):
             all_messages = state_data.get('message_ids', [])
             post_id = state_data.get('post_message_id')
             if post_id and post_id in all_messages:
-                all_messages.remove(post_id)
+                all_messages.remove(post_id) 
             if all_messages:
                 try:
                     await c.delete_messages(m.chat.id, all_messages)
                 except Exception as e:
                     logger.warning(f"Error deleting post creation messages: {e}")
-
+            
             image_path = state_data['image_path']
             if image_path and Path(image_path).exists():
                 Path(image_path).unlink(missing_ok=True)
-
+            
             CREATE_POST_MODE.discard(uid)
             POST_CREATION_STATE.pop(uid, None)
-
+            
             await m.reply_text("✅ Post creation successfully completed and additional messages deleted.")
             return
 
@@ -3776,15 +3776,15 @@ async def text_handler(c, m: Message):
             # Use Background Queue Worker for URLs to keep chronological order
             if uid not in BATCH_AUDIO_QUEUES:
                 BATCH_AUDIO_QUEUES[uid] = asyncio.Queue()
-
+            
             original_name = await get_filename_from_url(url)
             queue_msg = await m.reply_text(f"Queue item added for `{original_name}`. Position: {BATCH_AUDIO_QUEUES[uid].qsize() + 1}")
-
+            
             await BATCH_AUDIO_QUEUES[uid].put({'url': url, 'message': m, 'target_list': target_list, 'queue_msg': queue_msg})
             if uid not in BATCH_AUDIO_WORKERS or BATCH_AUDIO_WORKERS[uid].done():
                 BATCH_AUDIO_WORKERS[uid] = asyncio.create_task(batch_audio_worker(uid, c))
             return
-
+            
         if uid in ZIP_DOWNLOAD_MODE:
             if uid not in ZIP_DL_QUEUES:
                 ZIP_DL_QUEUES[uid] = asyncio.Queue()
@@ -3794,7 +3794,7 @@ async def text_handler(c, m: Message):
             if uid not in ZIP_DL_WORKERS or ZIP_DL_WORKERS[uid].done():
                 ZIP_DL_WORKERS[uid] = asyncio.create_task(zip_download_worker(uid, c))
             return
-
+            
         if uid in YT_DLP_MODE or is_youtube_url(url):
             await fetch_youtube_formats(c, m, url)
             return
@@ -3835,7 +3835,7 @@ async def batch_audio_worker(uid, c):
 async def process_batch_audio_input(uid, c, m, url=None, file_info=None, target_list=None):
     if target_list is CONVERT_BATCH_LIST.get(uid): list_num = "Convert Batch List"
     else: list_num = "1" if target_list is BATCH_AUDIO_LIST1.get(uid) else "2"
-
+    
     # Generic entry for ALL links in batch audio - will extract ONLY if zip file
     if url or file_info:
         status_msg = None
@@ -3843,12 +3843,12 @@ async def process_batch_audio_input(uid, c, m, url=None, file_info=None, target_
             original_name = "video.mp4"
             if url: original_name = await get_filename_from_url(url)
             elif file_info: original_name = file_info.file_name or "video.mp4"
-
+            
             status_msg = await m.reply_text(f"Downloading `{original_name}` to build list...")
-
+            
             safe_name = re.sub(r"[\\/*?\"<>|:]", "_", original_name)
             tmp_in = get_unique_path(TMP, safe_name)
-
+            
             if url:
                 if is_drive_url(url):
                     fid = extract_drive_id(url)
@@ -3861,7 +3861,7 @@ async def process_batch_audio_input(uid, c, m, url=None, file_info=None, target_
                     if status_msg:
                         await progress_callback(current, total, "Downloading List Item...", status_msg, start_t, original_name=original_name)
                 await m.download(file_name=str(tmp_in), progress=dl_prog)
-
+                
             if tmp_in.exists():
                 # Correctly Handle Zip Files if it is an archive
                 if is_archive_file(tmp_in):
@@ -3880,7 +3880,7 @@ async def process_batch_audio_input(uid, c, m, url=None, file_info=None, target_
                 try: await status_msg.edit(f"Failed to download file: {e}")
                 except: pass
 # ------------------------------------------
-
+    
 @app.on_message(filters.command("upload_url") & filters.private)
 async def upload_url_cmd(c, m: Message):
     if not is_admin(m.from_user.id):
@@ -3891,7 +3891,7 @@ async def upload_url_cmd(c, m: Message):
         return
     url = m.text.split(None, 1)[1].strip()
     uid = m.from_user.id
-
+    
     if uid in DOWNLOAD_T_MODE:
         link = f"http://{RENDER_EXTERNAL_HOSTNAME}/stream?url={urllib.parse.quote(url)}"
         await m.reply_text(f"🔗 **Direct Stream Link:**\n{link}", disable_web_page_preview=True)
@@ -3921,15 +3921,15 @@ async def upload_url_cmd(c, m: Message):
         target_list = BATCH_AUDIO_LIST1[uid] if state == 'list1' else BATCH_AUDIO_LIST2[uid]
         if uid not in BATCH_AUDIO_QUEUES:
             BATCH_AUDIO_QUEUES[uid] = asyncio.Queue()
-
+            
         original_name = await get_filename_from_url(url)
         queue_msg = await m.reply_text(f"Queue item added for `{original_name}`. Position: {BATCH_AUDIO_QUEUES[uid].qsize() + 1}")
-
+        
         await BATCH_AUDIO_QUEUES[uid].put({'url': url, 'message': m, 'target_list': target_list, 'queue_msg': queue_msg})
         if uid not in BATCH_AUDIO_WORKERS or BATCH_AUDIO_WORKERS[uid].done():
             BATCH_AUDIO_WORKERS[uid] = asyncio.create_task(batch_audio_worker(uid, c))
         return
-
+    
     if uid in ZIP_DOWNLOAD_MODE:
         if uid not in ZIP_DL_QUEUES:
             ZIP_DL_QUEUES[uid] = asyncio.Queue()
@@ -3939,13 +3939,13 @@ async def upload_url_cmd(c, m: Message):
         if uid not in ZIP_DL_WORKERS or ZIP_DL_WORKERS[uid].done():
             ZIP_DL_WORKERS[uid] = asyncio.create_task(zip_download_worker(uid, c))
         return
-
+        
     if uid in YT_DLP_MODE or is_youtube_url(url):
         await fetch_youtube_formats(c, m, url)
         return
 
     original_name = await get_filename_from_url(url)
-
+    
     if uid in BATCH_UPLOAD_MODE:
         if uid not in BATCH_DATA:
             BATCH_DATA[uid] = []
@@ -3966,10 +3966,10 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
     cancel_event = cancel_event_passed or asyncio.Event()
     if not cancel_event_passed:
         TASKS.setdefault(uid, []).append(cancel_event)
-
+    
     if status_msg:
         USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
-
+        
     try:
         fname = await get_filename_from_url(url)
         safe_name = re.sub(r"[\\/*?\"<>|:]", "_", fname)
@@ -3984,7 +3984,7 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
 
         tmp_in = get_unique_path(TMP, safe_name)
         ok, err = False, None
-
+        
         if is_drive_url(url):
             fid = extract_drive_id(url)
             if not fid:
@@ -4000,42 +4000,42 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
 
         await status_msg.edit("Download complete. Uploading...", reply_markup=None)
         renamed_file = get_dynamic_filename(uid, tmp_in.name)
-
+        
         if uid in MKV_AUDIO_CHANGE_MODE:
             try:
                 await status_msg.edit("Checking file for audio track analysis...", reply_markup=progress_keyboard())
                 audio_tracks = await asyncio.to_thread(get_audio_tracks_ffprobe, tmp_in)
-
+                
                 if not audio_tracks:
                     await status_msg.edit("No audio tracks found in this video or FFprobe failed. Uploading directly...")
                     asyncio.create_task(
                         sequential_upload_task(uid, c, m, tmp_in, renamed_file, status_msg.id, cancel_event, default_caption=safe_name, original_caption=fname, original_download_name=fname)
                     )
                     return
-
+                
                 track_list_text = "Audio tracks in the file:\n\n"
                 for i, track in enumerate(audio_tracks, 1):
                     track_list_text += f"{i}. **Stream Index:** {track['stream_index']}, **Language:** {track['language']}, **Title:** {track['title']}\n"
-
+                    
                 track_list_text += (
                     "\n**Reply to this message with a comma-separated list of numbers** to set the audio order.\n"
                     "Example: `1,3` will keep tracks 1 and 3. `2` will keep only track 2. The rest will be removed.\n"
                 )
-
+                    
                 track_list_text += (
                     "\nIf you don't want to change audio, use the `Cancel` button below or type `/mkv_video_audio_change` to turn off the mode."
                 )
-
-                await status_msg.edit(track_list_text, reply_markup=progress_keyboard())
-
+                
+                await status_msg.edit(track_list_text, reply_markup=progress_keyboard()) 
+                
                 PENDING_AUDIO_ORDERS[status_msg.id] = {
                     'uid': uid,
-                    'path': tmp_in,
+                    'path': tmp_in, 
                     'original_name': renamed_file,
                     'tracks': audio_tracks,
                     'default_caption': safe_name
                 }
-                return
+                return 
             except Exception as e:
                 logger.error(f"URL Audio track analysis error: {e}")
                 await status_msg.edit(f"Error analyzing audio tracks: {e}. Uploading directly...")
@@ -4050,7 +4050,7 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
     except Exception as e:
         raise e
     finally:
-        pass
+        pass 
 
 async def handle_caption_only_upload(c: Client, m: Message):
     file_info = m.video or m.document
@@ -4058,13 +4058,13 @@ async def handle_caption_only_upload(c: Client, m: Message):
 
 async def handle_caption_only_upload_with_file(c: Client, m: Message, file_info):
     uid = m.from_user.id
-
+    
     use_orig_cap = False
     final_caption_template = USER_CAPTIONS.get(uid)
-
+    
     if not final_caption_template or uid in USE_ORIGINAL_CAPTION_IN_MULTI_GROUP:
         use_orig_cap = True
-
+    
     if use_orig_cap:
         caption_to_use = m.caption or (file_info.file_name if file_info and file_info.file_name else "Video")
         caption_entities_to_use = m.caption_entities
@@ -4074,36 +4074,36 @@ async def handle_caption_only_upload_with_file(c: Client, m: Message, file_info)
 
     cancel_event = asyncio.Event()
     TASKS.setdefault(uid, []).append(cancel_event)
-
+    
     try:
         status_msg = await m.reply_text("Editing caption...", reply_markup=progress_keyboard())
     except Exception:
         status_msg = await m.reply_text("Editing caption...", reply_markup=progress_keyboard())
-
+        
     USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
-
+    
     try:
         source_message = m
-
+        
         if not file_info:
             try:
                 await status_msg.edit("This is not a video or document file.")
             except Exception:
                 await m.reply_text("This is not a video or document file.")
             return
-
+        
         if use_orig_cap:
             final_caption = make_bold(caption_to_use)
             final_entities = caption_entities_to_use
         else:
             final_caption = make_bold(process_dynamic_caption(uid, caption_to_use))
             final_entities = None
-
+        
         if file_info.file_id:
             try:
                 parse_mode_arg = ParseMode.MARKDOWN
 
-                if source_message.video or (file_info and getattr(file_info, 'duration', 0) > 0):
+                if source_message.video or (file_info and getattr(file_info, 'duration', 0) > 0): 
                     await c.send_video(
                         chat_id=m.chat.id,
                         video=file_info.file_id,
@@ -4111,8 +4111,8 @@ async def handle_caption_only_upload_with_file(c: Client, m: Message, file_info)
                         caption_entities=final_entities,
                         thumb=file_info.thumbs[0].file_id if file_info.thumbs else None,
                         duration=file_info.duration,
-                        width=file_info.width,
-                        height=file_info.height,
+                        width=file_info.width,       
+                        height=file_info.height,     
                         supports_streaming=True,
                         parse_mode=parse_mode_arg
                     )
@@ -4127,7 +4127,7 @@ async def handle_caption_only_upload_with_file(c: Client, m: Message, file_info)
                         parse_mode=parse_mode_arg
                     )
                 try:
-                    await status_msg.delete()
+                    await status_msg.delete() 
                 except Exception:
                     pass
             except Exception as e:
@@ -4160,7 +4160,7 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
     uid = m.from_user.id
     if not is_admin(uid):
         return
-
+        
     file_info = m.video or m.document
     original_name = file_info.file_name if file_info and file_info.file_name else f"file_{file_info.file_unique_id}"
 
@@ -4187,7 +4187,7 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
         if uid not in BATCH_AUDIO_WORKERS or BATCH_AUDIO_WORKERS[uid].done():
             BATCH_AUDIO_WORKERS[uid] = asyncio.create_task(batch_audio_worker(uid, c))
         return
-
+        
     if uid in BATCH_AUDIO_MODE:
         state = BATCH_AUDIO_STATE.get(uid)
         target_list = BATCH_AUDIO_LIST1[uid] if state == 'list1' else BATCH_AUDIO_LIST2[uid]
@@ -4212,46 +4212,46 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
         await handle_audio_change_file(c, m)
         return
 
-    if uid in EDIT_CAPTION_MODE:
+    if uid in EDIT_CAPTION_MODE: 
         if uid in MULTI_GROUP_BATCH_MODE:
-            if not file_info:
+            if not file_info: 
                 return
-
-            if uid not in MULTI_GROUP_DATA or not MULTI_GROUP_DATA[uid]:
+            
+            if uid not in MULTI_GROUP_DATA or not MULTI_GROUP_DATA[uid]: 
                 MULTI_GROUP_DATA[uid] = [[]]
-
+            
             MULTI_GROUP_DATA[uid][-1].append({
                 'message': m,
                 'file_info': file_info
             })
-
+            
             group_idx = len(MULTI_GROUP_DATA[uid])
             count_in_group = len(MULTI_GROUP_DATA[uid][-1])
             status_text = f"Group {group_idx}: {count_in_group} video file IDs saved.\nLast: `{original_name}`"
             markup = InlineKeyboardMarkup([[InlineKeyboardButton("Done ✅", callback_data="multi_group_done")]])
-
+            
             if uid in MULTI_GROUP_DONE_MSG:
                 try:
                     await c.delete_messages(m.chat.id, MULTI_GROUP_DONE_MSG[uid])
                 except Exception:
                     pass
-
+                    
             done_msg = await m.reply_text(status_text, reply_markup=markup)
             MULTI_GROUP_DONE_MSG[uid] = done_msg.id
             return
-
+            
         if uid in BATCH_CAPTION_MODE:
-            if not file_info:
+            if not file_info: 
                 return
-
-            if uid not in BATCH_DATA:
+            
+            if uid not in BATCH_DATA: 
                 BATCH_DATA[uid] = []
-
+            
             BATCH_DATA[uid].append({
                 'message': m,
                 'file_info': file_info
             })
-
+            
             count = len(BATCH_DATA[uid])
             status_text = f"{count} video file IDs saved.\nLast: `{original_name}`"
             await update_batch_status(c, m, uid, status_text)
@@ -4261,7 +4261,7 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
         return
 
     if uid in BATCH_UPLOAD_MODE:
-        if uid not in BATCH_DATA:
+        if uid not in BATCH_DATA: 
             BATCH_DATA[uid] = []
         BATCH_DATA[uid].append({
             'message': m,
@@ -4279,18 +4279,18 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
 async def show_batch_audio_ui(c, chat_id, uid):
     pair_idx = BATCH_AUDIO_CURRENT_PAIR_IDX[uid]
     pairs = BATCH_AUDIO_MAPPING[uid]
-
+    
     if pair_idx >= len(pairs):
         await c.send_message(chat_id, "All track selections complete! Starting batch processing...")
         asyncio.create_task(execute_batch_audio_remux(uid, c, chat_id))
         return
-
+        
     idx1, idx2 = pairs[pair_idx]
     vid_path1 = BATCH_AUDIO_LIST1[uid][idx1]['path']
     vid_path2 = BATCH_AUDIO_LIST2[uid][idx2]['path']
     name1 = BATCH_AUDIO_LIST1[uid][idx1]['name']
     name2 = BATCH_AUDIO_LIST2[uid][idx2]['name']
-
+    
     msg = None
     if str(pair_idx) not in BATCH_AUDIO_TRACK_CONFIGS[uid]:
         try:
@@ -4306,14 +4306,14 @@ async def show_batch_audio_ui(c, chat_id, uid):
             else:
                 msg = await c.send_message(chat_id, "Analyzing tracks...")
                 BATCH_AUDIO_UI_MSG[uid] = msg.id
-
+                
             # Get tracks for both the base video and the audio source
             tracks1 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid_path1)
             tracks2 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid_path2)
-
+            
             # Combine tracks, keeping track of their source (1 or 2)
             combined_tracks = [{'src': 1, 'data': t} for t in tracks1] + [{'src': 2, 'data': t} for t in tracks2]
-
+            
             BATCH_AUDIO_TRACK_CONFIGS[uid][str(pair_idx)] = {
                 'keep': [],
                 'default': -1,
@@ -4323,17 +4323,17 @@ async def show_batch_audio_ui(c, chat_id, uid):
             logger.error(f"Batch Audio Analysis Error: {e}")
             await c.send_message(chat_id, f"Error: {e}")
             return
-
+            
     config = BATCH_AUDIO_TRACK_CONFIGS[uid][str(pair_idx)]
     combined_tracks = config['tracks']
-
+    
     # Build text message with full names as requested
     text = (
         f"**🎵 Batch Audio Selection ({pair_idx + 1}/{len(pairs)})**\n\n"
         f"**Base Video:** `{name1}`\n"
         f"**Audio Source:** `{name2}`\n\n"
     )
-
+    
     tracks1_display = [t for t in combined_tracks if t['src'] == 1]
     tracks2_display = [t for t in combined_tracks if t['src'] == 2]
 
@@ -4343,60 +4343,60 @@ async def show_batch_audio_ui(c, chat_id, uid):
             t_data = t['data']
             title_str = t_data['title'] if t_data['title'] and t_data['title'] != 'N/A' else 'Unknown'
             text += f"‣ Audio track - {title_str} ({t_data['language']})\n"
-
+            
     if tracks2_display:
         text += "\n**List 2 Audios:**\n"
         for t in tracks2_display:
             t_data = t['data']
             title_str = t_data['title'] if t_data['title'] and t_data['title'] != 'N/A' else 'Unknown'
             text += f"‣ Audio track - {title_str} ({t_data['language']})\n"
-
+            
     text += "\nSelect which tracks to keep and which should play by default:"
-
+    
     # Build buttons with short names (List 1 will be first/top, List 2 below)
     keyboard = []
     for i, track_wrap in enumerate(combined_tracks):
         is_def = config['default'] == i
         is_keep = i in config['keep']
-
+        
         def_text = "🔘 Default" if is_def else "📻 Set Def"
         keep_text = "✅ Keep" if is_keep else "❌ Drop"
-
+        
         t_data = track_wrap['data']
         # Short name for the button: only language code
         lang_code = t_data.get('language', 'und').lower()
         short_name = f"({lang_code})"
-
+            
         keyboard.append([
             InlineKeyboardButton(def_text, callback_data=f"baud_def_{uid}_{pair_idx}_{i}"),
             InlineKeyboardButton(short_name, callback_data="ignore"),
             InlineKeyboardButton(keep_text, callback_data=f"baud_keep_{uid}_{pair_idx}_{i}")
         ])
-
+        
     keyboard.append([
         InlineKeyboardButton("Cancel ❌", callback_data="baud_cancel"),
         InlineKeyboardButton("Select All 🚀", callback_data=f"baud_all_{uid}_{pair_idx}"),
         InlineKeyboardButton("Next / Done ✅", callback_data=f"baud_done_{uid}_{pair_idx}")
     ])
-
+    
     try:
         await c.edit_message_text(chat_id, BATCH_AUDIO_UI_MSG[uid], text, reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
             logger.error(f"UI edit error: {e}")
-
+    
 
 @app.on_callback_query(filters.regex(r"^baud_"))
 async def batch_audio_callback(c: Client, cb: CallbackQuery):
     uid = cb.from_user.id
     parts = cb.data.split('_')
     action = parts[1]
-
+    
     if action == "use":
         if parts[2] == "list1":
             BATCH_AUDIO_LIST2[uid] = BATCH_AUDIO_LIST1[uid].copy()
             BATCH_AUDIO_STATE[uid] = 'mapping'
-
+            
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("Upload All 🚀", callback_data="baud_list_ok")],
                 [InlineKeyboardButton("Cancel ❌", callback_data="baud_list_cancel")]
@@ -4410,7 +4410,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
                 reply_markup=keyboard
             )
         return
-
+        
     # Handle list actions which don't have pair_idx
     if action == "list":
         sub_action = parts[2]
@@ -4424,7 +4424,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
             page = int(parts[5])
             if list_id == 'convert': target_list = CONVERT_BATCH_LIST.get(uid, [])
             else: target_list = BATCH_AUDIO_LIST1.get(uid, []) if list_id == 'list1' else BATCH_AUDIO_LIST2.get(uid, [])
-
+            
             if 0 <= index < len(target_list):
                 file_info = target_list.pop(index)
                 try: Path(file_info['path']).unlink(missing_ok=True)
@@ -4435,7 +4435,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
             list_id = parts[3]
             page = int(parts[4])
             await send_batch_audio_list_page(c, cb.message.chat.id, uid, list_id, page, cb.message.id)
-
+            
         elif sub_action == "ok":
             count = min(len(BATCH_AUDIO_LIST1[uid]), len(BATCH_AUDIO_LIST2[uid]))
             pairs = [(i, i) for i in range(count)]
@@ -4476,7 +4476,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
                     await cb.message.edit_text("Batch Audio Add Mode cancelled and data cleared.")
                 except Exception: pass
             elif parts[3] == "no": # baud_list_cancel_no
-
+                
                 # Chunking Lists again
                 def chunk_and_send_return(lst, title):
                     chunks = []
@@ -4489,13 +4489,13 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
                         curr += line
                     if curr: chunks.append(curr)
                     return chunks
-
+                    
                 list1_chunks = chunk_and_send_return(BATCH_AUDIO_LIST1[uid], "List 1 (Base Videos)")
                 list2_chunks = chunk_and_send_return(BATCH_AUDIO_LIST2[uid], "List 2 (Audio Sources)")
 
                 for c_msg in list1_chunks: await cb.message.reply_text(c_msg)
                 for c_msg in list2_chunks: await cb.message.reply_text(c_msg)
-
+                
                 keyboard = InlineKeyboardMarkup([
                     [InlineKeyboardButton("Upload All 🚀", callback_data="baud_list_ok")],
                     [InlineKeyboardButton("Cancel ❌", callback_data="baud_list_cancel")]
@@ -4521,7 +4521,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
         for item in BATCH_AUDIO_LIST2.get(uid, []):
             try: Path(item['path']).unlink(missing_ok=True)
             except: pass
-    BATCH_AUDIO_LIST1.pop(uid, None)
+            BATCH_AUDIO_LIST1.pop(uid, None)
         BATCH_AUDIO_LIST2.pop(uid, None)
         if uid in BATCH_AUDIO_QUEUES:
             while not BATCH_AUDIO_QUEUES[uid].empty():
@@ -4531,14 +4531,14 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
             await cb.message.edit_text("Batch Audio Add Mode cancelled.")
         except Exception: pass
         return
-
+        
     if str(uid) != parts[2]:
         await cb.answer("Not your session.", show_alert=True)
         return
-
+        
     pair_idx = int(parts[3])
     config = BATCH_AUDIO_TRACK_CONFIGS[uid][str(pair_idx)]
-
+    
     if action == "def":
         track_idx = int(parts[4])
         config['default'] = track_idx
@@ -4546,7 +4546,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
             config['keep'].append(track_idx) # Default must be kept
         await show_batch_audio_ui(c, cb.message.chat.id, uid)
         await cb.answer()
-
+        
     elif action == "keep":
         track_idx = int(parts[4])
         if track_idx in config['keep']:
@@ -4557,31 +4557,31 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
             config['keep'].append(track_idx)
         await show_batch_audio_ui(c, cb.message.chat.id, uid)
         await cb.answer()
-
+        
     elif action == "done":
         BATCH_AUDIO_CURRENT_PAIR_IDX[uid] += 1
         await show_batch_audio_ui(c, cb.message.chat.id, uid)
         await cb.answer()
-
+        
     elif action == "all":
         # Apply this config to all remaining pairs IF track count matches
         pairs = BATCH_AUDIO_MAPPING[uid]
         keep_idxs = config['keep']
         def_idx = config['default']
         target_count = len(config['tracks'])
-
+        
         await cb.answer("Applying pattern to remaining files...", show_alert=False)
-
+        
         for i in range(pair_idx + 1, len(pairs)):
             idx1, idx2 = pairs[i]
             vid1 = BATCH_AUDIO_LIST1[uid][idx1]['path']
             vid2 = BATCH_AUDIO_LIST2[uid][idx2]['path']
-
+            
             # Reconstruct combined tracks for this pair to check count
             t1 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid1)
             t2 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid2)
             c_tracks = [{'src': 1, 'data': t} for t in t1] + [{'src': 2, 'data': t} for t in t2]
-
+            
             if len(c_tracks) != target_count:
                 # Stop auto applying if mismatch
                 BATCH_AUDIO_CURRENT_PAIR_IDX[uid] = i
@@ -4593,52 +4593,52 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
                 'default': def_idx,
                 'tracks': c_tracks
             }
-
+            
         BATCH_AUDIO_CURRENT_PAIR_IDX[uid] = len(pairs)
         await show_batch_audio_ui(c, cb.message.chat.id, uid)
 
 async def execute_batch_audio_remux(uid, c, chat_id):
     pairs = BATCH_AUDIO_MAPPING.get(uid, [])
     if not pairs: return
-
+    
     status_msg = await c.send_message(chat_id, f"Starting remux for {len(pairs)} files...")
-
+    
     for i, (idx1, idx2) in enumerate(pairs):
         vid1 = BATCH_AUDIO_LIST1[uid][idx1]['path']
         vid2 = BATCH_AUDIO_LIST2[uid][idx2]['path']
         base_name = BATCH_AUDIO_LIST1[uid][idx1]['name']
-
+        
         config = BATCH_AUDIO_TRACK_CONFIGS[uid][str(i)]
         keep_tracks = config['keep']
         def_track = config['default']
         tracks_data = config['tracks']
-
+        
         out_name = get_dynamic_filename(uid, base_name)
         if not out_name.lower().endswith(".mkv"):
             out_name = Path(out_name).stem + ".mkv"
-
+            
         out_path = TMP / f"ba_out_{uid}_{i}_{int(time.time())}.mkv"
-
+        
         try:
             await status_msg.edit(f"Remuxing {i+1}/{len(pairs)}...\nBase: `{base_name}`")
         except Exception: pass
-
+        
         # Audio default mapping fix & re-encode code (Issue 3 & 5)
         map_args = ["-map", "0:v", "-map", "0:s?", "-map", "0:d?"]
         ordered_audio_keep = []
-
+        
         if def_track != -1 and def_track in keep_tracks:
             ordered_audio_keep.append(def_track)
         for k in keep_tracks:
             if k != def_track:
                 ordered_audio_keep.append(k)
-
+                
         for k in ordered_audio_keep:
             track_wrap = tracks_data[k]
             stream_idx = track_wrap['data']['stream_index']
             src_file_idx = 0 if track_wrap['src'] == 1 else 1
             map_args.extend(["-map", f"{src_file_idx}:{stream_idx}"])
-
+            
         cmd = [
             "ffmpeg", "-y",
             "-i", str(vid1),
@@ -4646,16 +4646,16 @@ async def execute_batch_audio_remux(uid, c, chat_id):
             *map_args,
             "-disposition:a", "0"
         ]
-
+        
         if def_track != -1 and def_track in keep_tracks:
             cmd.extend(["-disposition:a:0", "default"])
-
+            
         # Metadata renaming logic to handle duplicates
         used_titles = set()
         for idx, k in enumerate(ordered_audio_keep):
             t = tracks_data[k]['data']['title']
             if not t or t == 'N/A': t = "Audio"
-
+            
             # Handle duplicate names gracefully
             original_t = t
             if t in used_titles:
@@ -4663,10 +4663,10 @@ async def execute_batch_audio_remux(uid, c, chat_id):
                 while f"{original_t}{j}" in used_titles: j += 1
                 t = f"{original_t}{j}"
             used_titles.add(t)
-
+            
             cmd.extend([f"-metadata:s:a:{idx}", f"title={t}"])
             cmd.extend([f"-metadata:s:a:{idx}", "handler_name=[@TA_HD_Anime] Telegram Channel"])
-
+            
         cmd.extend([
             "-metadata", "title=[@TA_HD_Anime] Telegram Channel",
             "-metadata:s:v", "title=[@TA_HD_Anime] Telegram Channel",
@@ -4681,7 +4681,7 @@ async def execute_batch_audio_remux(uid, c, chat_id):
             "-shortest", # Fixed Lag/Desync issue for batch audio
             str(out_path)
         ])
-
+        
         try:
             res = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
             if res.returncode == 0 and out_path.exists():
@@ -4693,7 +4693,7 @@ async def execute_batch_audio_remux(uid, c, chat_id):
                 else:
                     advance_dynamic_counters(uid)
                     cap = process_dynamic_caption(uid, final_caption_template)
-
+                
                 # Mock a message for sequential_upload_task
                 class FakeMessage:
                     def __init__(self, cid):
@@ -4705,21 +4705,21 @@ async def execute_batch_audio_remux(uid, c, chat_id):
                         self.video = None
                         self.caption = None
                         self.caption_entities = None
-
+                        
                 fm = FakeMessage(chat_id)
                 cancel_event = asyncio.Event()
                 TASKS.setdefault(uid, []).append(cancel_event)
-
+                
                 await sequential_upload_task(uid, c, fm, out_path, out_name, None, cancel_event, default_caption=cap, original_caption=cap, original_download_name=base_name)
             else:
                 logger.error(f"Batch Audio Remux FFmpeg error: {res.stderr}")
                 await c.send_message(chat_id, f"Error remuxing pair {i+1}.")
         except Exception as e:
             logger.error(f"Batch Audio Remux exception: {e}")
-
+            
     try: await status_msg.edit("Batch Audio Processing Complete!")
     except Exception: pass
-
+    
     # Cleanup files
     for p in BATCH_AUDIO_LIST1.get(uid, []):
         try: Path(p['path']).unlink(missing_ok=True)
@@ -4727,7 +4727,7 @@ async def execute_batch_audio_remux(uid, c, chat_id):
     for p in BATCH_AUDIO_LIST2.get(uid, []):
         try: Path(p['path']).unlink(missing_ok=True)
         except: pass
-
+        
     BATCH_AUDIO_STATE[uid] = 'list1'
     BATCH_AUDIO_LIST1[uid] = []
     BATCH_AUDIO_LIST2[uid] = []
@@ -4738,37 +4738,37 @@ async def execute_batch_audio_remux(uid, c, chat_id):
 async def handle_audio_change_file(c: Client, m: Message):
     uid = m.from_user.id
     file_info = m.video or m.document
-
+    
     if not file_info:
         await m.reply_text("This is not a video file.")
         return
-
+    
     cancel_event = asyncio.Event()
     TASKS.setdefault(uid, []).append(cancel_event)
-
+    
     tmp_path = None
     status_msg = None
     try:
         original_name = file_info.file_name or f"video_{file_info.file_unique_id}.mkv"
         if not '.' in original_name:
             original_name += '.mkv'
-
+            
         tmp_path = get_unique_path(TMP, original_name)
-
+        
         status_msg = await m.reply_text("Downloading file to analyze audio tracks...", reply_markup=progress_keyboard())
         USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
-
+        
         start_t = time.time()
         async def dl_prog(current, total):
             if cancel_event.is_set():
                 c.stop_transmission()
             if status_msg:
                 await progress_callback(current, total, "Downloading...", status_msg, start_t, original_name=original_name)
-
+                
         await m.download(file_name=str(tmp_path), progress=dl_prog)
-
+        
         audio_tracks = await asyncio.to_thread(get_audio_tracks_ffprobe, tmp_path)
-
+        
         if not audio_tracks:
             await status_msg.edit("No audio tracks found in this video or FFprobe failed.")
             tmp_path.unlink(missing_ok=True)
@@ -4777,26 +4777,26 @@ async def handle_audio_change_file(c: Client, m: Message):
         track_list_text = "Audio tracks in the file:\n\n"
         for i, track in enumerate(audio_tracks, 1):
             track_list_text += f"{i}. **Stream Index:** {track['stream_index']}, **Language:** {track['language']}, **Title:** {track['title']}\n"
-
+            
         track_list_text += (
             "\n**Reply to this message with a comma-separated list of numbers** to set the audio order.\n"
             "Example: `1,3` will keep tracks 1 and 3. `2` will keep only track 2. The rest will be removed.\n"
         )
-
+            
         track_list_text += (
         "\nIf you don't want to change audio, use the `Cancel` button below or type `/mkv_video_audio_change` to turn off the mode."
         )
-
-        await status_msg.edit(track_list_text, reply_markup=progress_keyboard())
-
+        
+        await status_msg.edit(track_list_text, reply_markup=progress_keyboard()) 
+        
         PENDING_AUDIO_ORDERS[status_msg.id] = {
             'uid': uid,
-            'path': tmp_path,
+            'path': tmp_path, 
             'original_name': tmp_path.name,
             'tracks': audio_tracks,
             'default_caption': original_name
         }
-
+        
     except Exception as e:
         logger.error(f"Audio track analysis error: {e}")
         if status_msg:
@@ -4815,11 +4815,11 @@ async def handle_audio_remux(c: Client, m: Message, in_path: Path, original_name
     uid = m.from_user.id
     cancel_event = asyncio.Event()
     TASKS.setdefault(uid, []).append(cancel_event)
-
+    
     out_name = get_dynamic_filename(uid, original_name)
     if not out_name.lower().endswith(".mkv"):
         out_name = Path(out_name).stem + ".mkv"
-
+    
     asyncio.create_task(
         sequential_remux_upload_task(uid, c, m, in_path, out_name, new_stream_map, messages_to_delete, cancel_event, default_caption, original_download_name=original_name)
     )
@@ -4827,18 +4827,18 @@ async def handle_audio_remux(c: Client, m: Message, in_path: Path, original_name
 async def sequential_remux_upload_task(uid, c, m, in_path, out_name, new_stream_map, messages_to_delete, cancel_event, default_caption=None, original_download_name=None):
     if uid not in USER_UPLOAD_LOCKS:
         USER_UPLOAD_LOCKS[uid] = asyncio.Lock()
-
+    
     async with USER_UPLOAD_LOCKS[uid]:
         if cancel_event.is_set():
              if in_path.exists(): in_path.unlink()
              return
 
         out_path = TMP / f"remux_{uid}_{int(datetime.now().timestamp())}_{out_name}"
-
-        map_args = ["-map", "0:v", "-map", "0:s?", "-map", "0:d?"]
+        
+        map_args = ["-map", "0:v", "-map", "0:s?", "-map", "0:d?"] 
         for stream_index in new_stream_map:
             map_args.extend(["-map", stream_index])
-
+            
         cmd = [
             "ffmpeg",
             "-i", str(in_path),
@@ -4865,7 +4865,7 @@ async def sequential_remux_upload_task(uid, c, m, in_path, out_name, new_stream_
         try:
             status_msg = await m.reply_text("Changing audio track order (Remuxing)...", reply_markup=progress_keyboard())
             USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
-
+            
             result = await asyncio.to_thread(
                 subprocess.run,
                 cmd,
@@ -4874,7 +4874,7 @@ async def sequential_remux_upload_task(uid, c, m, in_path, out_name, new_stream_
                 check=False,
                 timeout=3600
             )
-
+            
             if result.returncode != 0:
                 logger.error(f"FFmpeg Remux failed: {result.stderr}")
                 out_path.unlink(missing_ok=True)
@@ -4884,11 +4884,11 @@ async def sequential_remux_upload_task(uid, c, m, in_path, out_name, new_stream_
                 raise Exception("Modified file not found or size is zero.")
 
             await status_msg.edit("Audio change complete, uploading file...", reply_markup=progress_keyboard())
-
+            
             all_messages_to_delete = messages_to_delete if messages_to_delete else []
             all_messages_to_delete.append(status_msg.id)
 
-            await process_file_and_upload(c, m, out_path, target_name=out_name, original_download_name=original_download_name, messages_to_delete=all_messages_to_delete, cancel_event_passed=cancel_event, passed_uid=uid, default_caption=default_caption, original_caption_passed=default_caption)
+            await process_file_and_upload(c, m, out_path, target_name=out_name, original_download_name=original_download_name, messages_to_delete=all_messages_to_delete, cancel_event_passed=cancel_event, passed_uid=uid, default_caption=default_caption, original_caption_passed=default_caption) 
 
         except Exception as e:
             logger.error(f"Audio remux process error: {e}")
@@ -4922,7 +4922,7 @@ async def rename_cmd(c, m: Message):
         return
     new_name = m.text.split(None, 1)[1].strip()
     new_name = re.sub(r"[\\/*?\"<>|:]", "_", new_name)
-
+    
     await m.reply_text(f"Video will be renamed to: {new_name}\n(The replied file will be downloaded and re-uploaded for renaming)")
 
     cancel_event = asyncio.Event()
@@ -4933,7 +4933,7 @@ async def rename_cmd(c, m: Message):
     except Exception:
         status_msg = await m.reply_text("Downloading file for renaming...", reply_markup=progress_keyboard())
         USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
-
+        
     tmp_out = get_unique_path(TMP, new_name)
     try:
         start_t = time.time()
@@ -4942,14 +4942,14 @@ async def rename_cmd(c, m: Message):
                 c.stop_transmission()
             if status_msg:
                 await progress_callback(current, total, "Downloading...", status_msg, start_t, original_name=new_name)
-
+                
         await m.reply_to_message.download(file_name=str(tmp_out), progress=dl_prog)
-
+        
         try:
             await status_msg.edit("Download complete, uploading with new name...", reply_markup=None)
         except Exception:
             await m.reply_text("Download complete, uploading with new name...", reply_markup=None)
-
+        
         asyncio.create_task(
             sequential_upload_task(uid, c, m, tmp_out, new_name, status_msg.id, cancel_event, default_caption=new_name, original_caption=new_name, original_download_name=new_name)
         )
@@ -4962,18 +4962,18 @@ async def rename_cmd(c, m: Message):
 async def cancel_single_cb(c, cb):
     uid = cb.from_user.id
     msg_id = cb.message.id
-
+    
     ACTIVE_CONVERT_SESSION.pop(uid, None)
-
+    
     if msg_id in PENDING_AUDIO_ORDERS:
         file_data = PENDING_AUDIO_ORDERS.pop(msg_id)
         if file_data['uid'] == uid:
             try: Path(file_data['path']).unlink(missing_ok=True)
             except Exception: pass
-
+            
             if uid in USER_TASK_EVENTS and msg_id in USER_TASK_EVENTS[uid]:
                 USER_TASK_EVENTS[uid][msg_id].set()
-
+                
             await cb.answer("Audio change process cancelled.", show_alert=True)
             try: await cb.message.delete()
             except: pass
@@ -4991,19 +4991,19 @@ async def cancel_single_cb(c, cb):
 async def cancel_all_cb(c, cb):
     uid = cb.from_user.id
     count = 0
-
+    
     ACTIVE_CONVERT_SESSION.pop(uid, None)
-
+    
     if uid in ZIP_DL_QUEUES:
         while not ZIP_DL_QUEUES[uid].empty():
-            try:
+            try: 
                 item = ZIP_DL_QUEUES[uid].get_nowait()
                 if 'queue_msg' in item and item['queue_msg']:
                     try: await item['queue_msg'].delete()
                     except: pass
                 ZIP_DL_QUEUES[uid].task_done()
             except: pass
-
+            
     if uid in USER_QUEUES:
         while not USER_QUEUES[uid].empty():
             try:
@@ -5013,11 +5013,11 @@ async def cancel_all_cb(c, cb):
                     except: pass
                 USER_QUEUES[uid].task_done()
             except: pass
-
+            
     if uid in USER_WORKERS:
         USER_WORKERS[uid].cancel()
         del USER_WORKERS[uid]
-
+            
     if uid in BATCH_AUDIO_QUEUES:
         while not BATCH_AUDIO_QUEUES[uid].empty():
             try:
@@ -5027,29 +5027,29 @@ async def cancel_all_cb(c, cb):
                     except: pass
                 BATCH_AUDIO_QUEUES[uid].task_done()
             except: pass
-
+            
     if uid in BATCH_AUDIO_WORKERS:
         BATCH_AUDIO_WORKERS[uid].cancel()
         del BATCH_AUDIO_WORKERS[uid]
-
+            
     if uid in USER_TASK_EVENTS:
         for ev in USER_TASK_EVENTS[uid].values():
             ev.set()
             count += 1
         USER_TASK_EVENTS[uid].clear()
-
+        
     if uid in TASKS:
         for ev in TASKS[uid]:
             try: ev.set()
             except: pass
         TASKS[uid].clear()
-
+        
     for msg_id in list(PENDING_AUDIO_ORDERS.keys()):
         if PENDING_AUDIO_ORDERS[msg_id]['uid'] == uid:
             file_data = PENDING_AUDIO_ORDERS.pop(msg_id)
             try: Path(file_data['path']).unlink(missing_ok=True)
             except: pass
-
+            
     await cb.answer(f"All {count} tasks and queues cancelled.", show_alert=True)
     try: await cb.message.delete()
     except: pass
@@ -5078,11 +5078,11 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
     if not cancel_event:
         cancel_event = asyncio.Event()
         TASKS.setdefault(uid, []).append(cancel_event)
-
+    
     upload_path = in_path
     temp_thumb_path = None
     final_caption_template = USER_CAPTIONS.get(uid)
-    status_msg = None
+    status_msg = None 
     parts_to_upload = []
 
     try:
@@ -5092,46 +5092,46 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
         input_name = in_path.name
         target_name = target_name or input_name
         display_name = original_download_name or target_name
-
+        
         video_exts = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm"}
         audio_exts = {".mp3", ".m4a", ".flac", ".wav", ".aac"}
-
+        
         is_video_file = getattr(m, 'video', None) or any(input_name.lower().endswith(ext) for ext in video_exts)
         is_audio_file = any(input_name.lower().endswith(ext) for ext in audio_exts)
-
+        
         orig_metadata = get_video_metadata(in_path) if is_video_file else {'duration': 0}
         orig_duration = orig_metadata.get('duration', 0)
-
+        
         if is_video_file:
             is_mp4_container = input_name.lower().endswith(".mp4")
             is_mkv_container = input_name.lower().endswith(".mkv")
             has_opus = has_opus_audio(in_path)
-
+            
             if is_mp4_container:
                 if has_opus:
-                    final_ext = ".mkv"
+                    final_ext = ".mkv" 
                 else:
-                    final_ext = ".mp4"
+                    final_ext = ".mp4" 
             elif is_mkv_container:
-                final_ext = ".mkv"
+                final_ext = ".mkv" 
             else:
-                final_ext = ".mkv"
-
+                final_ext = ".mkv" 
+            
             target_stem = Path(target_name).stem
             target_name = target_stem + final_ext
-
+            
             processed_path = TMP / f"proc_{uid}_{int(datetime.now().timestamp())}_{target_name}"
-
+            
             try:
                 status_text = "Processing video (Metadata & Format Check)..."
                 if messages_to_delete:
-                     pass
+                     pass 
                 status_msg = await c.send_message(m.chat.id, status_text, reply_markup=progress_keyboard())
                 USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
             except Exception:
                 status_msg = await c.send_message(m.chat.id, status_text, reply_markup=progress_keyboard())
                 USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
-
+            
             if messages_to_delete:
                 messages_to_delete.append(status_msg.id)
             else:
@@ -5140,8 +5140,8 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
             cmd = [
                 "ffmpeg", "-y",
                 "-i", str(in_path),
-                "-map", "0",
-                "-c", "copy",
+                "-map", "0", 
+                "-c", "copy", 
                 "-metadata", "title=[@TA_HD_Anime] Telegram Channel",
                 "-metadata:s:v", "title=[@TA_HD_Anime] Telegram Channel",
                 "-metadata:s:v", "handler_name=[@TA_HD_Anime] Telegram Channel",
@@ -5153,9 +5153,9 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
                 "-nostats",
                 str(processed_path)
             ]
-
+            
             if cancel_event.is_set(): raise Exception("Cancelled")
-
+            
             if orig_duration > 0:
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -5200,7 +5200,7 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
             thumb_path = USER_THUMBS.get(uid)
             if not thumb_path:
                 temp_thumb_path = TMP / f"thumb_{uid}_{int(datetime.now().timestamp())}.jpg"
-
+                
                 if uid in USER_THUMB_TIME:
                     thumb_time_sec = USER_THUMB_TIME[uid]
                 else:
@@ -5208,7 +5208,7 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
                         thumb_time_sec = 60
                     else:
                         thumb_time_sec = 1
-
+                        
                 ok = await generate_video_thumbnail(upload_path, temp_thumb_path, timestamp_sec=thumb_time_sec)
                 if ok:
                     thumb_path = str(temp_thumb_path)
@@ -5222,7 +5222,7 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
         except Exception:
              status_msg = await c.send_message(m.chat.id, "Starting upload...", reply_markup=progress_keyboard())
              USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
-
+             
         if messages_to_delete:
             if status_msg.id not in messages_to_delete:
                 messages_to_delete.append(status_msg.id)
@@ -5231,12 +5231,12 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
 
         if cancel_event.is_set():
             raise Exception("Cancelled")
-
+        
         # Determine caption logic
         use_orig_cap = False
         if not final_caption_template or uid in USE_ORIGINAL_CAPTION_IN_MULTI_GROUP:
             use_orig_cap = True
-
+            
         if use_orig_cap:
             if original_caption_passed:
                 caption_to_use = original_caption_passed
@@ -5247,43 +5247,43 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
         else:
             advance_dynamic_counters(uid)
             caption_to_use = process_dynamic_caption(uid, final_caption_template)
-
+            
         # Make caption bold
         caption_to_use = make_bold(caption_to_use)
 
         parts_to_upload = [(upload_path, target_name, None, duration_sec)]
-
-        MAX_SPLIT_SIZE = 1950 * 1024 * 1024
-        LIMIT_SIZE = 2000 * 1024 * 1024
+        
+        MAX_SPLIT_SIZE = 1950 * 1024 * 1024 
+        LIMIT_SIZE = 2000 * 1024 * 1024 
         if is_video_file and upload_path.exists() and upload_path.stat().st_size > LIMIT_SIZE and duration_sec > 0:
             try:
                 if status_msg:
                     await status_msg.edit("Video size is greater than 2000MB, splitting video into smaller parts...", reply_markup=progress_keyboard())
             except Exception: pass
-
+            
             num_parts = math.ceil(upload_path.stat().st_size / MAX_SPLIT_SIZE)
             base_chunk = duration_sec / num_parts
             split_parts = []
-
+            
             for i in range(num_parts):
                 s_time = i * base_chunk
                 e_time = (i + 1) * base_chunk
-
+                
                 if i > 0:
                     s_time -= 10
                 if i < num_parts - 1:
                     e_time += 10
-
+                
                 s_time = max(0, s_time)
                 e_time = min(duration_sec, e_time)
                 part_duration = e_time - s_time
-
+                
                 part_stem = Path(target_name).stem
                 part_ext = Path(target_name).suffix
                 part_target_name = f"{part_stem} - Part {i+1:02d}{part_ext}"
-
+                
                 part_path = TMP / f"split_{uid}_{int(datetime.now().timestamp())}_{i}_{target_name}"
-
+                
                 cmd = [
                     "ffmpeg",
                     "-y",
@@ -5293,35 +5293,35 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
                     "-c", "copy",
                     str(part_path)
                 ]
-
+                
                 if cancel_event.is_set(): raise Exception("Cancelled")
                 await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True, check=False)
-
+                
                 if part_path.exists() and part_path.stat().st_size > 0:
                     split_parts.append((part_path, part_target_name, i+1, part_duration))
-
+            
             if split_parts:
                 parts_to_upload = split_parts
 
         last_exc = None
         for current_upload_path, current_target_name, part_num, current_duration in parts_to_upload:
             if cancel_event.is_set(): raise Exception("Cancelled")
-
+            
             part_caption = caption_to_use
             if part_num is not None:
                 if part_caption.endswith("**"):
                     part_caption = part_caption[:-2] + f"\n✔️ Part - {part_num:02d}**"
                 else:
                     part_caption += f"\n✔️ Part - {part_num:02d}"
-
+                    
             part_caption = make_bold(part_caption)
-
+            
             try:
                 if status_msg:
                     action_text = f"Starting upload... {'(Part ' + str(part_num) + ')' if part_num else ''}"
                     await status_msg.edit(action_text, reply_markup=progress_keyboard())
             except Exception: pass
-
+            
             upload_attempts = 3
             part_success = False
             for attempt in range(1, upload_attempts + 1):
@@ -5346,7 +5346,7 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
                             width=width_px,
                             height=height_px,
                             supports_streaming=True,
-                            file_name=current_target_name,
+                            file_name=current_target_name, 
                             parse_mode=ParseMode.MARKDOWN,
                             progress=ul_prog
                         )
@@ -5368,7 +5368,7 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
                             parse_mode=ParseMode.MARKDOWN,
                             progress=ul_prog
                         )
-
+                    
                     part_success = True
                     last_exc = None
                     break
@@ -5378,9 +5378,9 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
                         break
                     logger.warning("Upload attempt %s failed for part %s: %s", attempt, part_num, e)
                     await asyncio.sleep(2 * attempt)
-
+            
             if not part_success:
-                break
+                break 
 
         if not last_exc:
             if messages_to_delete:
@@ -5388,7 +5388,7 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
                     await c.delete_messages(chat_id=m.chat.id, message_ids=messages_to_delete)
                 except Exception:
                     pass
-
+        
         if last_exc:
             raise last_exc
 
@@ -5402,11 +5402,11 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
                 in_path.unlink()
             if temp_thumb_path and Path(temp_thumb_path).exists():
                 Path(temp_thumb_path).unlink()
-
+            
             for p_path, _, p_num, _ in parts_to_upload:
                  if p_num is not None and p_path.exists():
                       p_path.unlink()
-
+                      
             if cancel_event in TASKS.get(uid, []): TASKS[uid].remove(cancel_event)
             if status_msg and status_msg.id in USER_TASK_EVENTS.get(uid, {}):
                 USER_TASK_EVENTS[uid].pop(status_msg.id)
@@ -5466,7 +5466,7 @@ def stream_remote_file():
     url = request.args.get('url')
     if not url:
         return "URL parameter is required.", 400
-
+        
     def generate():
         try:
             with requests.get(url, stream=True, timeout=15) as r:
@@ -5490,7 +5490,7 @@ def ping_service():
 
     # To handle local vs remote ping safely
     target_url = f"http://{RENDER_EXTERNAL_HOSTNAME}" if "http" not in RENDER_EXTERNAL_HOSTNAME else RENDER_EXTERNAL_HOSTNAME
-
+    
     while True:
         try:
             response = requests.get(target_url, timeout=10)
