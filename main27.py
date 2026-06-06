@@ -28,6 +28,7 @@ import shutil
 import socket
 import tarfile
 import email.message
+import mimetypes
 
 # For extended archive support (if available in environment)
 try:
@@ -184,6 +185,8 @@ MAX_SIZE = 1000 * 1024 * 1024 * 1024 # Increased to 1000GB
 # Updated workers to 1000 as requested, added sleep_threshold to prevent FloodWait crashes
 app = Client("mybot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=1000, sleep_threshold=86400)
 flask_app = Flask(__name__)
+
+MAIN_LOOP = None # Required for TG streaming
 
 # ---- utilities ----
 def get_unique_path(base_dir: Path, filename: str) -> Path:
@@ -801,6 +804,9 @@ async def get_filename_from_url(url):
             ext = ".mp4"
         fname = fname[:200 - len(ext)] + ext
         
+    if not fname:
+        fname = "downloaded_file"
+        
     return fname
 
 async def download_stream(resp, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
@@ -929,7 +935,17 @@ async def download_drive_file(file_id: str, out_path: Path, message: Message = N
 
 def process_dynamic_text_no_increment(uid, caption_template):
     if uid not in USER_COUNTERS:
-        return caption_template
+        USER_COUNTERS[uid] = {'uploads': 0, 'episode_numbers': {}, 'dynamic_counters': {}, 're_options_count': 0}
+    
+    # Initialize counters to ensure proper replacement
+    counter_matches = re.findall(r"\[\s*(\(?\d+\)?)\s*\]", caption_template)
+    for match in counter_matches:
+        if match not in USER_COUNTERS[uid].get('dynamic_counters', {}):
+            has_paren = match.startswith('(') and match.endswith(')')
+            clean_match = re.sub(r'[()]', '', match)
+            if 'dynamic_counters' not in USER_COUNTERS[uid]:
+                USER_COUNTERS[uid]['dynamic_counters'] = {}
+            USER_COUNTERS[uid]['dynamic_counters'][match] = {'value': int(clean_match), 'has_paren': has_paren}
     
     uploads = USER_COUNTERS[uid].get('uploads', 1)
     
@@ -937,7 +953,6 @@ def process_dynamic_text_no_increment(uid, caption_template):
     if quality_match:
         options_str = quality_match.group(1)
         options = [opt.strip() for opt in options_str.split(',')]
-        re_count = USER_COUNTERS[uid].get('re_options_count', len(options))
         current_index = (uploads - 1) % len(options) if uploads > 0 else 0
         current_quality = options[current_index]
         caption_template = caption_template.replace(quality_match.group(0), current_quality)
@@ -2407,11 +2422,13 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
     
     safe_name = f"zip_dl_{uid}_{int(time.time())}"
     if url:
-        original_name = await get_filename_from_url(url)
-        safe_name = re.sub(r"[\\/*?\"<>|:]", "_", original_name)
+        original_name_pass = await get_filename_from_url(url)
     elif local_path:
-        safe_name = Path(local_path).name
-            
+        original_name_pass = Path(local_path).name
+    else:
+        original_name_pass = m.video.file_name if getattr(m, 'video', None) else (m.document.file_name if getattr(m, 'document', None) else "telegram_file")
+
+    safe_name = re.sub(r"[\\/*?\"<>|:]", "_", original_name_pass)
     tmp_in = get_unique_path(TMP, safe_name)
     
     cancel_event = asyncio.Event()
@@ -2420,20 +2437,16 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
     
     try:
         ok, err = False, None
-        original_name_pass = safe_name
         if local_path:
             shutil.copy(local_path, tmp_in)
-            original_name_pass = tmp_in.name
             ok = True
         elif url:
-            original_name_pass = await get_filename_from_url(url)
             if is_drive_url(url):
                 fid = extract_drive_id(url)
                 if fid: ok, err = await download_drive_file(fid, tmp_in, status_msg, cancel_event, original_name=original_name_pass)
             else:
                 ok, err = await download_url_generic(url, tmp_in, status_msg, cancel_event, original_name=original_name_pass)
         else: # Telegram File
-            original_name_pass = m.video.file_name if m.video else (m.document.file_name if m.document else "telegram_file")
             start_t = time.time()
             async def dl_prog(current, total):
                 if cancel_event.is_set():
@@ -2784,8 +2797,9 @@ async def handle_convert_input(c, m, url=None, file_info=None, override_path=Non
         elif override_path:
             original_name = Path(override_path).name
             
+        safe_name = re.sub(r"[\\/*?\"<>|:]", "_", original_name)
         # FIX 2: Do not use prefix on local file download to keep path manager clean
-        tmp_in = get_unique_path(TMP, original_name)
+        tmp_in = get_unique_path(TMP, safe_name)
         
         ok = False
         if override_path:
@@ -3974,13 +3988,10 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
         fname = await get_filename_from_url(url)
         safe_name = re.sub(r"[\\/*?\"<>|:]", "_", fname)
 
+        # Removed forcing MP4 to keep original download name format intact
         if len(safe_name) > 100:
             ext = Path(safe_name).suffix
             safe_name = safe_name[:100 - len(ext)] + ext
-
-        video_exts = {".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm"}
-        if not any(safe_name.lower().endswith(ext) for ext in video_exts):
-            safe_name += ".mp4"
 
         tmp_in = get_unique_path(TMP, safe_name)
         ok, err = False, None
