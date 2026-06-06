@@ -4520,7 +4520,8 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
             except: pass
         for item in BATCH_AUDIO_LIST2.get(uid, []):
             try: Path(item['path']).unlink(missing_ok=True)
-            except: pass BATCH_AUDIO_LIST1.pop(uid, None)
+            except: pass
+    BATCH_AUDIO_LIST1.pop(uid, None)
         BATCH_AUDIO_LIST2.pop(uid, None)
         if uid in BATCH_AUDIO_QUEUES:
             while not BATCH_AUDIO_QUEUES[uid].empty():
