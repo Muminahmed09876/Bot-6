@@ -27,6 +27,7 @@ import zipfile
 import shutil
 import socket
 import tarfile
+import email.message
 
 # For extended archive support (if available in environment)
 try:
@@ -49,12 +50,29 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+PORT = int(os.getenv("PORT", "10000")) 
+
+# FIX 1: Auto detect Public IP for Direct Links if Render Hostname is not provided
+RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+if not RENDER_EXTERNAL_HOSTNAME:
+    try:
+        import urllib.request
+        _public_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf8')
+        RENDER_EXTERNAL_HOSTNAME = f"{_public_ip}:{PORT}"
+    except Exception:
+        try:
+            _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            _s.connect(("8.8.8.8", 80))
+            _local_ip = _s.getsockname()[0]
+            _s.close()
+            RENDER_EXTERNAL_HOSTNAME = f"{_local_ip}:{PORT}"
+        except Exception:
+            RENDER_EXTERNAL_HOSTNAME = f"localhost:{PORT}"
+
 # env
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PORT = int(os.getenv("PORT", "10000")) 
-RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME", f"localhost:{PORT}")
 COOKIES_TXT = os.getenv("COOKIES_TXT") # Added for yt-dlp cookies
 
 TMP = Path("tmp")
@@ -753,21 +771,20 @@ def generate_post_caption(data: dict) -> str:
     
     return final_caption
 
-
+# FIX 4: Robust filename parsing from URLs to prevent truncation
 async def get_filename_from_url(url):
     """Accurately detect filename from URL/Headers using regex without deprecated cgi module."""
     try:
-        # Optimized with IPv4 forcing to prevent slow DNS timeouts
         connector = aiohttp.TCPConnector(limit=0, family=socket.AF_INET, use_dns_cache=True, ttl_dns_cache=300)
         async with aiohttp.ClientSession(connector=connector) as sess:
             async with sess.head(url, allow_redirects=True, timeout=10) as resp:
                 cd = resp.headers.get('Content-Disposition')
                 if cd:
-                    # Using regex instead of deprecated cgi module
-                    fname_match = re.findall(r'filename\*?=(?:UTF-8\'\')?["\']?([^"\';\n]+)', cd, re.IGNORECASE)
-                    if fname_match:
-                        extracted_name = urllib.parse.unquote(fname_match[0])
-                        # Prevent OS filename length errors (Linux/Windows max is usually ~255 bytes)
+                    msg = email.message.EmailMessage()
+                    msg['content-disposition'] = cd
+                    extracted_name = msg.get_filename()
+                    if extracted_name:
+                        extracted_name = urllib.parse.unquote(extracted_name)
                         if len(extracted_name) > 200:
                             ext = Path(extracted_name).suffix
                             extracted_name = extracted_name[:200 - len(ext)] + ext
@@ -778,7 +795,6 @@ async def get_filename_from_url(url):
     fname = url.split("/")[-1].split("?")[0]
     fname = urllib.parse.unquote(fname)
     
-    # Prevent OS filename length errors for very long URLs
     if len(fname) > 200:
         ext = Path(fname).suffix
         if not ext or len(ext) > 20: 
@@ -824,7 +840,6 @@ async def download_url_generic(url: str, out_path: Path, message: Message = None
             downloaded = out_path.stat().st_size
             headers["Range"] = f"bytes={downloaded}-"
             
-        # Cloudflare DNS/IPv4 optimization for faster connection speed
         connector = aiohttp.TCPConnector(limit=0, family=socket.AF_INET, use_dns_cache=True, ttl_dns_cache=300)
         try:
             async with aiohttp.ClientSession(timeout=timeout, headers=headers, connector=connector) as sess:
@@ -857,7 +872,6 @@ async def download_drive_file(file_id: str, out_path: Path, message: Message = N
             downloaded = out_path.stat().st_size
             headers["Range"] = f"bytes={downloaded}-"
             
-        # DNS optimization for faster connectivity
         connector = aiohttp.TCPConnector(limit=0, family=socket.AF_INET, use_dns_cache=True, ttl_dns_cache=300)
         try:
             async with aiohttp.ClientSession(timeout=timeout, headers=headers, connector=connector) as sess:
@@ -1017,7 +1031,6 @@ async def process_queue_handler(uid, client):
     """Worker function that processes tasks sequentially for a user."""
     queue = USER_QUEUES[uid]
     while not queue.empty():
-        # Pause Logic handling
         while uid in USER_QUEUE_PAUSED:
             await asyncio.sleep(1)
             
@@ -1044,7 +1057,7 @@ async def process_queue_handler(uid, client):
                 safe_title = re.sub(r"[\\/*?\"<>|:]", "_", title)
                 if len(safe_title) > 100: safe_title = safe_title[:100]
                 
-                out_tmpl = str(TMP / f"yt_{uid}_{int(datetime.now().timestamp())}_{res}p_{safe_title}.%(ext)s")
+                out_tmpl = str(TMP / f"{safe_title}.%(ext)s") # FIX 2: Download strictly without dl_uid_prefix
                 
                 ydl_opts = {
                     'format': fmt,
@@ -1116,10 +1129,9 @@ async def process_queue_handler(uid, client):
                 # Start Processing
                 file_info = m.video or m.document
                 
-                tmp_path = get_unique_path(TMP, original_name)
+                tmp_path = get_unique_path(TMP, original_name) # FIX 2: Maintains original name downloaded
                 
                 try:
-                    # 1. Download Phase (Sequential)
                     if status_msg:
                         try:
                             await status_msg.edit("Downloading...", reply_markup=progress_keyboard())
@@ -1175,14 +1187,12 @@ async def process_queue_handler(uid, client):
         finally:
             queue.task_done()
     
-    # Cleanup when queue is empty
     if uid in USER_WORKERS: del USER_WORKERS[uid]
     if uid in USER_QUEUES: del USER_QUEUES[uid]
 
 
 @app.on_callback_query(filters.regex("refresh_btn"))
 async def refresh_btn_cb(c, cb):
-    # Sends a small refresh acknowledgment. AIOHTTP handles its own chunk restarts in generic.
     await cb.answer("Refreshed! Progress will update shortly...", show_alert=False)
 
 @app.on_callback_query(filters.regex("queue_continue"))
@@ -1196,7 +1206,6 @@ async def queue_continue_cb(c, cb):
 @app.on_callback_query(filters.regex("queue_delete"))
 async def queue_delete_cb(c, cb):
     uid = cb.from_user.id
-    # Clear queues
     if uid in USER_QUEUES:
         while not USER_QUEUES[uid].empty():
             try: 
@@ -2391,6 +2400,7 @@ def is_archive_file(filepath: Path) -> bool:
     except: pass
     return False
 
+# FIX 3: Py7zr + Robust Extraction
 async def execute_zip_download_and_extract(c, m, url=None, local_path=None, target_list=None, is_dl_only=False):
     uid = m.from_user.id
     status_msg = await c.send_message(m.chat.id, "Downloading Queue Item..." if url else "Processing Local Archive...", reply_markup=progress_keyboard())
@@ -2399,9 +2409,6 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
     if url:
         original_name = await get_filename_from_url(url)
         safe_name = re.sub(r"[\\/*?\"<>|:]", "_", original_name)
-        if len(safe_name) > 100:
-            ext = Path(safe_name).suffix
-            safe_name = safe_name[:100 - len(ext)] + ext
     elif local_path:
         safe_name = Path(local_path).name
             
@@ -2441,7 +2448,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
         if not is_archive_file(tmp_in):
             if is_dl_only:
                 if uid in DOWNLOAD_LINK_MODE:
-                    link = f"http://{RENDER_EXTERNAL_HOSTNAME}/dl/{tmp_in.name}"
+                    link = f"http://{RENDER_EXTERNAL_HOSTNAME}/dl/{urllib.parse.quote(tmp_in.name)}"
                     await status_msg.edit(f"✅ **File Downloaded:** `{tmp_in.name}`\n🔗 **Direct Link:** {link}")
                 else:
                     await status_msg.edit(f"✅ **File Downloaded:** `{tmp_in.name}`\nSaved to local storage.")
@@ -2466,7 +2473,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
         
         start_t = time.time()
         
-        # Extended 7z extraction logic integration
+        # FIX 3: Extended Extraction with Zip/Tar/Py7zr Python Native Fallbacks
         try:
             ext = tmp_in.suffix.lower()
             if ext == '.zip':
@@ -2487,11 +2494,22 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                         await asyncio.to_thread(rar_ref.extract, info, ext_dir)
                         extracted_size += info.file_size
                         await progress_callback(extracted_size, total_size, "Extracting RAR...", status_msg, start_t)
+            elif ext == '.7z' and 'py7zr' in globals():
+                with py7zr.SevenZipFile(tmp_in, mode='r') as sz_ref:
+                    await asyncio.to_thread(sz_ref.extractall, path=ext_dir)
+            elif ext in ['.tar', '.gz', '.bz2', '.xz']:
+                with tarfile.open(tmp_in, 'r:*') as tar_ref:
+                    await asyncio.to_thread(tar_ref.extractall, path=ext_dir)
             else:
-                # Use robust 7z fallback for all other archives including nested
-                cmd = ['7z', 'x', str(tmp_in), '-p-', '-aoa', f'-o{ext_dir}']
-                process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                await process.communicate()
+                # Use robust 7z fallback, if failed try python shutil unpack
+                try:
+                    cmd = ['7z', 'x', str(tmp_in), '-p-', '-aoa', f'-o{ext_dir}']
+                    process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    await process.communicate()
+                    if process.returncode != 0:
+                        raise Exception("7z extraction failed.")
+                except Exception:
+                    await asyncio.to_thread(shutil.unpack_archive, str(tmp_in), str(ext_dir))
         except Exception as e:
             logger.error(f"Archive Mode Error: {e}")
             await status_msg.edit(f"Extraction failed: {e}\nAdding the downloaded archive to list...", reply_markup=None)
@@ -2502,7 +2520,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                 return
             if is_dl_only:
                 if uid in DOWNLOAD_LINK_MODE:
-                    link = f"http://{RENDER_EXTERNAL_HOSTNAME}/dl/{tmp_in.name}"
+                    link = f"http://{RENDER_EXTERNAL_HOSTNAME}/dl/{urllib.parse.quote(tmp_in.name)}"
                     await status_msg.edit(f"✅ **Archive Downloaded (Extract Failed):** `{tmp_in.name}`\n🔗 **Direct Link:** {link}")
                 else:
                     await status_msg.edit(f"✅ **Archive Downloaded:** `{tmp_in.name}`\nSaved to local storage.")
@@ -2514,7 +2532,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
             await check_and_show_next_zip(c, m.chat.id, uid)
             return
             
-        # Recursive archive extraction using 7z primarily
+        # Recursive archive extraction
         found_zip = True
         while found_zip:
             found_zip = False
@@ -2523,9 +2541,27 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                     nested_zip_path = Path(root) / file
                     if is_archive_file(nested_zip_path):
                         try:
-                            cmd = ['7z', 'x', str(nested_zip_path), '-p-', '-aoa', f'-o{root}']
-                            process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            await process.communicate()
+                            n_ext = nested_zip_path.suffix.lower()
+                            if n_ext == '.zip':
+                                with zipfile.ZipFile(nested_zip_path, 'r') as nested_ref:
+                                    await asyncio.to_thread(nested_ref.extractall, root)
+                            elif n_ext == '.rar' and 'rarfile' in globals():
+                                with rarfile.RarFile(nested_zip_path, 'r') as nested_ref:
+                                    await asyncio.to_thread(nested_ref.extractall, root)
+                            elif n_ext == '.7z' and 'py7zr' in globals():
+                                with py7zr.SevenZipFile(nested_zip_path, mode='r') as sz_ref:
+                                    await asyncio.to_thread(sz_ref.extractall, path=root)
+                            elif n_ext in ['.tar', '.gz', '.bz2', '.xz']:
+                                with tarfile.open(nested_zip_path, 'r:*') as tar_ref:
+                                    await asyncio.to_thread(tar_ref.extractall, path=root)
+                            else:
+                                try:
+                                    cmd = ['7z', 'x', str(nested_zip_path), '-p-', '-aoa', f'-o{root}']
+                                    process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    await process.communicate()
+                                    if process.returncode != 0: raise Exception("7z fail")
+                                except Exception:
+                                    await asyncio.to_thread(shutil.unpack_archive, str(nested_zip_path), str(root))
                             nested_zip_path.unlink()
                             found_zip = True
                         except Exception as e:
@@ -2748,8 +2784,8 @@ async def handle_convert_input(c, m, url=None, file_info=None, override_path=Non
         elif override_path:
             original_name = Path(override_path).name
             
-        safe_name = re.sub(r"[\\/*?\"<>|:]", "_", original_name)
-        tmp_in = get_unique_path(TMP, safe_name)
+        # FIX 2: Do not use prefix on local file download to keep path manager clean
+        tmp_in = get_unique_path(TMP, original_name)
         
         ok = False
         if override_path:
@@ -4485,7 +4521,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
         for item in BATCH_AUDIO_LIST2.get(uid, []):
             try: Path(item['path']).unlink(missing_ok=True)
             except: pass
-        BATCH_AUDIO_LIST1.pop(uid, None)
+                BATCH_AUDIO_LIST1.pop(uid, None)
         BATCH_AUDIO_LIST2.pop(uid, None)
         if uid in BATCH_AUDIO_QUEUES:
             while not BATCH_AUDIO_QUEUES[uid].empty():
@@ -4836,7 +4872,7 @@ async def sequential_remux_upload_task(uid, c, m, in_path, out_name, new_stream_
                 capture_output=True,
                 text=True,
                 check=False,
-            timeout=3600
+                timeout=3600
             )
             
             if result.returncode != 0:
