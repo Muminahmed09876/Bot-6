@@ -4621,8 +4621,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
         BATCH_AUDIO_CURRENT_PAIR_IDX[uid] = len(pairs)
         await show_batch_audio_ui(c, cb.message.chat.id, uid)
 
-async def execute_batch_audio_remux
-(uid, c, chat_id):
+async def execute_batch_audio_remux(uid, c, chat_id):
     pairs = BATCH_AUDIO_MAPPING.get(uid, [])
     if not pairs: return
     
