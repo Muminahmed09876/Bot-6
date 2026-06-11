@@ -29,3 +29,4 @@ python-dotenv
 tor
 py7zr
 unzip
+gdown
