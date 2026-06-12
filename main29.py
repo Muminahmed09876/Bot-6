@@ -1,4 +1,4 @@
-```python
+python
 #!/usr/bin/env python3
 import os
 import re
@@ -290,7 +290,7 @@ def process_dynamic_caption(uid, caption_template, is_first_setup=False):
         target_num_str = re.sub(r'[^0-9]', '', match[1]).strip() 
         placeholder = re.escape(f"[{match[0].strip()} ({match[1].strip()})]")
         try:
-            target_num = int(target_num_str)
+            target_num = int(target_num_str)python
         except ValueError:
             caption_template = re.sub(placeholder, "", caption_template)
             continue
@@ -5884,4 +5884,3 @@ if __name__ == "__main__":
     except RuntimeError:
         pass
     app.run()
-```
