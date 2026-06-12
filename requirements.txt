@@ -30,3 +30,4 @@ tor
 py7zr
 unzip
 gdown
+rclone
