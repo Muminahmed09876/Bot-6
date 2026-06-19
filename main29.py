@@ -4,8 +4,6 @@ import re
 import aiohttp
 import asyncio
 import threading
-import secrets
-import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta
 from pyrogram import Client, filters
@@ -55,24 +53,29 @@ logger = logging.getLogger(__name__)
 
 PORT = int(os.getenv("PORT", "10000")) 
 
-# FIX 1: Improved Base URL detection for direct links
-PUBLIC_BASE_URL = None  # will be set from Flask request or env
-def get_base_url():
-    global PUBLIC_BASE_URL
-    if PUBLIC_BASE_URL:
-        return PUBLIC_BASE_URL
-    env_url = os.getenv("PUBLIC_URL")
-    if env_url:
-        return env_url.rstrip('/')
-    render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-    if render_host:
-        return f"http://{render_host}"
+# FIX 1: Auto detect Public IP for Direct Links if Render Hostname is not provided
+RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+if not RENDER_EXTERNAL_HOSTNAME:
     try:
         import urllib.request
-        ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf8')
-        return f"http://{ip}:{PORT}"
-    except:
-        return f"http://localhost:{PORT}"
+        _public_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf8')
+        RENDER_EXTERNAL_HOSTNAME = f"{_public_ip}:{PORT}"
+    except Exception:
+        try:
+            _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            _s.connect(("8.8.8.8", 80))
+            _local_ip = _s.getsockname()[0]
+            _s.close()
+            RENDER_EXTERNAL_HOSTNAME = f"{_local_ip}:{PORT}"
+        except Exception:
+            RENDER_EXTERNAL_HOSTNAME = f"localhost:{PORT}"
+
+# --- NEW: Allow custom public URL for file serving ---
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip()
+if PUBLIC_URL:
+    BASE_URL = PUBLIC_URL.rstrip('/')
+else:
+    BASE_URL = f"http://{RENDER_EXTERNAL_HOSTNAME}" if RENDER_EXTERNAL_HOSTNAME else ""
 
 # env
 API_ID = int(os.getenv("API_ID"))
@@ -183,13 +186,9 @@ DOWNLOAD_LINK_MODE = set()
 DOWNLOAD_T_MODE = set()
 # ----------------------------------------
 
-# --- NEW STATE FOR RCLONE (Google Drive) ---
-RCLONE_CONFIGURED = set()        # uids that have run rclone config
-RCLONE_REMOTE = {}               # uid -> remote name (e.g. "gdrive:")
-RCLONE_NAV_STATE = {}            # uid -> {"current": "remote:path", "items": [], "page": 0}
-RCLONE_TEMP_FILES = {}           # uid -> list of downloaded temp file paths
-RCLONE_CONFIG_STATE = {}         # uid -> {'step': 'awaiting_code', 'temp_config': path, 'remote_name': str}
-# -------------------------------------------
+# --- NEW STATE FOR MISSING EXTENSION PROMPT ---
+PENDING_EXTENSION = {}  # uid -> {file_path, original_message, action_type, action_data}
+# ----------------------------------------------
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", ""))
 MAX_SIZE = 1000 * 1024 * 1024 * 1024 # Increased to 1000GB
@@ -581,14 +580,7 @@ def get_audio_tracks_ffprobe(file_path: Path) -> list:
                     'title': title,
                     'language': language
                 })
-        # Remove duplicates based on stream_index (for safety)
-        seen = set()
-        unique = []
-        for t in audio_tracks:
-            if t['stream_index'] not in seen:
-                seen.add(t['stream_index'])
-                unique.append(t)
-        return unique
+        return audio_tracks
     except Exception as e:
         logger.error(f"FFprobe error: {e}")
         return []
@@ -702,7 +694,7 @@ async def update_batch_status(c, m, uid, status_text, reply_markup=None):
                 if u in BATCH_STATUS_MSG:
                     del BATCH_STATUS_MSG[u]
             except: pass
-        asyncio.ensure_future(auto_delete(msg, uid))
+        asyncio.ensure_future(auto_delete(msg, u))
 
 async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_dlp=False, fmt=None, title=None, res=None, original_caption=None):
     if uid not in USER_QUEUES:
@@ -795,7 +787,7 @@ def generate_post_caption(data: dict) -> str:
 
 # FIX 4: Robust filename parsing from URLs to prevent truncation
 async def get_filename_from_url(url):
-    """Accurately detect filename from URL/Headers without deprecated cgi module."""
+    """Accurately detect filename from URL/Headers using regex without deprecated cgi module."""
     try:
         connector = aiohttp.TCPConnector(limit=0, family=socket.AF_INET, use_dns_cache=True, ttl_dns_cache=300)
         async with aiohttp.ClientSession(connector=connector) as sess:
@@ -807,7 +799,6 @@ async def get_filename_from_url(url):
                     extracted_name = msg.get_filename()
                     if extracted_name:
                         extracted_name = urllib.parse.unquote(extracted_name)
-                        # Ensure we keep the extension
                         if len(extracted_name) > 200:
                             ext = Path(extracted_name).suffix
                             extracted_name = extracted_name[:200 - len(ext)] + ext
@@ -816,21 +807,16 @@ async def get_filename_from_url(url):
         pass
         
     parsed_url = urllib.parse.urlparse(url)
-    # Decode percent-encoded path
-    path = urllib.parse.unquote(parsed_url.path)
-    fname = os.path.basename(path)
-    # Remove query parameters if any (they are not in path)
-    if '?' in fname:
-        fname = fname.split('?')[0]
+    fname = os.path.basename(urllib.parse.unquote(parsed_url.path))
     
     if len(fname) > 200:
         ext = Path(fname).suffix
         if not ext or len(ext) > 20: 
-            ext = ".zip"  # default for zip mode
+            ext = ".mp4"
         fname = fname[:200 - len(ext)] + ext
         
-    if not fname or fname == '':
-        fname = "downloaded_file.zip"
+    if not fname:
+        fname = "downloaded_file.mp4"
         
     return fname
 
@@ -1048,8 +1034,6 @@ async def set_bot_commands():
         BotCommand("progress_bar", "Toggle progress bar ON/OFF or Custom Interval (admin only)"),
         BotCommand("continue", "Resume paused queue / Restore buttons"),
         BotCommand("restart", "Show Storage info and Clear Data"),
-        BotCommand("rclone", "Google Drive integration via rclone (admin only)"),
-        BotCommand("drive_upload", "Upload local file to Google Drive (admin only)"),
         BotCommand("help", "Help")
     ]
     try:
@@ -1099,7 +1083,7 @@ async def process_queue_handler(uid, client):
                 safe_title = re.sub(r"[\\/*?\"<>|:]", "_", title)
                 if len(safe_title) > 100: safe_title = safe_title[:100]
                 
-                out_tmpl = str(TMP / f"{safe_title}.%(ext)s")
+                out_tmpl = str(TMP / f"{safe_title}.%(ext)s") # FIX 2: Download strictly without dl_uid_prefix
                 
                 ydl_opts = {
                     'format': fmt,
@@ -1171,7 +1155,7 @@ async def process_queue_handler(uid, client):
                 # Start Processing
                 file_info = m.video or m.document
                 
-                tmp_path = get_unique_path(TMP, original_name)
+                tmp_path = get_unique_path(TMP, original_name) # FIX 2: Maintains original name downloaded
                 
                 try:
                     if status_msg:
@@ -1516,8 +1500,6 @@ async def start_handler(c, m: Message):
         "/progress_bar - Toggle progress bar ON/OFF or Custom Interval (admin only)\n"
         "/continue - Resume paused queue / Restore buttons\n"
         "/restart - Show Storage info and Clear Data\n"
-        "/rclone - Google Drive integration via rclone (admin only)\n"
-        "/drive_upload - Upload local file to Google Drive (admin only)\n"
         "/help - Help"
     )
     await m.reply_text(text)
@@ -1611,11 +1593,6 @@ async def full_reset_bot_cb(c, cb):
     DOWNLOAD_ONLY_MODE.clear()
     DOWNLOAD_LINK_MODE.clear()
     DOWNLOAD_T_MODE.clear()
-    RCLONE_CONFIGURED.clear()
-    RCLONE_REMOTE.clear()
-    RCLONE_NAV_STATE.clear()
-    RCLONE_TEMP_FILES.clear()
-    RCLONE_CONFIG_STATE.clear()
     
     if uid in USER_QUEUES:
         while not USER_QUEUES[uid].empty():
@@ -2492,17 +2469,35 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
         if not ok or not tmp_in.exists():
             raise Exception(f"Download Failed: {err}")
             
-        # If file has no extension, assume it's a zip and rename
+        # ---- NEW: For zip download mode, if file has no extension, we try to detect archive type and add extension ----
         if not tmp_in.suffix:
-            new_name = tmp_in.with_suffix('.zip')
-            tmp_in.rename(new_name)
-            tmp_in = new_name
-            original_name_pass = tmp_in.name
-            
+            # Try to detect archive type and add appropriate extension
+            if is_archive_file(tmp_in):
+                # Determine specific archive type by reading header
+                with open(tmp_in, 'rb') as f:
+                    header = f.read(4)
+                if header.startswith(b'PK\x03\x04'):
+                    new_path = tmp_in.with_suffix('.zip')
+                elif header.startswith(b'Rar!'):
+                    new_path = tmp_in.with_suffix('.rar')
+                elif header.startswith(b'7z\xbc\xaf'):
+                    new_path = tmp_in.with_suffix('.7z')
+                else:
+                    new_path = tmp_in.with_suffix('.zip')  # fallback to zip
+                tmp_in.rename(new_path)
+                tmp_in = new_path
+                original_name_pass = tmp_in.name
+            else:
+                # Not an archive, add .zip as fallback (user said if can't get original format, add .zip)
+                new_path = tmp_in.with_suffix('.zip')
+                tmp_in.rename(new_path)
+                tmp_in = new_path
+                original_name_pass = tmp_in.name
+
         if not is_archive_file(tmp_in):
             if is_dl_only:
                 if uid in DOWNLOAD_LINK_MODE:
-                    link = f"{get_base_url()}/dl/{urllib.parse.quote(tmp_in.name)}"
+                    link = f"{BASE_URL}/dl/{urllib.parse.quote(tmp_in.name)}"
                     await status_msg.edit(f"✅ **File Downloaded:** `{tmp_in.name}`\n🔗 **Direct Link:** {link}")
                 else:
                     await status_msg.edit(f"✅ **File Downloaded:** `{tmp_in.name}`\nSaved to local storage.")
@@ -2574,7 +2569,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                 return
             if is_dl_only:
                 if uid in DOWNLOAD_LINK_MODE:
-                    link = f"{get_base_url()}/dl/{urllib.parse.quote(tmp_in.name)}"
+                    link = f"{BASE_URL}/dl/{urllib.parse.quote(tmp_in.name)}"
                     await status_msg.edit(f"✅ **Archive Downloaded (Extract Failed):** `{tmp_in.name}`\n🔗 **Direct Link:** {link}")
                 else:
                     await status_msg.edit(f"✅ **Archive Downloaded:** `{tmp_in.name}`\nSaved to local storage.")
@@ -2645,7 +2640,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
             if uid in DOWNLOAD_LINK_MODE:
                 link_text = "**Extracted Files Direct Links:**\n"
                 for f in all_files:
-                    link = f"{get_base_url()}/dl/{urllib.parse.quote(f.relative_to(TMP).as_posix())}"
+                    link = f"{BASE_URL}/dl/{urllib.parse.quote(f.relative_to(TMP).as_posix())}"
                     link_text += f"‣ `{f.name}`\n🔗 {link}\n"
                 await c.send_message(m.chat.id, link_text, disable_web_page_preview=True)
             else:
@@ -2812,350 +2807,7 @@ async def process_path_uploads(uid, c, m, files_to_upload):
 
 # ----------------------------------------
 
-# --- RCLONE (Google Drive) WEB CONFIGURATION ---
-async def handle_rclone_config(c, m, remote_name="gdrive"):
-    """Interactive rclone config via Telegram without terminal."""
-    uid = m.from_user.id
-    status_msg = await m.reply_text("🔄 Initializing rclone config...")
-    
-    # Create a temporary config directory
-    temp_config_dir = TMP / f"rclone_config_{uid}_{int(time.time())}"
-    temp_config_dir.mkdir(parents=True, exist_ok=True)
-    config_file = temp_config_dir / "rclone.conf"
-    
-    # Run rclone config to generate a new remote interactively, but we'll use the "auto" method
-    # We'll create a remote with type "drive" using the "config" command with --auto
-    # Simpler: Use rclone config create with --drive-scope and then run rclone config reconnect
-    cmd_create = [
-        "rclone", "config", "create", remote_name, "drive",
-        "scope", "drive",
-        "config_is_local", "false"
-    ]
-    
-    proc = await asyncio.create_subprocess_exec(*cmd_create, cwd=str(temp_config_dir), env={**os.environ, "RCLONE_CONFIG": str(config_file)}, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = await proc.communicate()
-    
-    if proc.returncode != 0:
-        await status_msg.edit(f"Failed to create remote: {stderr.decode()}")
-        return
-    
-    # Now get the auth URL
-    cmd_link = ["rclone", "config", "reconnect", remote_name, "--auto"]
-    proc2 = await asyncio.create_subprocess_exec(*cmd_link, cwd=str(temp_config_dir), env={**os.environ, "RCLONE_CONFIG": str(config_file)}, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout2, stderr2 = await proc2.communicate()
-    
-    output = stdout2.decode() + stderr2.decode()
-    # Extract URL
-    url_match = re.search(r"https://accounts.google.com/o/oauth2/auth[^\s]+", output)
-    if not url_match:
-        # Maybe rclone printed a different message
-        await status_msg.edit(f"Could not extract auth URL. Output:\n{output[:500]}\n\nPlease run rclone config manually on server.")
-        return
-    
-    auth_url = url_match.group(0)
-    # Store state
-    RCLONE_CONFIG_STATE[uid] = {
-        'step': 'awaiting_code',
-        'temp_config_dir': str(temp_config_dir),
-        'config_file': str(config_file),
-        'remote_name': remote_name,
-        'status_msg_id': status_msg.id
-    }
-    
-    await status_msg.edit(
-        f"🔐 **Google Drive Authentication**\n\n"
-        f"1. Click the link below to authorize rclone:\n"
-        f"[Open Authorization Page]({auth_url})\n\n"
-        f"2. After granting permission, you will be redirected to a URL containing a `code=` parameter.\n"
-        f"3. **Copy the entire redirect URL** and send it here as a reply.\n\n"
-        f"Example: `https://localhost/?code=4/0AY0...`\n\n"
-        f"*If the page shows 'This site can't be reached', just copy the URL from the address bar.*"
-    )
-
-@app.on_message(filters.text & filters.private)
-async def rclone_config_code_handler(c, m: Message):
-    uid = m.from_user.id
-    if uid not in RCLONE_CONFIG_STATE:
-        return
-    state = RCLONE_CONFIG_STATE[uid]
-    if state['step'] != 'awaiting_code':
-        return
-    
-    text = m.text.strip()
-    # Extract code from URL
-    code_match = re.search(r"code=([^&]+)", text)
-    if not code_match:
-        await m.reply_text("Invalid response. Please send the full redirect URL containing 'code='.")
-        return
-    
-    auth_code = code_match.group(1)
-    temp_config_dir = Path(state['temp_config_dir'])
-    config_file = Path(state['config_file'])
-    remote_name = state['remote_name']
-    status_msg_id = state['status_msg_id']
-    status_msg = await c.get_messages(m.chat.id, status_msg_id)
-    
-    await status_msg.edit("🔄 Exchanging code for token...")
-    
-    # Use rclone config reconnect with the code
-    # We'll write the code to a temp file and use --rc
-    code_file = temp_config_dir / "code.txt"
-    code_file.write_text(auth_code)
-    
-    # Method: rclone config reconnect remote_name --auto --config <file> --state <code>
-    # Actually rclone expects the code via stdin or via a file? We'll use the --auto method but provide code
-    # Simpler: use rclone config reconfigure with --drive-auth-code
-    cmd = [
-        "rclone", "config", "reconnect", remote_name,
-        "--drive-auth-code", auth_code,
-        "--config", str(config_file)
-    ]
-    proc = await asyncio.create_subprocess_exec(*cmd, cwd=str(temp_config_dir), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    out, err = await proc.communicate()
-    
-    if proc.returncode != 0:
-        await status_msg.edit(f"Authentication failed: {err.decode()}")
-        return
-    
-    # Move config to default rclone config location
-    default_config_path = os.path.expanduser("~/.config/rclone/rclone.conf")
-    default_config_dir = Path(default_config_path).parent
-    default_config_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy(config_file, default_config_path)
-    
-    # Cleanup temp
-    shutil.rmtree(temp_config_dir, ignore_errors=True)
-    RCLONE_CONFIGURED.add(uid)
-    RCLONE_REMOTE[uid] = f"{remote_name}:"
-    del RCLONE_CONFIG_STATE[uid]
-    
-    await status_msg.edit(f"✅ rclone configured successfully! Remote name: `{remote_name}`\n\nNow you can use:\n`/rclone {remote_name}:` to browse your Google Drive.")
-
-# Modify the existing /rclone command to handle config if not configured
-@app.on_message(filters.command("rclone") & filters.private)
-async def rclone_cmd(c, m: Message):
-    uid = m.from_user.id
-    if not is_admin(uid):
-        await m.reply_text("Not authorized.")
-        return
-    
-    parts = m.text.split(maxsplit=1)
-    if len(parts) == 1:
-        if uid not in RCLONE_CONFIGURED:
-            await handle_rclone_config(c, m, "gdrive")
-        else:
-            remote = RCLONE_REMOTE.get(uid, "gdrive:")
-            await browse_rclone(c, m.chat.id, uid, remote)
-        return
-    else:
-        remote_input = parts[1].strip()
-        if not remote_input.endswith(':'):
-            remote_input += ':'
-        # Store remote name for future
-        RCLONE_REMOTE[uid] = remote_input
-        RCLONE_CONFIGURED.add(uid)
-        await browse_rclone(c, m.chat.id, uid, remote_input)
-
-# --- RCLONE helper functions ---
-async def browse_rclone(c, chat_id, uid, path):
-    """List rclone remote path and send UI"""
-    state = RCLONE_NAV_STATE[uid]
-    state['current'] = path
-    # Run rclone lsd and ls
-    cmd_lsd = ['rclone', 'lsd', path]
-    cmd_ls = ['rclone', 'ls', '--max-depth', '1', path]
-    try:
-        proc_lsd = await asyncio.create_subprocess_exec(*cmd_lsd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out_lsd, err_lsd = await proc_lsd.communicate()
-        proc_ls = await asyncio.create_subprocess_exec(*cmd_ls, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out_ls, err_ls = await proc_ls.communicate()
-        if err_lsd or err_ls:
-            await c.send_message(chat_id, f"Error listing rclone path: {err_lsd.decode()}{err_ls.decode()}")
-            return
-        # Parse output
-        dirs = []
-        files = []
-        for line in out_lsd.decode().splitlines():
-            if line.strip():
-                parts = line.split()
-                # format: "       0 2025-01-01 00:00:00        -1 SomeFolder"
-                dir_name = ' '.join(parts[4:])
-                dirs.append(dir_name)
-        for line in out_ls.decode().splitlines():
-            if line.strip():
-                # format: "    123456 2025-01-01 00:00:00 filename.ext"
-                parts = line.split()
-                fname = ' '.join(parts[3:])
-                files.append(fname)
-        items = []
-        for d in dirs:
-            items.append({'type': 'dir', 'name': d})
-        for f in files:
-            items.append({'type': 'file', 'name': f})
-        state['items'] = items
-        state['page'] = 0
-        await send_rclone_ui(c, chat_id, uid)
-    except Exception as e:
-        logger.error(f"rclone browse error: {e}")
-        await c.send_message(chat_id, f"rclone error: {e}")
-
-async def send_rclone_ui(c, chat_id, uid, msg_id=None):
-    state = RCLONE_NAV_STATE[uid]
-    items = state['items']
-    page = state.get('page', 0)
-    per_page = 20
-    total_pages = max(1, (len(items)+per_page-1)//per_page)
-    if page >= total_pages: page = total_pages-1
-    if page < 0: page = 0
-    start = page*per_page
-    end = min(start+per_page, len(items))
-    text = f"**Google Drive: {state['current']}**\nPage {page+1}/{total_pages}\n\n"
-    for i in range(start, end):
-        item = items[i]
-        icon = "📁" if item['type']=='dir' else "📄"
-        text += f"{i+1}. {icon} `{item['name']}`\n"
-    text += "\n**Commands:**\n"
-    text += "‣ Send number to open folder / select file.\n"
-    text += "‣ Send `u <number>` to download file (or folder) to local TMP and optionally add to batch lists.\n"
-    text += "‣ Send `d <number>` to delete file/folder (danger).\n"
-    text += "‣ Send `b` to go back.\n"
-    text += "‣ Send `np` / `pp` for next/prev page.\n"
-    text += "‣ Send `close` to exit rclone browser.\n"
-    if msg_id:
-        try:
-            await c.edit_message_text(chat_id, msg_id, text)
-        except:
-            pass
-    else:
-        msg = await c.send_message(chat_id, text)
-        # store msg id for later editing if needed
-
-async def process_rclone_selection(c, m, uid, text):
-    state = RCLONE_NAV_STATE.get(uid)
-    if not state:
-        return
-    text_lower = text.lower()
-    if text_lower == 'b':
-        # go to parent
-        current = state['current']
-        if ':' in current:
-            parts = current.split(':', 1)
-            if len(parts) == 2 and parts[1]:
-                new_path = parts[0] + ':' + '/'.join(parts[1].split('/')[:-1])
-                if new_path == parts[0] + ':':
-                    new_path = parts[0] + ':'
-            else:
-                new_path = current
-        else:
-            new_path = '/'.join(current.split('/')[:-1]) or '/'
-        await browse_rclone(c, m.chat.id, uid, new_path)
-        return
-    if text_lower == 'close':
-        RCLONE_NAV_STATE.pop(uid, None)
-        await m.reply_text("rclone browser closed.")
-        return
-    if text_lower == 'np':
-        state['page'] = state.get('page', 0) + 1
-        await send_rclone_ui(c, m.chat.id, uid)
-        return
-    if text_lower == 'pp':
-        state['page'] = max(0, state.get('page', 0) - 1)
-        await send_rclone_ui(c, m.chat.id, uid)
-        return
-    # Check for upload command: u <number>
-    if text_lower.startswith('u '):
-        try:
-            num = int(text_lower.split()[1]) - 1
-            if 0 <= num < len(state['items']):
-                item = state['items'][num]
-                full_path = state['current'] + '/' + item['name']
-                status_msg = await m.reply_text(f"Downloading {item['name']} from Google Drive...")
-                # Download to TMP using rclone copy
-                dest_dir = TMP / f"rclone_dl_{uid}_{int(time.time())}"
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                cmd = ['rclone', 'copy', full_path, str(dest_dir)]
-                proc = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                out, err = await proc.communicate()
-                if proc.returncode != 0:
-                    await status_msg.edit(f"Download failed: {err.decode()}")
-                    return
-                # Find downloaded file(s)
-                downloaded = list(dest_dir.iterdir())
-                if not downloaded:
-                    await status_msg.edit("No files downloaded.")
-                    return
-                # If in batch audio mode, add to respective list based on state
-                if uid in BATCH_AUDIO_MODE and BATCH_AUDIO_STATE.get(uid) in ['list1', 'list2']:
-                    target_list = BATCH_AUDIO_LIST1[uid] if BATCH_AUDIO_STATE[uid]=='list1' else BATCH_AUDIO_LIST2[uid]
-                    for f in downloaded:
-                        target_list.append({'path': str(f), 'name': f.name})
-                    await status_msg.edit(f"Added {len(downloaded)} file(s) to {'List 1' if BATCH_AUDIO_STATE[uid]=='list1' else 'List 2'}.")
-                elif uid in CONVERT_MODE:
-                    for f in downloaded:
-                        CONVERT_BATCH_LIST.setdefault(uid, []).append({'path': str(f), 'name': f.name})
-                    await status_msg.edit(f"Added {len(downloaded)} file(s) to Convert Batch List.")
-                else:
-                    # Normal upload via queue
-                    for f in downloaded:
-                        await add_to_queue(uid, c, m, f.name, is_url=False, original_caption=None)
-                    await status_msg.edit(f"Queued {len(downloaded)} file(s) for upload.")
-                # Cleanup? Keep files for now.
-                return
-        except Exception as e:
-            await m.reply_text(f"Error: {e}")
-            return
-    # Delete command
-    if text_lower.startswith('d '):
-        try:
-            num = int(text_lower.split()[1]) - 1
-            if 0 <= num < len(state['items']):
-                item = state['items'][num]
-                full_path = state['current'] + '/' + item['name']
-                confirm = await m.reply_text(f"Are you sure you want to delete `{item['name']}`? Reply with `yes` within 30 seconds.")
-                # We need a simple confirmation; for simplicity, we'll just delete without confirmation? Better with callback.
-                # For now, ask for confirmation via another message.
-                # Actually easier: use a callback query, but we are in text handler. We'll implement a simple state.
-                # Since this is complex, we'll skip and just delete after user sends 'yes'? But we can't wait.
-                # Alternatively, we can just delete directly? Danger. We'll implement a simple temporary state.
-                # We'll store a pending delete and ask user to confirm.
-                RCLONE_TEMP_FILES[uid] = full_path
-                await m.reply_text(f"To delete `{item['name']}`, type `confirm delete` within 30 seconds.")
-                return
-        except:
-            pass
-        return
-    # Open folder / select file (number only)
-    if text.isdigit():
-        num = int(text) - 1
-        if 0 <= num < len(state['items']):
-            item = state['items'][num]
-            if item['type'] == 'dir':
-                new_path = state['current'] + '/' + item['name']
-                await browse_rclone(c, m.chat.id, uid, new_path)
-            else:
-                # file selection: download and process
-                await m.reply_text("Use `u <number>` to download this file.")
-        return
-
-# Confirm delete handler (simplified)
-@app.on_message(filters.text & filters.private)
-async def rclone_confirm_delete(c, m):
-    uid = m.from_user.id
-    if uid in RCLONE_TEMP_FILES and m.text.lower() == 'confirm delete':
-        full_path = RCLONE_TEMP_FILES.pop(uid)
-        cmd = ['rclone', 'delete', full_path]
-        proc = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out, err = await proc.communicate()
-        if proc.returncode == 0:
-            await m.reply_text(f"Deleted `{full_path}`")
-        else:
-            await m.reply_text(f"Delete failed: {err.decode()}")
-        # Refresh browse
-        if uid in RCLONE_NAV_STATE:
-            await browse_rclone(c, m.chat.id, uid, RCLONE_NAV_STATE[uid]['current'])
-        return
-
-# --- CONVERT MODE LOGIC --- (unchanged, already above)
+# --- CONVERT MODE LOGIC ---
 async def process_convert_queue_worker(uid, client):
     """Processes covert tasks serially for a user to avoid CPU overload"""
     if uid not in CONVERT_LOCKS:
@@ -3182,6 +2834,7 @@ async def handle_convert_input(c, m, url=None, file_info=None, override_path=Non
             original_name = Path(override_path).name
             
         safe_name = re.sub(r"[\\/*?\"<>|:]", "_", original_name)
+        # FIX 2: Do not use prefix on local file download to keep path manager clean
         tmp_in = get_unique_path(TMP, safe_name)
         
         ok = False
@@ -3673,12 +3326,11 @@ async def text_handler(c, m: Message):
                     await m.reply_text(f"Deleted {len(files_to_process)} items.")
                     await send_path_ui(c, m.chat.id, uid, page=NAV_PATHS[uid].get('page', 0))
                 elif is_link:
-                    base_url = get_base_url()
                     link_text = "**Direct Download Links:**\n"
                     for f in files_to_process:
                         if f.is_file():
                             safe_path = urllib.parse.quote(f.relative_to(TMP).as_posix())
-                            link = f"{base_url}/dl/{safe_path}"
+                            link = f"{BASE_URL}/dl/{safe_path}"
                             link_text += f"‣ `{f.name}`\n🔗 {link}\n"
                     await m.reply_text(link_text, disable_web_page_preview=True)
                 elif is_rename:
@@ -3700,6 +3352,7 @@ async def text_handler(c, m: Message):
                         if is_archive_file(f):
                             if uid not in ZIP_DL_QUEUES: ZIP_DL_QUEUES[uid] = asyncio.Queue()
                             queue_msg = await m.reply_text(f"Queued manual extract: `{f.name}`")
+                            # Add is_dl_only flag to extract and keep in folder without uploading
                             await ZIP_DL_QUEUES[uid].put({'local_path': str(f), 'message': m, 'queue_msg': queue_msg, 'is_dl_only': True})
                     if uid not in ZIP_DL_WORKERS or ZIP_DL_WORKERS[uid].done():
                         ZIP_DL_WORKERS[uid] = asyncio.create_task(zip_download_worker(uid, c))
@@ -4152,16 +3805,11 @@ async def text_handler(c, m: Message):
             await m.reply_text("✅ Post creation successfully completed and additional messages deleted.")
             return
 
-    # Handle RCLONE browser commands if in rclone navigation state
-    if uid in RCLONE_NAV_STATE:
-        await process_rclone_selection(c, m, uid, text)
-        return
-
     if text.startswith("http://") or text.startswith("https://"):
         url = text
         if uid in DOWNLOAD_T_MODE:
             # Generate Stream Link logic
-            link = f"{get_base_url()}/stream?url={urllib.parse.quote(url)}"
+            link = f"{BASE_URL}/stream?url={urllib.parse.quote(url)}"
             await m.reply_text(f"🔗 **Direct Stream Link:**\n{link}", disable_web_page_preview=True)
             return
 
@@ -4278,6 +3926,32 @@ async def process_batch_audio_input(uid, c, m, url=None, file_info=None, target_
                 await m.download(file_name=str(tmp_in), progress=dl_prog)
                 
             if tmp_in.exists():
+                # Check for missing extension and prompt if needed (for non-zip modes)
+                # But for batch audio, we expect videos/audios. If no extension, prompt.
+                if not tmp_in.suffix:
+                    # Prompt user to choose extension
+                    PENDING_EXTENSION[uid] = {
+                        'file_path': tmp_in,
+                        'original_message': m,
+                        'action_type': 'batch_audio_input',
+                        'action_data': {
+                            'target_list': target_list,
+                            'list_num': list_num,
+                            'status_msg': status_msg
+                        }
+                    }
+                    # Show extension selection keyboard
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📁 .zip", callback_data="ext_zip"),
+                         InlineKeyboardButton("🎬 .mkv", callback_data="ext_mkv"),
+                         InlineKeyboardButton("🎬 .mp4", callback_data="ext_mp4")],
+                        [InlineKeyboardButton("🎵 .mp3", callback_data="ext_mp3"),
+                         InlineKeyboardButton("📄 .txt", callback_data="ext_txt"),
+                         InlineKeyboardButton("❌ Cancel", callback_data="ext_cancel")]
+                    ])
+                    await status_msg.edit("The file has no extension. Please choose an extension to add:", reply_markup=keyboard)
+                    return  # Wait for user choice
+
                 # Correctly Handle Zip Files if it is an archive
                 if is_archive_file(tmp_in):
                     await status_msg.delete()
@@ -4308,7 +3982,7 @@ async def upload_url_cmd(c, m: Message):
     uid = m.from_user.id
     
     if uid in DOWNLOAD_T_MODE:
-        link = f"{get_base_url()}/stream?url={urllib.parse.quote(url)}"
+        link = f"{BASE_URL}/stream?url={urllib.parse.quote(url)}"
         await m.reply_text(f"🔗 **Direct Stream Link:**\n{link}", disable_web_page_preview=True)
         return
 
@@ -4389,6 +4063,7 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
         fname = await get_filename_from_url(url)
         safe_name = re.sub(r"[\\/*?\"<>|:]", "_", fname)
 
+        # Removed forcing MP4 to keep original download name format intact
         if len(safe_name) > 100:
             ext = Path(safe_name).suffix
             safe_name = safe_name[:100 - len(ext)] + ext
@@ -4408,6 +4083,32 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
 
         if not ok:
             raise Exception(f"Download Failed: {err}")
+
+        # --- NEW: Check for missing extension ---
+        if not tmp_in.suffix:
+            # Prompt user to choose extension
+            PENDING_EXTENSION[uid] = {
+                'file_path': tmp_in,
+                'original_message': m,
+                'action_type': 'generic_upload',
+                'action_data': {
+                    'status_msg': status_msg,
+                    'cancel_event': cancel_event,
+                    'original_name': fname,
+                    'safe_name': safe_name
+                }
+            }
+            # Show extension selection keyboard
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📁 .zip", callback_data="ext_zip"),
+                 InlineKeyboardButton("🎬 .mkv", callback_data="ext_mkv"),
+                 InlineKeyboardButton("🎬 .mp4", callback_data="ext_mp4")],
+                [InlineKeyboardButton("🎵 .mp3", callback_data="ext_mp3"),
+                 InlineKeyboardButton("📄 .txt", callback_data="ext_txt"),
+                 InlineKeyboardButton("❌ Cancel", callback_data="ext_cancel")]
+            ])
+            await status_msg.edit("The file has no extension. Please choose an extension to add:", reply_markup=keyboard)
+            return  # Wait for user choice
 
         await status_msg.edit("Download complete. Uploading...", reply_markup=None)
         renamed_file = get_dynamic_filename(uid, tmp_in.name)
@@ -4577,7 +4278,7 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
 
     if uid in DOWNLOAD_T_MODE:
         # Generate stream link for telegram file
-        link = f"{get_base_url()}/stream?file_id={file_info.file_id}&filename={urllib.parse.quote(original_name)}"
+        link = f"{BASE_URL}/stream?file_id={file_info.file_id}&filename={urllib.parse.quote(original_name)}"
         await m.reply_text(f"🔗 **Direct Stream Link:**\n{link}", disable_web_page_preview=True)
         return
 
@@ -4722,17 +4423,13 @@ async def show_batch_audio_ui(c, chat_id, uid):
             tracks1 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid_path1)
             tracks2 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid_path2)
             
-            # Combine tracks, keeping track of their source (1 or 2)
-            combined_tracks = [{'src': 1, 'data': t} for t in tracks1] + [{'src': 2, 'data': t} for t in tracks2]
-            # Remove duplicates based on src and stream_index (only for List1 duplicates)
-            seen = set()
-            unique_combined = []
-            for t in combined_tracks:
-                key = (t['src'], t['data']['stream_index'])
-                if key not in seen:
-                    seen.add(key)
-                    unique_combined.append(t)
-            combined_tracks = unique_combined
+            # --- NEW: If the two files are the same (list2 is copy of list1), avoid duplication ---
+            if vid_path1 == vid_path2:
+                # Only use tracks from one source
+                combined_tracks = [{'src': 1, 'data': t} for t in tracks1]
+            else:
+                # Combine tracks, keeping track of their source (1 or 2)
+                combined_tracks = [{'src': 1, 'data': t} for t in tracks1] + [{'src': 2, 'data': t} for t in tracks2]
             
             BATCH_AUDIO_TRACK_CONFIGS[uid][str(pair_idx)] = {
                 'keep': [],
@@ -5001,15 +4698,6 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
             t1 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid1)
             t2 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid2)
             c_tracks = [{'src': 1, 'data': t} for t in t1] + [{'src': 2, 'data': t} for t in t2]
-            # Remove duplicates
-            seen = set()
-            unique = []
-            for t in c_tracks:
-                key = (t['src'], t['data']['stream_index'])
-                if key not in seen:
-                    seen.add(key)
-                    unique.append(t)
-            c_tracks = unique
             
             if len(c_tracks) != target_count:
                 # Stop auto applying if mismatch
@@ -5528,9 +5216,6 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
         is_video_file = getattr(m, 'video', None) or any(input_name.lower().endswith(ext) for ext in video_exts)
         is_audio_file = any(input_name.lower().endswith(ext) for ext in audio_exts)
         
-        # Handle files without extension: ask user to choose format (but we skip for simplicity, as we now have rclone)
-        # Instead, just add .zip if none and archive
-        
         orig_metadata = get_video_metadata(in_path) if is_video_file else {'duration': 0}
         orig_duration = orig_metadata.get('duration', 0)
         
@@ -5920,11 +5605,99 @@ def stream_remote_file():
     }
     return Response(generate(), headers=headers)
 
-def ping_service():
-    base = get_base_url()
-    if not base:
+# --- NEW: Extension selection callback ---
+@app.on_callback_query(filters.regex(r"^ext_"))
+async def extension_selection_cb(c: Client, cb: CallbackQuery):
+    uid = cb.from_user.id
+    data = cb.data
+    action = data[3:]  # ext_zip, ext_mkv, ext_mp4, ext_mp3, ext_txt, ext_cancel
+
+    # Retrieve pending extension state
+    pending = PENDING_EXTENSION.get(uid)
+    if not pending:
+        await cb.answer("No pending extension selection.", show_alert=True)
         return
-    target_url = f"{base}/"
+
+    if action == "cancel":
+        # Cancel: delete the file and clean up
+        file_path = pending['file_path']
+        if file_path.exists():
+            file_path.unlink(missing_ok=True)
+        PENDING_EXTENSION.pop(uid, None)
+        try:
+            await cb.message.edit_text("Extension selection cancelled. File deleted.")
+        except Exception:
+            pass
+        await cb.answer("Cancelled.", show_alert=True)
+        return
+
+    # Add selected extension
+    file_path = pending['file_path']
+    new_path = file_path.with_suffix(f".{action}")  # action is zip, mkv, mp4, etc.
+    try:
+        file_path.rename(new_path)
+    except Exception as e:
+        await cb.answer(f"Error renaming file: {e}", show_alert=True)
+        return
+
+    PENDING_EXTENSION.pop(uid, None)
+
+    # Now continue the original action
+    action_type = pending['action_type']
+    action_data = pending['action_data']
+
+    try:
+        if action_type == 'generic_upload':
+            # Continue with upload
+            status_msg = action_data['status_msg']
+            cancel_event = action_data['cancel_event']
+            fname = action_data['original_name']
+            safe_name = action_data['safe_name']
+            renamed_file = get_dynamic_filename(uid, new_path.name)
+
+            await status_msg.edit("Extension added. Uploading...", reply_markup=None)
+            asyncio.create_task(
+                sequential_upload_task(uid, c, pending['original_message'], new_path, renamed_file, status_msg.id, cancel_event, default_caption=safe_name, original_caption=fname, original_download_name=fname)
+            )
+
+        elif action_type == 'batch_audio_input':
+            # Continue batch audio input
+            target_list = action_data['target_list']
+            list_num = action_data['list_num']
+            status_msg = action_data['status_msg']
+
+            # Check if it's an archive now?
+            if is_archive_file(new_path):
+                await status_msg.delete()
+                # Execute extract using the already downloaded file path
+                await execute_zip_download_and_extract(c, pending['original_message'], url=None, local_path=str(new_path), target_list=target_list)
+                new_path.unlink(missing_ok=True)
+            else:
+                target_list.append({'path': str(new_path), 'name': new_path.name})
+                await status_msg.edit(f"URL/File added to {list_num}. Total: {len(target_list)}")
+
+        else:
+            # Unknown action, just report
+            await c.send_message(pending['original_message'].chat.id, "File extension added, but unknown action type.")
+
+    except Exception as e:
+        logger.error(f"Extension selection continuation error: {e}")
+        await cb.message.reply_text(f"Error continuing after extension: {e}")
+
+    await cb.answer(f"Extension .{action} added.", show_alert=True)
+    try:
+        await cb.message.delete()
+    except Exception:
+        pass
+
+def ping_service():
+    if not RENDER_EXTERNAL_HOSTNAME:
+        print("Render URL is not set. Ping service is disabled.")
+        return
+
+    # To handle local vs remote ping safely
+    target_url = f"http://{RENDER_EXTERNAL_HOSTNAME}" if "http" not in RENDER_EXTERNAL_HOSTNAME else RENDER_EXTERNAL_HOSTNAME
+    
     while True:
         try:
             response = requests.get(target_url, timeout=10)
@@ -5934,9 +5707,6 @@ def ping_service():
         time.sleep(600)
 
 def run_flask_and_ping():
-    # Set PUBLIC_BASE_URL from Flask's request context? we can't here. We'll set from env.
-    global PUBLIC_BASE_URL
-    PUBLIC_BASE_URL = get_base_url()
     flask_thread = threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=PORT, use_reloader=False))
     flask_thread.start()
     ping_thread = threading.Thread(target=ping_service)
