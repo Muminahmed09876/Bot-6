@@ -53,29 +53,29 @@ logger = logging.getLogger(__name__)
 
 PORT = int(os.getenv("PORT", "10000")) 
 
-# FIX 1: Auto detect Public IP for Direct Links if Render Hostname is not provided
-RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-if not RENDER_EXTERNAL_HOSTNAME:
-    try:
-        import urllib.request
-        _public_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf8')
-        RENDER_EXTERNAL_HOSTNAME = f"{_public_ip}:{PORT}"
-    except Exception:
+# ===== CHANGE 1: Use PUBLIC_BASE_URL instead of RENDER_EXTERNAL_HOSTNAME =====
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
+if not PUBLIC_BASE_URL:
+    RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+    if not RENDER_EXTERNAL_HOSTNAME:
         try:
-            _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            _s.connect(("8.8.8.8", 80))
-            _local_ip = _s.getsockname()[0]
-            _s.close()
-            RENDER_EXTERNAL_HOSTNAME = f"{_local_ip}:{PORT}"
+            import urllib.request
+            _public_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf8')
+            RENDER_EXTERNAL_HOSTNAME = f"{_public_ip}:{PORT}"
         except Exception:
-            RENDER_EXTERNAL_HOSTNAME = f"localhost:{PORT}"
-
-# --- NEW: Allow custom public URL for file serving ---
-PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip()
-if PUBLIC_URL:
-    BASE_URL = PUBLIC_URL.rstrip('/')
+            try:
+                _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                _s.connect(("8.8.8.8", 80))
+                _local_ip = _s.getsockname()[0]
+                _s.close()
+                RENDER_EXTERNAL_HOSTNAME = f"{_local_ip}:{PORT}"
+            except Exception:
+                RENDER_EXTERNAL_HOSTNAME = f"localhost:{PORT}"
+    PUBLIC_BASE_URL = f"http://{RENDER_EXTERNAL_HOSTNAME}"
 else:
-    BASE_URL = f"http://{RENDER_EXTERNAL_HOSTNAME}" if RENDER_EXTERNAL_HOSTNAME else ""
+    if not PUBLIC_BASE_URL.startswith(('http://', 'https://')):
+        PUBLIC_BASE_URL = f"http://{PUBLIC_BASE_URL}"
+# ========================================================================
 
 # env
 API_ID = int(os.getenv("API_ID"))
@@ -185,10 +185,6 @@ DOWNLOAD_ONLY_MODE = set()
 DOWNLOAD_LINK_MODE = set()
 DOWNLOAD_T_MODE = set()
 # ----------------------------------------
-
-# --- NEW STATE FOR MISSING EXTENSION PROMPT ---
-PENDING_EXTENSION = {}  # uid -> {file_path, original_message, action_type, action_data}
-# ----------------------------------------------
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", ""))
 MAX_SIZE = 1000 * 1024 * 1024 * 1024 # Increased to 1000GB
@@ -694,7 +690,7 @@ async def update_batch_status(c, m, uid, status_text, reply_markup=None):
                 if u in BATCH_STATUS_MSG:
                     del BATCH_STATUS_MSG[u]
             except: pass
-        asyncio.ensure_future(auto_delete(msg, u))
+        asyncio.ensure_future(auto_delete(msg, uid))
 
 async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_dlp=False, fmt=None, title=None, res=None, original_caption=None):
     if uid not in USER_QUEUES:
@@ -785,7 +781,7 @@ def generate_post_caption(data: dict) -> str:
     
     return final_caption
 
-# FIX 4: Robust filename parsing from URLs to prevent truncation
+# ===== CHANGE 2: Improved get_filename_from_url =====
 async def get_filename_from_url(url):
     """Accurately detect filename from URL/Headers using regex without deprecated cgi module."""
     try:
@@ -807,11 +803,24 @@ async def get_filename_from_url(url):
         pass
         
     parsed_url = urllib.parse.urlparse(url)
-    fname = os.path.basename(urllib.parse.unquote(parsed_url.path))
+    path = urllib.parse.unquote(parsed_url.path)
+    fname = os.path.basename(path)
     
+    # If fname is empty or too short (like "re"), try harder
+    if not fname or len(fname) < 3:
+        segments = path.split('/')
+        for seg in reversed(segments):
+            if seg and len(seg) > 2:
+                fname = seg
+                break
+        if not fname:
+            # Fallback: use a default name
+            fname = "downloaded_file"
+    
+    # Ensure extension is present (if not, caller may add)
     if len(fname) > 200:
         ext = Path(fname).suffix
-        if not ext or len(ext) > 20: 
+        if not ext or len(ext) > 20:
             ext = ".mp4"
         fname = fname[:200 - len(ext)] + ext
         
@@ -819,6 +828,7 @@ async def get_filename_from_url(url):
         fname = "downloaded_file.mp4"
         
     return fname
+# ========================================================================
 
 async def download_stream(resp, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
     total = 0
@@ -2469,35 +2479,11 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
         if not ok or not tmp_in.exists():
             raise Exception(f"Download Failed: {err}")
             
-        # ---- NEW: For zip download mode, if file has no extension, we try to detect archive type and add extension ----
-        if not tmp_in.suffix:
-            # Try to detect archive type and add appropriate extension
-            if is_archive_file(tmp_in):
-                # Determine specific archive type by reading header
-                with open(tmp_in, 'rb') as f:
-                    header = f.read(4)
-                if header.startswith(b'PK\x03\x04'):
-                    new_path = tmp_in.with_suffix('.zip')
-                elif header.startswith(b'Rar!'):
-                    new_path = tmp_in.with_suffix('.rar')
-                elif header.startswith(b'7z\xbc\xaf'):
-                    new_path = tmp_in.with_suffix('.7z')
-                else:
-                    new_path = tmp_in.with_suffix('.zip')  # fallback to zip
-                tmp_in.rename(new_path)
-                tmp_in = new_path
-                original_name_pass = tmp_in.name
-            else:
-                # Not an archive, add .zip as fallback (user said if can't get original format, add .zip)
-                new_path = tmp_in.with_suffix('.zip')
-                tmp_in.rename(new_path)
-                tmp_in = new_path
-                original_name_pass = tmp_in.name
-
         if not is_archive_file(tmp_in):
             if is_dl_only:
+                # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
                 if uid in DOWNLOAD_LINK_MODE:
-                    link = f"{BASE_URL}/dl/{urllib.parse.quote(tmp_in.name)}"
+                    link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(tmp_in.name)}"
                     await status_msg.edit(f"✅ **File Downloaded:** `{tmp_in.name}`\n🔗 **Direct Link:** {link}")
                 else:
                     await status_msg.edit(f"✅ **File Downloaded:** `{tmp_in.name}`\nSaved to local storage.")
@@ -2568,8 +2554,9 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                 target_list.append({'path': str(new_path), 'name': new_path.name})
                 return
             if is_dl_only:
+                # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
                 if uid in DOWNLOAD_LINK_MODE:
-                    link = f"{BASE_URL}/dl/{urllib.parse.quote(tmp_in.name)}"
+                    link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(tmp_in.name)}"
                     await status_msg.edit(f"✅ **Archive Downloaded (Extract Failed):** `{tmp_in.name}`\n🔗 **Direct Link:** {link}")
                 else:
                     await status_msg.edit(f"✅ **Archive Downloaded:** `{tmp_in.name}`\nSaved to local storage.")
@@ -2640,7 +2627,8 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
             if uid in DOWNLOAD_LINK_MODE:
                 link_text = "**Extracted Files Direct Links:**\n"
                 for f in all_files:
-                    link = f"{BASE_URL}/dl/{urllib.parse.quote(f.relative_to(TMP).as_posix())}"
+                    # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
+                    link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(f.relative_to(TMP).as_posix())}"
                     link_text += f"‣ `{f.name}`\n🔗 {link}\n"
                 await c.send_message(m.chat.id, link_text, disable_web_page_preview=True)
             else:
@@ -3330,7 +3318,8 @@ async def text_handler(c, m: Message):
                     for f in files_to_process:
                         if f.is_file():
                             safe_path = urllib.parse.quote(f.relative_to(TMP).as_posix())
-                            link = f"{BASE_URL}/dl/{safe_path}"
+                            # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
+                            link = f"{PUBLIC_BASE_URL}/dl/{safe_path}"
                             link_text += f"‣ `{f.name}`\n🔗 {link}\n"
                     await m.reply_text(link_text, disable_web_page_preview=True)
                 elif is_rename:
@@ -3372,6 +3361,7 @@ async def text_handler(c, m: Message):
         elif text_lower == "t":
             DOWNLOAD_T_MODE.add(uid)
             DOWNLOAD_LINK_MODE.discard(uid)
+            # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
             await m.reply_text("Telegram Stream Link Mode **ON**. Direct streaming link will be provided without downloading to local storage.")
             return
         elif text_lower == "off":
@@ -3808,8 +3798,8 @@ async def text_handler(c, m: Message):
     if text.startswith("http://") or text.startswith("https://"):
         url = text
         if uid in DOWNLOAD_T_MODE:
-            # Generate Stream Link logic
-            link = f"{BASE_URL}/stream?url={urllib.parse.quote(url)}"
+            # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
+            link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(url)}"
             await m.reply_text(f"🔗 **Direct Stream Link:**\n{link}", disable_web_page_preview=True)
             return
 
@@ -3926,32 +3916,6 @@ async def process_batch_audio_input(uid, c, m, url=None, file_info=None, target_
                 await m.download(file_name=str(tmp_in), progress=dl_prog)
                 
             if tmp_in.exists():
-                # Check for missing extension and prompt if needed (for non-zip modes)
-                # But for batch audio, we expect videos/audios. If no extension, prompt.
-                if not tmp_in.suffix:
-                    # Prompt user to choose extension
-                    PENDING_EXTENSION[uid] = {
-                        'file_path': tmp_in,
-                        'original_message': m,
-                        'action_type': 'batch_audio_input',
-                        'action_data': {
-                            'target_list': target_list,
-                            'list_num': list_num,
-                            'status_msg': status_msg
-                        }
-                    }
-                    # Show extension selection keyboard
-                    keyboard = InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📁 .zip", callback_data="ext_zip"),
-                         InlineKeyboardButton("🎬 .mkv", callback_data="ext_mkv"),
-                         InlineKeyboardButton("🎬 .mp4", callback_data="ext_mp4")],
-                        [InlineKeyboardButton("🎵 .mp3", callback_data="ext_mp3"),
-                         InlineKeyboardButton("📄 .txt", callback_data="ext_txt"),
-                         InlineKeyboardButton("❌ Cancel", callback_data="ext_cancel")]
-                    ])
-                    await status_msg.edit("The file has no extension. Please choose an extension to add:", reply_markup=keyboard)
-                    return  # Wait for user choice
-
                 # Correctly Handle Zip Files if it is an archive
                 if is_archive_file(tmp_in):
                     await status_msg.delete()
@@ -3982,7 +3946,8 @@ async def upload_url_cmd(c, m: Message):
     uid = m.from_user.id
     
     if uid in DOWNLOAD_T_MODE:
-        link = f"{BASE_URL}/stream?url={urllib.parse.quote(url)}"
+        # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
+        link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(url)}"
         await m.reply_text(f"🔗 **Direct Stream Link:**\n{link}", disable_web_page_preview=True)
         return
 
@@ -4083,32 +4048,6 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
 
         if not ok:
             raise Exception(f"Download Failed: {err}")
-
-        # --- NEW: Check for missing extension ---
-        if not tmp_in.suffix:
-            # Prompt user to choose extension
-            PENDING_EXTENSION[uid] = {
-                'file_path': tmp_in,
-                'original_message': m,
-                'action_type': 'generic_upload',
-                'action_data': {
-                    'status_msg': status_msg,
-                    'cancel_event': cancel_event,
-                    'original_name': fname,
-                    'safe_name': safe_name
-                }
-            }
-            # Show extension selection keyboard
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📁 .zip", callback_data="ext_zip"),
-                 InlineKeyboardButton("🎬 .mkv", callback_data="ext_mkv"),
-                 InlineKeyboardButton("🎬 .mp4", callback_data="ext_mp4")],
-                [InlineKeyboardButton("🎵 .mp3", callback_data="ext_mp3"),
-                 InlineKeyboardButton("📄 .txt", callback_data="ext_txt"),
-                 InlineKeyboardButton("❌ Cancel", callback_data="ext_cancel")]
-            ])
-            await status_msg.edit("The file has no extension. Please choose an extension to add:", reply_markup=keyboard)
-            return  # Wait for user choice
 
         await status_msg.edit("Download complete. Uploading...", reply_markup=None)
         renamed_file = get_dynamic_filename(uid, tmp_in.name)
@@ -4277,8 +4216,8 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
     original_name = file_info.file_name if file_info and file_info.file_name else f"file_{file_info.file_unique_id}"
 
     if uid in DOWNLOAD_T_MODE:
-        # Generate stream link for telegram file
-        link = f"{BASE_URL}/stream?file_id={file_info.file_id}&filename={urllib.parse.quote(original_name)}"
+        # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
+        link = f"{PUBLIC_BASE_URL}/stream?file_id={file_info.file_id}&filename={urllib.parse.quote(original_name)}"
         await m.reply_text(f"🔗 **Direct Stream Link:**\n{link}", disable_web_page_preview=True)
         return
 
@@ -4387,7 +4326,7 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
 
     await add_to_queue(uid, c, m, original_name, is_url=False, original_caption=m.caption)
 
-# --- BATCH AUDIO UI & LOGIC ---
+# ===== CHANGE 3: Fix duplicate audio tracks in batch_audio_add when list2 is empty =====
 async def show_batch_audio_ui(c, chat_id, uid):
     pair_idx = BATCH_AUDIO_CURRENT_PAIR_IDX[uid]
     pairs = BATCH_AUDIO_MAPPING[uid]
@@ -4423,13 +4362,19 @@ async def show_batch_audio_ui(c, chat_id, uid):
             tracks1 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid_path1)
             tracks2 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid_path2)
             
-            # --- NEW: If the two files are the same (list2 is copy of list1), avoid duplication ---
-            if vid_path1 == vid_path2:
-                # Only use tracks from one source
-                combined_tracks = [{'src': 1, 'data': t} for t in tracks1]
-            else:
-                # Combine tracks, keeping track of their source (1 or 2)
-                combined_tracks = [{'src': 1, 'data': t} for t in tracks1] + [{'src': 2, 'data': t} for t in tracks2]
+            # ===== CHANGE 3: If tracks2 is empty, remove duplicates from tracks1 =====
+            if not tracks2:
+                seen = set()
+                unique_tracks = []
+                for t in tracks1:
+                    key = (t.get('language', 'und'), t.get('title', 'N/A'))
+                    if key not in seen:
+                        seen.add(key)
+                        unique_tracks.append(t)
+                tracks1 = unique_tracks
+
+            # Combine tracks, keeping track of their source (1 or 2)
+            combined_tracks = [{'src': 1, 'data': t} for t in tracks1] + [{'src': 2, 'data': t} for t in tracks2]
             
             BATCH_AUDIO_TRACK_CONFIGS[uid][str(pair_idx)] = {
                 'keep': [],
@@ -4501,7 +4446,7 @@ async def show_batch_audio_ui(c, chat_id, uid):
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
             logger.error(f"UI edit error: {e}")
-    
+# ========================================================================
 
 @app.on_callback_query(filters.regex(r"^baud_"))
 async def batch_audio_callback(c: Client, cb: CallbackQuery):
@@ -4697,6 +4642,16 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
             # Reconstruct combined tracks for this pair to check count
             t1 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid1)
             t2 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid2)
+            # If list2 is empty, apply same duplicate removal logic
+            if not t2:
+                seen = set()
+                unique_tracks = []
+                for t in t1:
+                    key = (t.get('language', 'und'), t.get('title', 'N/A'))
+                    if key not in seen:
+                        seen.add(key)
+                        unique_tracks.append(t)
+                t1 = unique_tracks
             c_tracks = [{'src': 1, 'data': t} for t in t1] + [{'src': 2, 'data': t} for t in t2]
             
             if len(c_tracks) != target_count:
@@ -5604,91 +5559,6 @@ def stream_remote_file():
         'Content-Type': mime_type
     }
     return Response(generate(), headers=headers)
-
-# --- NEW: Extension selection callback ---
-@app.on_callback_query(filters.regex(r"^ext_"))
-async def extension_selection_cb(c: Client, cb: CallbackQuery):
-    uid = cb.from_user.id
-    data = cb.data
-    action = data[3:]  # ext_zip, ext_mkv, ext_mp4, ext_mp3, ext_txt, ext_cancel
-
-    # Retrieve pending extension state
-    pending = PENDING_EXTENSION.get(uid)
-    if not pending:
-        await cb.answer("No pending extension selection.", show_alert=True)
-        return
-
-    if action == "cancel":
-        # Cancel: delete the file and clean up
-        file_path = pending['file_path']
-        if file_path.exists():
-            file_path.unlink(missing_ok=True)
-        PENDING_EXTENSION.pop(uid, None)
-        try:
-            await cb.message.edit_text("Extension selection cancelled. File deleted.")
-        except Exception:
-            pass
-        await cb.answer("Cancelled.", show_alert=True)
-        return
-
-    # Add selected extension
-    file_path = pending['file_path']
-    new_path = file_path.with_suffix(f".{action}")  # action is zip, mkv, mp4, etc.
-    try:
-        file_path.rename(new_path)
-    except Exception as e:
-        await cb.answer(f"Error renaming file: {e}", show_alert=True)
-        return
-
-    PENDING_EXTENSION.pop(uid, None)
-
-    # Now continue the original action
-    action_type = pending['action_type']
-    action_data = pending['action_data']
-
-    try:
-        if action_type == 'generic_upload':
-            # Continue with upload
-            status_msg = action_data['status_msg']
-            cancel_event = action_data['cancel_event']
-            fname = action_data['original_name']
-            safe_name = action_data['safe_name']
-            renamed_file = get_dynamic_filename(uid, new_path.name)
-
-            await status_msg.edit("Extension added. Uploading...", reply_markup=None)
-            asyncio.create_task(
-                sequential_upload_task(uid, c, pending['original_message'], new_path, renamed_file, status_msg.id, cancel_event, default_caption=safe_name, original_caption=fname, original_download_name=fname)
-            )
-
-        elif action_type == 'batch_audio_input':
-            # Continue batch audio input
-            target_list = action_data['target_list']
-            list_num = action_data['list_num']
-            status_msg = action_data['status_msg']
-
-            # Check if it's an archive now?
-            if is_archive_file(new_path):
-                await status_msg.delete()
-                # Execute extract using the already downloaded file path
-                await execute_zip_download_and_extract(c, pending['original_message'], url=None, local_path=str(new_path), target_list=target_list)
-                new_path.unlink(missing_ok=True)
-            else:
-                target_list.append({'path': str(new_path), 'name': new_path.name})
-                await status_msg.edit(f"URL/File added to {list_num}. Total: {len(target_list)}")
-
-        else:
-            # Unknown action, just report
-            await c.send_message(pending['original_message'].chat.id, "File extension added, but unknown action type.")
-
-    except Exception as e:
-        logger.error(f"Extension selection continuation error: {e}")
-        await cb.message.reply_text(f"Error continuing after extension: {e}")
-
-    await cb.answer(f"Extension .{action} added.", show_alert=True)
-    try:
-        await cb.message.delete()
-    except Exception:
-        pass
 
 def ping_service():
     if not RENDER_EXTERNAL_HOSTNAME:
