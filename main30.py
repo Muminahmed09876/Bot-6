@@ -6000,7 +6000,7 @@ async def post_tool_callback(c: Client, cb: CallbackQuery):
         await post_main_menu(c, uid=uid, chat_id=cb.message.chat.id)
 
 # ---- Handle media/caption/button inputs during post editing ----
-@app.on_message(filters.private & ~filters.command() & ~filters.forwarded())
+@app.on_message(filters.private & ~filters.command("") & ~filters.forwarded)
 async def post_edit_input_handler(c: Client, m: Message):
     uid = m.from_user.id
     if uid not in POST_MODE:
