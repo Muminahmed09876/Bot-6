@@ -5905,8 +5905,8 @@ async def post_forward_handler(c: Client, m: Message):
             await m.reply_text("Please use the main menu to start a new post or add channels.")
 
 # ---- Handler for direct messages in Post Mode (text or media) ----
-@app.on_message(filters.private & ~filters.forwarded & (filters.text | filters.photo | filters.video | filters.document))
-async def post_direct_handler(c: Client, m: Message):
+@app.on_message(filters.private & ~filters.command() & ~filters.forwarded)   # <--- FIXED LINE
+async def post_edit_input_handler(c: Client, m: Message):
     uid = m.from_user.id
     if uid not in POST_MODE:
         return
@@ -6000,7 +6000,7 @@ async def post_tool_callback(c: Client, cb: CallbackQuery):
         await post_main_menu(c, uid=uid, chat_id=cb.message.chat.id)
 
 # ---- Handle media/caption/button inputs during post editing ----
-@app.on_message(filters.private & ~filters.command("") & ~filters.forwarded)
+@app.on_message(filters.private & ~filters.command() & ~filters.forwarded)   # <--- FIXED LINE
 async def post_edit_input_handler(c: Client, m: Message):
     uid = m.from_user.id
     if uid not in POST_MODE:
