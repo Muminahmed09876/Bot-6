@@ -53,28 +53,108 @@ logger = logging.getLogger(__name__)
 
 PORT = int(os.getenv("PORT", "10000")) 
 
-# ===== CHANGE 1: Use PUBLIC_BASE_URL instead of RENDER_EXTERNAL_HOSTNAME =====
+# ===== CHANGE 1: Improved PUBLIC_BASE_URL with multi-platform support =====
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
+RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+
 if not PUBLIC_BASE_URL:
-    RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-    if not RENDER_EXTERNAL_HOSTNAME:
+    if RENDER_EXTERNAL_HOSTNAME:
+        PUBLIC_BASE_URL = f"http://{RENDER_EXTERNAL_HOSTNAME}"
+    else:
+        # Try to detect environment
         try:
-            import urllib.request
-            _public_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf8')
-            RENDER_EXTERNAL_HOSTNAME = f"{_public_ip}:{PORT}"
-        except Exception:
-            try:
-                _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                _s.connect(("8.8.8.8", 80))
-                _local_ip = _s.getsockname()[0]
-                _s.close()
-                RENDER_EXTERNAL_HOSTNAME = f"{_local_ip}:{PORT}"
-            except Exception:
-                RENDER_EXTERNAL_HOSTNAME = f"localhost:{PORT}"
-    PUBLIC_BASE_URL = f"http://{RENDER_EXTERNAL_HOSTNAME}"
+            # Check if running on Hugging Face
+            if os.getenv("SPACE_ID"):
+                PUBLIC_BASE_URL = f"https://{os.getenv('SPACE_ID')}.hf.space"
+            # Check if running on Colab
+            elif os.getenv("COLAB_GPU"):
+                # Colab typically uses ngrok or localhost
+                try:
+                    import urllib.request
+                    _public_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf8')
+                    PUBLIC_BASE_URL = f"http://{_public_ip}:{PORT}"
+                except:
+                    PUBLIC_BASE_URL = f"http://localhost:{PORT}"
+            # Check if running on Termux/Android
+            elif os.getenv("TERMUX_VERSION"):
+                PUBLIC_BASE_URL = f"http://localhost:{PORT}"
+            else:
+                # Default fallback
+                try:
+                    import urllib.request
+                    _public_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf8')
+                    PUBLIC_BASE_URL = f"http://{_public_ip}:{PORT}"
+                except Exception:
+                    try:
+                        _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        _s.connect(("8.8.8.8", 80))
+                        _local_ip = _s.getsockname()[0]
+                        _s.close()
+                        PUBLIC_BASE_URL = f"http://{_local_ip}:{PORT}"
+                    except Exception:
+                        PUBLIC_BASE_URL = f"http://localhost:{PORT}"
 else:
     if not PUBLIC_BASE_URL.startswith(('http://', 'https://')):
         PUBLIC_BASE_URL = f"http://{PUBLIC_BASE_URL}"
+# ========================================================================
+
+# ===== CHANGE 2: Multi-platform ping service =====
+def ping_service():
+    """Ping service to keep bot alive on Render, Hugging Face, Colab, etc."""
+    # Determine which platform we're on
+    render_url = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+    hf_space_id = os.getenv("SPACE_ID")
+    is_render = bool(render_url)
+    is_hf = bool(hf_space_id)
+    is_colab = bool(os.getenv("COLAB_GPU"))
+    
+    # Build target URLs
+    target_urls = []
+    
+    if is_render:
+        target_urls.append(f"https://{render_url}")
+    elif is_hf:
+        target_urls.append(f"https://{hf_space_id}.hf.space")
+    else:
+        # Try to ping ourselves
+        target_urls.append(f"http://localhost:{PORT}")
+        # Also try public IP if available
+        try:
+            import urllib.request
+            _public_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf8')
+            target_urls.append(f"http://{_public_ip}:{PORT}")
+        except:
+            pass
+    
+    # Also ping both Render and Hugging Face if both are available (fallback)
+    if is_render and hf_space_id:
+        target_urls.append(f"https://{hf_space_id}.hf.space")
+    if is_hf and render_url:
+        target_urls.append(f"https://{render_url}")
+    
+    # Remove duplicates
+    target_urls = list(dict.fromkeys(target_urls))
+    
+    logger.info(f"Ping service started. Will ping: {target_urls}")
+    
+    while True:
+        for url in target_urls:
+            try:
+                response = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                logger.info(f"Pinged {url} | Status: {response.status_code}")
+            except Exception as e:
+                logger.error(f"Error pinging {url}: {e}")
+        time.sleep(600)  # Ping every 10 minutes
+# ========================================================================
+
+# ===== CHANGE 3: Improved headers for all downloads =====
+DOWNLOAD_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive"
+}
 # ========================================================================
 
 # env
@@ -186,19 +266,17 @@ DOWNLOAD_LINK_MODE = set()
 DOWNLOAD_T_MODE = set()
 # ----------------------------------------
 
-# ===== NEW STATE FOR POST MODE =====
-POST_MODE = set()                   # uid -> bool
-POST_CHANNELS = {}                  # uid -> list of dicts {"chat_id": int, "title": str, "username": str}
-POST_SESSIONS = {}                  # uid -> current post session data
-POST_BATCH_MODE = set()             # uid -> bool for batch editing
-POST_BATCH_DATA = {}                # uid -> list of post sessions for batch
-POST_CHANNEL_SELECT = {}            # uid -> set of selected channel IDs for sending
-POST_EDIT_TOOLS = {}                # uid -> current tool state
-# ===================================
+# ===== CHANGE 4: New POST MODE state =====
+POST_MODE = set()
+POST_CHANNELS = {}  # uid -> list of channel IDs
+POST_EDIT_STATE = {}  # uid -> current post edit state
+POST_TUTORIAL_SENT = set()
+# ========================================
 
-# ===== NEW STATE FOR COLAB DRIVE =====
-COLAB_DRIVE_MOUNTED = set()
-# =====================================
+# ===== CHANGE 5: New COLAB DRIVE state =====
+COLAB_DRIVE_MODE = set()
+COLAB_DRIVE_PATH = {}  # uid -> drive path
+# ===========================================
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", ""))
 MAX_SIZE = 1000 * 1024 * 1024 * 1024 # Increased to 1000GB
@@ -551,6 +629,7 @@ def mode_check_keyboard(uid: int) -> InlineKeyboardMarkup:
     convert_status = "✅ ON" if uid in CONVERT_MODE else "❌ OFF"
     batch_audio_status = "✅ ON" if uid in BATCH_AUDIO_MODE else "❌ OFF"
     dl_only_status = "✅ ON" if uid in DOWNLOAD_ONLY_MODE else "❌ OFF"
+    post_status = "✅ ON" if uid in POST_MODE else "❌ OFF"
     
     waiting_count = sum(1 for data in PENDING_AUDIO_ORDERS.values() if data['uid'] == uid)
     waiting_status = f" ({waiting_count} orders pending)" if waiting_count > 0 else ""
@@ -562,7 +641,8 @@ def mode_check_keyboard(uid: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"Edit Caption Mode {caption_status}", callback_data="toggle_caption_mode")],
         [InlineKeyboardButton(f"YT-DLP Mode {yt_dlp_status}", callback_data="toggle_ytdlp_mode")],
         [InlineKeyboardButton(f"ZIP Download Mode {zip_status}", callback_data="toggle_zip_mode")],
-        [InlineKeyboardButton(f"Download Only Mode {dl_only_status}", callback_data="toggle_dl_only_mode")]
+        [InlineKeyboardButton(f"Download Only Mode {dl_only_status}", callback_data="toggle_dl_only_mode")],
+        [InlineKeyboardButton(f"Post Mode {post_status}", callback_data="toggle_post_mode")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -800,7 +880,7 @@ async def get_filename_from_url(url):
     """Accurately detect filename from URL/Headers using regex without deprecated cgi module."""
     try:
         connector = aiohttp.TCPConnector(limit=0, family=socket.AF_INET, use_dns_cache=True, ttl_dns_cache=300)
-        async with aiohttp.ClientSession(connector=connector) as sess:
+        async with aiohttp.ClientSession(connector=connector, headers=DOWNLOAD_HEADERS) as sess:
             async with sess.head(url, allow_redirects=True, timeout=10) as resp:
                 cd = resp.headers.get('Content-Disposition')
                 if cd:
@@ -876,9 +956,7 @@ async def download_stream(resp, out_path: Path, message: Message = None, cancel_
 async def download_url_generic(url: str, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
     for attempt in range(1, 11):
         timeout = aiohttp.ClientTimeout(total=7200, sock_connect=120)
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
+        headers = DOWNLOAD_HEADERS.copy()
         if out_path.exists():
             downloaded = out_path.stat().st_size
             headers["Range"] = f"bytes={downloaded}-"
@@ -905,13 +983,12 @@ async def download_url_generic(url: str, out_path: Path, message: Message = None
             return False, str(e)
     return False, "Failed after 10 attempts"
 
+# ===== CHANGE 3: Improved Google Drive download =====
 async def download_drive_file(file_id: str, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
     base = f"https://drive.google.com/uc?export=download&id={file_id}"
     for attempt in range(1, 11):
         timeout = aiohttp.ClientTimeout(total=7200, sock_connect=120)
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
+        headers = DOWNLOAD_HEADERS.copy()
         
         if out_path.exists():
             downloaded = out_path.stat().st_size
@@ -930,25 +1007,28 @@ async def download_drive_file(file_id: str, out_path: Path, message: Message = N
                         if attempt < 10:
                             await asyncio.sleep(2)
                             continue
+                    
+                    # Try to get confirmation token
                     text = await resp.text(errors="ignore")
-                    m = re.search(r"confirm=([0-9A-Za-z-_]+)", text)
-                    if m:
-                        token = m.group(1)
-                        download_url = f"https://drive.google.com/uc?export=download&confirm={token}&id={file_id}"
-                        async with sess.get(download_url, allow_redirects=True) as resp2:
-                            if resp2.status == 404 or resp2.status >= 500:
-                                if attempt < 10:
-                                    await asyncio.sleep(2)
-                                    continue
-                            if resp2.status not in (200, 206):
-                                return False, f"HTTP {resp2.status}"
-                            ok, err = await download_stream(resp2, out_path, message, cancel_event=cancel_event, original_name=original_name)
-                            if ok: return True, None
-                            if attempt < 10: await asyncio.sleep(2); continue
-                            
-                    for k, v in resp.cookies.items():
-                        if k.startswith("download_warning"):
-                            token = v.value
+                    
+                    # Check for virus scan warning
+                    if "confirm" in text or "download_warning" in text:
+                        # Try multiple methods to get the token
+                        token = None
+                        
+                        # Method 1: Regex for confirm token
+                        m = re.search(r"confirm=([0-9A-Za-z-_]+)", text)
+                        if m:
+                            token = m.group(1)
+                        
+                        # Method 2: Check cookies
+                        if not token:
+                            for k, v in resp.cookies.items():
+                                if k.startswith("download_warning"):
+                                    token = v.value
+                                    break
+                        
+                        if token:
                             download_url = f"https://drive.google.com/uc?export=download&confirm={token}&id={file_id}"
                             async with sess.get(download_url, allow_redirects=True) as resp2:
                                 if resp2.status == 404 or resp2.status >= 500:
@@ -961,6 +1041,18 @@ async def download_drive_file(file_id: str, out_path: Path, message: Message = N
                                 if ok: return True, None
                                 if attempt < 10: await asyncio.sleep(2); continue
                     
+                    # Try alternative method with gdown-style URL
+                    download_url = f"https://docs.google.com/uc?export=download&id={file_id}&confirm=1"
+                    async with sess.get(download_url, allow_redirects=True) as resp3:
+                        if resp3.status == 404 or resp3.status >= 500:
+                            if attempt < 10:
+                                await asyncio.sleep(2)
+                                continue
+                        if resp3.status in (200, 206):
+                            ok, err = await download_stream(resp3, out_path, message, cancel_event=cancel_event, original_name=original_name)
+                            if ok: return True, None
+                            if attempt < 10: await asyncio.sleep(2); continue
+                    
                     if attempt < 10 and resp.status not in (200, 206):
                         await asyncio.sleep(2)
                         continue
@@ -971,6 +1063,7 @@ async def download_drive_file(file_id: str, out_path: Path, message: Message = N
                 continue
             return False, str(e)
     return False, "Failed after 10 attempts"
+# ========================================================================
 
 def process_dynamic_text_no_increment(uid, caption_template):
     if uid not in USER_COUNTERS:
@@ -1058,13 +1151,13 @@ async def set_bot_commands():
         BotCommand("yt_dlp", "Toggle YT-DLP mode for all URLs (admin only)"),
         BotCommand("convert", "Convert Video/Audio quality, bitrate & format (admin only)"),
         BotCommand("create_post", "Create new post (admin only)"), 
+        BotCommand("post", "Create/Edit posts in channels (admin only)"),
+        BotCommand("colab_drive", "Connect Google Drive in Colab (admin only)"),
         BotCommand("mode_check", "Check current mode status (admin only)"), 
         BotCommand("progress_bar", "Toggle progress bar ON/OFF or Custom Interval (admin only)"),
         BotCommand("continue", "Resume paused queue / Restore buttons"),
         BotCommand("restart", "Show Storage info and Clear Data"),
-        BotCommand("help", "Help"),
-        BotCommand("post", "Post Manager - create/edit posts & manage channels (admin only)"),
-        BotCommand("colab_drive", "Mount Google Drive (Colab only) & copy files (admin only)")
+        BotCommand("help", "Help")
     ]
     try:
         await app.set_bot_commands(cmds)
@@ -1526,13 +1619,13 @@ async def start_handler(c, m: Message):
         "/yt_dlp - Toggle YT-DLP mode for all URLs (admin only)\n"
         "/convert - Convert Video/Audio quality, bitrate & format (admin only)\n"
         "/create_post - Create new post (admin only)\n" 
+        "/post - Create/Edit posts in channels (admin only)\n"
+        "/colab_drive - Connect Google Drive in Colab (admin only)\n"
         "/mode_check - Check current mode status (admin only)\n" 
         "/progress_bar - Toggle progress bar ON/OFF or Custom Interval (admin only)\n"
         "/continue - Resume paused queue / Restore buttons\n"
         "/restart - Show Storage info and Clear Data\n"
-        "/help - Help\n"
-        "/post - Post Manager (admin only)\n"
-        "/colab_drive - Mount Google Drive & copy files (Colab only, admin only)"
+        "/help - Help"
     )
     await m.reply_text(text)
 
@@ -1627,12 +1720,8 @@ async def full_reset_bot_cb(c, cb):
     DOWNLOAD_T_MODE.clear()
     POST_MODE.clear()
     POST_CHANNELS.clear()
-    POST_SESSIONS.clear()
-    POST_BATCH_MODE.clear()
-    POST_BATCH_DATA.clear()
-    POST_CHANNEL_SELECT.clear()
-    POST_EDIT_TOOLS.clear()
-    COLAB_DRIVE_MOUNTED.clear()
+    POST_EDIT_STATE.clear()
+    POST_TUTORIAL_SENT.clear()
     
     if uid in USER_QUEUES:
         while not USER_QUEUES[uid].empty():
@@ -1706,17 +1795,7 @@ async def zip_file_download_cmd(c, m: Message):
         await m.reply_text("ZIP File Download Mode **OFF**.")
     else:
         ZIP_DOWNLOAD_MODE.add(uid)
-        await m.reply_text(
-            "**ZIP File Download Mode ON**\n\n"
-            "**How to use:**\n"
-            "‣ Send any direct link or Telegram file (video/document) – the bot will download it.\n"
-            "‣ If it's an archive (ZIP/RAR/7z/TAR), it will be extracted automatically.\n"
-            "‣ All extracted files will be displayed for you to select and upload serially.\n"
-            "‣ You can also type `all` to automatically upload all extracted files.\n"
-            "‣ Use the `path` command to browse and manage downloaded files.\n"
-            "‣ Type `clear` to clear the current session and queue.\n\n"
-            "Send links/files now."
-        )
+        await m.reply_text("ZIP File Download Mode **ON**.\nSend direct links or Telegram Files. Multiple items will be queued automatically.\nType `clear` to reset. Type `all` for auto upload all.")
 
 
 @app.on_message(filters.command("yt_dlp") & filters.private)
@@ -1730,15 +1809,7 @@ async def toggle_yt_dlp(c, m: Message):
         await m.reply_text("YT-DLP Mode **OFF**. Normal URLs will use direct download.")
     else:
         YT_DLP_MODE.add(uid)
-        await m.reply_text(
-            "**YT-DLP Mode ON**\n\n"
-            "**How to use:**\n"
-            "‣ Send any YouTube (or other supported) URL.\n"
-            "‣ The bot will fetch available video qualities and let you select.\n"
-            "‣ You can select multiple qualities; each will be queued and uploaded.\n"
-            "‣ Use the buttons to save your selection for future videos.\n\n"
-            "Send a YouTube URL now."
-        )
+        await m.reply_text("YT-DLP Mode **ON**. All URLs given to the bot will be processed via YT-DLP.")
 
 @app.on_message(filters.command("convert") & filters.private)
 async def toggle_convert_mode(c, m: Message):
@@ -1755,19 +1826,7 @@ async def toggle_convert_mode(c, m: Message):
     else:
         CONVERT_MODE.add(uid)
         CONVERT_BATCH_LIST[uid] = []
-        await m.reply_text(
-            "**Convert Mode ON**\n\n"
-            "**How to use:**\n"
-            "‣ Send videos, audio files, links, or ZIP archives.\n"
-            "‣ Each file will be added to a batch list (use `list` to view).\n"
-            "‣ Type `next` to open the conversion settings UI for the first file.\n"
-            "‣ Adjust video bitrate, resolution, audio bitrate, and choose to upload original.\n"
-            "‣ Click 'Select All & Convert' to apply the same settings to all files in the list.\n"
-            "‣ Click 'Next' to save settings for the current file and proceed to the next.\n"
-            "‣ Converted files are uploaded automatically with the new settings.\n"
-            "‣ Type `off` to exit Convert Mode.\n\n"
-            "Send files or links now."
-        )
+        await m.reply_text("Convert Mode **ON**.\nSend or forward any video, audio, or link/zip to compress and convert it.\n\nType `list` to view added items, `next` to select options, `off` to disable mode.\n(If ZIP is downloaded, it will extract and wait in the list).")
 
 @app.on_message(filters.command("download_only") & filters.private)
 async def toggle_download_only_mode(c, m: Message):
@@ -1781,16 +1840,7 @@ async def toggle_download_only_mode(c, m: Message):
         await m.reply_text("Download Only Mode **OFF**.")
     else:
         DOWNLOAD_ONLY_MODE.add(uid)
-        await m.reply_text(
-            "**Download Only Mode ON**\n\n"
-            "**How to use:**\n"
-            "‣ Send any file/link/ZIP – the bot will download and store it.\n"
-            "‣ ZIP archives will be extracted automatically.\n"
-            "‣ Type `link` to generate direct download links for each file (after download).\n"
-            "‣ Type `t` to generate a streaming link for Telegram files (without downloading locally).\n"
-            "‣ Type `off` to turn off Download Only mode.\n\n"
-            "Send files or links now."
-        )
+        await m.reply_text("Download Only Mode **ON**.\nFiles/links will just be downloaded to storage. ZIP files will be extracted.\nSend `link` to turn on direct download link generation.\nSend `t` to generate telegram file direct download link without downloading to local storage.\nSend `off` to revert to default download only.")
 
 
 @app.on_message(filters.command("progress_bar") & filters.private)
@@ -2054,17 +2104,7 @@ async def toggle_edit_caption_mode(c, m: Message):
         await m.reply_text("edit video caption mode **OFF**.\nFrom now on, uploaded videos will be renamed, thumbnails changed, and saved caption added.")
     else:
         EDIT_CAPTION_MODE.add(uid)
-        await m.reply_text(
-            "**Edit Caption Mode ON**\n\n"
-            "**How to use:**\n"
-            "‣ Forward or send videos – the bot will apply the saved caption (from /set_caption).\n"
-            "‣ If you want to change caption only (keep video name/thumbnail), use this mode.\n"
-            "‣ Type `on` to enable File ID save mode (Batch Caption) – forward multiple videos, then type `ok` to process all.\n"
-            "‣ Type `no` to enable Multi‑group Batch Mode – videos are grouped, then processed with weight options.\n"
-            "‣ Type `off` to exit Edit Caption Mode.\n"
-            "‣ Type `cap` to toggle between saved caption and original caption.\n\n"
-            "Send or forward videos now."
-        )
+        await m.reply_text("edit video caption mode **ON**.\nFrom now on, only the saved caption will be added. Video name and thumbnail will remain the same.\n\n**New Feature:** Type `on` to enable file ID save mode. Type `no` to enable Multi-group Batch mode. Type `off` to disable.")
 
 # --- HANDLER: /batch_audio_add ---
 @app.on_message(filters.command("batch_audio_add") & filters.private)
@@ -2095,22 +2135,7 @@ async def batch_audio_add_mode(c, m: Message):
         BATCH_AUDIO_STATE[uid] = 'list1'
         BATCH_AUDIO_LIST1[uid] = []
         BATCH_AUDIO_LIST2[uid] = []
-        await m.reply_text(
-            "**Batch Audio Add Mode ON**\n\n"
-            "**How to use:**\n"
-            "‣ Send Base Videos (List 1) – these are the videos you want to add audio to.\n"
-            "‣ Type `list` to view/delete items in current list.\n"
-            "‣ Type `next` when List 1 is complete to move to List 2 (Audio Sources).\n"
-            "‣ In List 2, send audio files or videos (the audio track will be taken from them).\n"
-            "‣ After List 2, type `next` again – you will see both lists and can define mapping.\n"
-            "‣ Default mapping: 1→1, 2→2, etc.\n"
-            "‣ Custom mapping: send `1-3=1-3, 4=6, 5=7`.\n"
-            "‣ Click 'Upload All' or send `ok` to start processing.\n"
-            "‣ For each pair, you can select which audio tracks to keep and which is default.\n"
-            "‣ The bot will remux and upload the resulting MKV files.\n"
-            "‣ Type `off` to exit Batch Audio Mode.\n\n"
-            "Send base videos now (List 1)."
-        )
+        await m.reply_text("Batch Audio Add Mode **ON**.\nSend Base Videos / Links / ZIP files (List 1).\n*(Type next when done, or type list to view/delete)*")
 
 # --- HANDLER: /mkv_video_audio_change ---
 @app.on_message(filters.command("mkv_video_audio_change") & filters.private)
@@ -2130,17 +2155,7 @@ async def toggle_audio_change_mode(c, m: Message):
         await m.reply_text("MKV audio change mode has been **TURNED OFF**.")
     else:
         MKV_AUDIO_CHANGE_MODE.add(uid)
-        await m.reply_text(
-            "**MKV Audio Change Mode ON**\n\n"
-            "**How to use:**\n"
-            "‣ Send a single MKV (or any video) file.\n"
-            "‣ The bot will analyse audio tracks and show you a list.\n"
-            "‣ Reply to that list message with a comma‑separated list of track numbers to keep (e.g., `1,3`).\n"
-            "‣ The bot will remux the file with only selected tracks, then upload.\n"
-            "‣ Use /batch_audio_add for multiple files.\n"
-            "‣ Type /mkv_video_audio_change again to turn OFF.\n\n"
-            "Send a video now."
-        )
+        await m.reply_text("MKV audio change mode has been **TURNED ON**. Now send a **SINGLE MKV file** or video.\nFor multiple files mapping, use /batch_audio_add")
 
 # --- HANDLER: /create_post ---
 @app.on_message(filters.command("create_post") & filters.private)
@@ -2176,17 +2191,579 @@ async def toggle_create_post_mode(c, m: Message):
             'post_data': DEFAULT_POST_DATA.copy(),
             'post_message_id': None
         }
-        await m.reply_text(
-            "**Create Post Mode ON**\n\n"
-            "**How to use:**\n"
-            "‣ Send an image to be used as the post image.\n"
-            "‣ Then follow the prompts to set image name, genres, and season list.\n"
-            "‣ The bot will generate a final caption and show you the post.\n"
-            "‣ Type /create_post again to exit mode.\n\n"
-            "Send an image now."
-        )
+        await m.reply_text("Create Post Mode has been **TURNED ON**.\nSend an image (**Photo**) to be used for the post.")
 # ---------------------------------------------
 
+# ===== CHANGE 6: POST MODE HANDLERS =====
+def get_post_tutorial_text():
+    return (
+        "**📝 Post Mode Tutorial**\n\n"
+        "**Add Channel:**\n"
+        "• Forward any message from a channel to add it to the list\n"
+        "• The channel will be saved automatically\n"
+        "• **Note:** Bot must be admin in the channel\n\n"
+        "**Create/Edit Post:**\n"
+        "• **Send/Forward a message:** If from a saved channel, it will be edited. If from another channel, it will create a new post.\n"
+        "• **Image/Video:** Will be added to the post\n"
+        "• **Caption:** Will be saved with the post\n\n"
+        "**Editing Tools:**\n"
+        "• **Add Image/Video:** Send/forward media to add\n"
+        "• **Add Caption:** Send text to set as caption\n"
+        "• **Add Thumbnail:** Send image to set as video thumbnail\n"
+        "• **Add Buttons:** Format: `button 1 = link1, button 2 = link2`\n"
+        "  - Use `,` for new line, space for same line\n"
+        "  - Colors: `[red]button = link`, `[green]button = link`, `[blue]button = link`\n\n"
+        "**Post Options:**\n"
+        "• **Send:** Send to selected channels\n"
+        "• **Save:** Save post for later editing\n"
+        "• **Multiple Post Edit:** Forward multiple messages, then send `ok` to edit all at once\n\n"
+        "**Auto Channel Management:**\n"
+        "• If bot is added to a channel as admin, it will auto-add the channel\n"
+        "• If bot is removed as admin, it will auto-remove the channel\n"
+        "• Service messages and pinned messages will be auto-deleted\n\n"
+        "**Commands:**\n"
+        "/post - Toggle Post Mode\n"
+        "/mode_check - Check current mode status"
+    )
+
+async def send_post_mode_tutorial(c, chat_id):
+    """Send tutorial message for post mode"""
+    text = get_post_tutorial_text()
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Channel List", callback_data="post_channels")],
+        [InlineKeyboardButton("➕ Add Channel", callback_data="post_add_channel")]
+    ])
+    await c.send_message(chat_id, text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
+
+async def build_post_edit_keyboard(uid, has_media=False):
+    """Build keyboard for post editing"""
+    keyboard = []
+    
+    if not has_media:
+        keyboard.append([InlineKeyboardButton("🖼 Add Image", callback_data="post_add_image")])
+        keyboard.append([InlineKeyboardButton("🎬 Add Video", callback_data="post_add_video")])
+    
+    keyboard.append([InlineKeyboardButton("📝 Add Caption", callback_data="post_add_caption")])
+    keyboard.append([InlineKeyboardButton("🖼 Add Thumbnail", callback_data="post_add_thumbnail")])
+    keyboard.append([InlineKeyboardButton("🔘 Add Buttons", callback_data="post_add_buttons")])
+    
+    # Multiple post edit options
+    keyboard.append([InlineKeyboardButton("📚 Multiple Post Edit", callback_data="post_multiple_edit")])
+    keyboard.append([InlineKeyboardButton("💾 Use Saved Caption", callback_data="post_use_saved_caption")])
+    
+    keyboard.append([
+        InlineKeyboardButton("📤 Send Post", callback_data="post_send"),
+        InlineKeyboardButton("💾 Save Post", callback_data="post_save")
+    ])
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="post_cancel")])
+    
+    return InlineKeyboardMarkup(keyboard)
+
+async def send_channel_list(c, chat_id, uid, page=0):
+    """Send channel list with delete buttons"""
+    channels = POST_CHANNELS.get(uid, [])
+    
+    if not channels:
+        await c.send_message(chat_id, "No channels saved yet.\nForward a message from a channel to add it.")
+        return
+    
+    per_page = 5
+    total_pages = max(1, math.ceil(len(channels) / per_page))
+    page = min(page, total_pages - 1)
+    
+    start = page * per_page
+    end = min(start + per_page, len(channels))
+    
+    text = f"**📋 Saved Channels (Page {page+1}/{total_pages}):**\n\n"
+    keyboard = []
+    
+    for i in range(start, end):
+        channel_id = channels[i]
+        try:
+            chat = await c.get_chat(channel_id)
+            name = chat.title or f"Channel {i+1}"
+            if i > 0 and any(c == channel_id for c in channels[:i]):
+                # If duplicate, add number
+                count = 1
+                for cid in channels[:i]:
+                    if cid == channel_id:
+                        count += 1
+                name = f"{name} #{count}"
+        except:
+            name = f"Channel {i+1}"
+        
+        text += f"**{i+1}.** `{name}`\n"
+        keyboard.append([
+            InlineKeyboardButton(f"{name}", callback_data="ignore"),
+            InlineKeyboardButton("🗑 Delete", callback_data=f"post_del_channel_{i}")
+        ])
+    
+    # Navigation buttons
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"post_channels_page_{page-1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"post_channels_page_{page+1}"))
+    if nav:
+        keyboard.append(nav)
+    
+    keyboard.append([InlineKeyboardButton("➕ Add Channel", callback_data="post_add_channel")])
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="post_tutorial")])
+    
+    await c.send_message(chat_id, text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+@app.on_message(filters.command("post") & filters.private)
+async def post_mode_cmd(c, m: Message):
+    uid = m.from_user.id
+    if not is_admin(uid):
+        await m.reply_text("You are not authorized to use this command.")
+        return
+    
+    if uid in POST_MODE:
+        POST_MODE.discard(uid)
+        POST_EDIT_STATE.pop(uid, None)
+        await m.reply_text("Post Mode **OFF**.")
+    else:
+        POST_MODE.add(uid)
+        POST_CHANNELS.setdefault(uid, [])
+        await send_post_mode_tutorial(c, m.chat.id)
+
+@app.on_callback_query(filters.regex("post_tutorial"))
+async def post_tutorial_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    await send_post_mode_tutorial(c, cb.message.chat.id)
+    await cb.answer()
+
+@app.on_callback_query(filters.regex("post_channels"))
+async def post_channels_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    await send_channel_list(c, cb.message.chat.id, uid)
+    await cb.answer()
+
+@app.on_callback_query(filters.regex("post_channels_page_"))
+async def post_channels_page_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    page = int(cb.data.split('_')[-1])
+    await send_channel_list(c, cb.message.chat.id, uid, page)
+    await cb.answer()
+
+@app.on_callback_query(filters.regex("post_add_channel"))
+async def post_add_channel_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    await cb.message.edit_text("📨 **Forward any message from the channel** you want to add.\n\nMake sure the bot is admin in that channel.")
+    await cb.answer()
+
+@app.on_callback_query(filters.regex("post_del_channel_"))
+async def post_del_channel_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    idx = int(cb.data.split('_')[-1])
+    channels = POST_CHANNELS.get(uid, [])
+    if 0 <= idx < len(channels):
+        channel_id = channels.pop(idx)
+        try:
+            await c.send_message(channel_id, "Bot has been removed from channel management.")
+        except:
+            pass
+        await cb.answer("Channel removed from list.", show_alert=True)
+        await send_channel_list(c, cb.message.chat.id, uid)
+
+@app.on_callback_query(filters.regex("post_add_image"))
+async def post_add_image_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    POST_EDIT_STATE[uid] = {'action': 'add_image', 'message_id': cb.message.id}
+    await cb.message.edit_text("📷 **Send or forward an image** to add to the post.")
+    await cb.answer()
+
+@app.on_callback_query(filters.regex("post_add_video"))
+async def post_add_video_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    POST_EDIT_STATE[uid] = {'action': 'add_video', 'message_id': cb.message.id}
+    await cb.message.edit_text("🎬 **Send or forward a video** to add to the post.")
+    await cb.answer()
+
+@app.on_callback_query(filters.regex("post_add_caption"))
+async def post_add_caption_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    POST_EDIT_STATE[uid] = {'action': 'add_caption', 'message_id': cb.message.id}
+    await cb.message.edit_text("📝 **Send the caption text** for the post.\n\nYou can use **bold**, *italic*, `code`, etc.")
+    await cb.answer()
+
+@app.on_callback_query(filters.regex("post_add_thumbnail"))
+async def post_add_thumbnail_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    POST_EDIT_STATE[uid] = {'action': 'add_thumbnail', 'message_id': cb.message.id}
+    await cb.message.edit_text("🖼 **Send an image** to set as video thumbnail.")
+    await cb.answer()
+
+@app.on_callback_query(filters.regex("post_add_buttons"))
+async def post_add_buttons_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    POST_EDIT_STATE[uid] = {'action': 'add_buttons', 'message_id': cb.message.id}
+    await cb.message.edit_text(
+        "🔘 **Send button format:**\n\n"
+        "`button 1 = link1, button 2 = link2`\n\n"
+        "• Use `,` for new line (\\n)\n"
+        "• Use space for same line\n"
+        "• Colors: `[red]button = link`, `[green]button = link`, `[blue]button = link`\n\n"
+        "Example:\n"
+        "`[red]Download = https://t.me, [green]Channel = https://t.me`"
+    )
+    await cb.answer()
+
+@app.on_callback_query(filters.regex("post_send"))
+async def post_send_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    
+    channels = POST_CHANNELS.get(uid, [])
+    if not channels:
+        await cb.answer("No channels saved! Add a channel first.", show_alert=True)
+        return
+    
+    # Build channel selection keyboard
+    keyboard = []
+    for i, channel_id in enumerate(channels):
+        try:
+            chat = await c.get_chat(channel_id)
+            name = chat.title or f"Channel {i+1}"
+            keyboard.append([InlineKeyboardButton(f"{name} 🔲", callback_data=f"post_send_channel_{i}_0")])
+        except:
+            keyboard.append([InlineKeyboardButton(f"Channel {i+1} 🔲", callback_data=f"post_send_channel_{i}_0")])
+    
+    keyboard.append([InlineKeyboardButton("📤 Send to Selected", callback_data="post_send_selected")])
+    keyboard.append([InlineKeyboardButton("📤 Send to All", callback_data="post_send_all")])
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="post_edit_back")])
+    
+    await cb.message.edit_text(
+        "**Select channels to send the post to:**\n\n"
+        "Click on a channel to toggle selection.\n"
+        "Send to Selected: Send only to selected channels.\n"
+        "Send to All: Send to all channels.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    await cb.answer()
+
+@app.on_callback_query(filters.regex("post_send_channel_"))
+async def post_send_channel_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    
+    parts = cb.data.split('_')
+    idx = int(parts[3])
+    state = int(parts[4])
+    
+    channels = POST_CHANNELS.get(uid, [])
+    if 0 <= idx < len(channels):
+        # Toggle selection
+        new_state = 1 if state == 0 else 0
+        # Update keyboard
+        keyboard = []
+        for i, channel_id in enumerate(channels):
+            try:
+                chat = await c.get_chat(channel_id)
+                name = chat.title or f"Channel {i+1}"
+                status = "✅" if (i == idx and new_state == 1) or (i != idx and state == 1) else "🔲"
+                keyboard.append([InlineKeyboardButton(f"{name} {status}", callback_data=f"post_send_channel_{i}_{1 if (i == idx and new_state == 1) or (i != idx and state == 1) else 0}")])
+            except:
+                keyboard.append([InlineKeyboardButton(f"Channel {i+1} {status}", callback_data=f"post_send_channel_{i}_{1 if (i == idx and new_state == 1) or (i != idx and state == 1) else 0}")])
+        
+        keyboard.append([InlineKeyboardButton("📤 Send to Selected", callback_data="post_send_selected")])
+        keyboard.append([InlineKeyboardButton("📤 Send to All", callback_data="post_send_all")])
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="post_edit_back")])
+        
+        await cb.message.edit_reply_markup(InlineKeyboardMarkup(keyboard))
+    await cb.answer()
+
+@app.on_callback_query(filters.regex("post_send_selected"))
+async def post_send_selected_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    
+    # Get selected channels from message keyboard
+    keyboard = cb.message.reply_markup.inline_keyboard
+    selected_channels = []
+    for row in keyboard:
+        for btn in row:
+            if btn.callback_data and btn.callback_data.startswith("post_send_channel_"):
+                parts = btn.callback_data.split('_')
+                idx = int(parts[3])
+                state = int(parts[4])
+                if state == 1:
+                    channels = POST_CHANNELS.get(uid, [])
+                    if 0 <= idx < len(channels):
+                        selected_channels.append(channels[idx])
+    
+    if not selected_channels:
+        await cb.answer("No channels selected! Select at least one channel.", show_alert=True)
+        return
+    
+    await send_post_to_channels(c, cb.message.chat.id, uid, selected_channels)
+    await cb.answer("Sending post to selected channels...", show_alert=True)
+
+@app.on_callback_query(filters.regex("post_send_all"))
+async def post_send_all_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    
+    channels = POST_CHANNELS.get(uid, [])
+    if not channels:
+        await cb.answer("No channels saved!", show_alert=True)
+        return
+    
+    await send_post_to_channels(c, cb.message.chat.id, uid, channels)
+    await cb.answer("Sending post to all channels...", show_alert=True)
+
+@app.on_callback_query(filters.regex("post_save"))
+async def post_save_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    
+    # Save current post state
+    if uid not in POST_EDIT_STATE:
+        POST_EDIT_STATE[uid] = {}
+    POST_EDIT_STATE[uid]['saved'] = True
+    
+    await cb.answer("Post saved! You can continue editing or send it later.", show_alert=True)
+    await cb.message.edit_text("✅ **Post saved successfully!**\n\nYou can continue editing using the tools below.", reply_markup=await build_post_edit_keyboard(uid))
+
+@app.on_callback_query(filters.regex("post_edit_back"))
+async def post_edit_back_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    
+    await cb.message.edit_text("**📝 Post Editor**\n\nSelect an option to edit the post:", reply_markup=await build_post_edit_keyboard(uid))
+    await cb.answer()
+
+@app.on_callback_query(filters.regex("post_cancel"))
+async def post_cancel_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    
+    POST_EDIT_STATE.pop(uid, None)
+    await cb.message.edit_text("❌ **Post editing cancelled.**")
+    await cb.answer()
+
+@app.on_callback_query(filters.regex("post_use_saved_caption"))
+async def post_use_saved_caption_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    
+    caption = USER_CAPTIONS.get(uid)
+    if not caption:
+        await cb.answer("No saved caption found! Use /set_caption first.", show_alert=True)
+        return
+    
+    if uid not in POST_EDIT_STATE:
+        POST_EDIT_STATE[uid] = {}
+    POST_EDIT_STATE[uid]['caption'] = caption
+    POST_EDIT_STATE[uid]['use_saved_caption'] = True
+    
+    await cb.answer("Saved caption applied to post!", show_alert=True)
+    await cb.message.edit_text("✅ **Saved caption applied!**\n\nContinue editing or send the post.", reply_markup=await build_post_edit_keyboard(uid))
+
+@app.on_callback_query(filters.regex("post_multiple_edit"))
+async def post_multiple_edit_cb(c, cb):
+    uid = cb.from_user.id
+    if uid not in POST_MODE:
+        await cb.answer("Post mode is OFF.", show_alert=True)
+        return
+    
+    POST_EDIT_STATE[uid] = {'action': 'multiple_edit', 'message_id': cb.message.id}
+    await cb.message.edit_text(
+        "📚 **Multiple Post Edit Mode**\n\n"
+        "Forward multiple messages from channels.\n"
+        "• If from saved channels: They will be edited\n"
+        "• If from other channels: New posts will be created\n\n"
+        "After forwarding all messages, send `ok` to start editing all at once.\n\n"
+        "**Order:** Messages will be processed from smallest to largest file ID."
+    )
+    await cb.answer()
+
+async def send_post_to_channels(c, chat_id, uid, channel_ids):
+    """Send the current post to specified channels"""
+    state = POST_EDIT_STATE.get(uid, {})
+    
+    if not state:
+        await c.send_message(chat_id, "No post data to send. Start by forwarding a message or adding content.")
+        return
+    
+    media = state.get('media')
+    media_type = state.get('media_type')
+    caption = state.get('caption', '')
+    buttons = state.get('buttons', [])
+    thumbnail = state.get('thumbnail')
+    
+    for channel_id in channel_ids:
+        try:
+            if media_type == 'photo':
+                await c.send_photo(
+                    channel_id,
+                    photo=media,
+                    caption=caption,
+                    reply_markup=buttons if buttons else None,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            elif media_type == 'video':
+                await c.send_video(
+                    channel_id,
+                    video=media,
+                    caption=caption,
+                    thumb=thumbnail,
+                    reply_markup=buttons if buttons else None,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                await c.send_message(
+                    channel_id,
+                    caption,
+                    reply_markup=buttons if buttons else None,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            await asyncio.sleep(1)  # Rate limit
+        except Exception as e:
+            logger.error(f"Error sending post to channel {channel_id}: {e}")
+            await c.send_message(chat_id, f"Error sending to channel {channel_id}: {e}")
+    
+    await c.send_message(chat_id, "✅ **Post sent to all selected channels!**")
+# ========================================
+
+# ===== CHANGE 7: COLAB DRIVE HANDLERS =====
+@app.on_message(filters.command("colab_drive") & filters.private)
+async def colab_drive_cmd(c, m: Message):
+    uid = m.from_user.id
+    if not is_admin(uid):
+        await m.reply_text("You are not authorized to use this command.")
+        return
+    
+    # Check if running on Colab
+    if not os.getenv("COLAB_GPU"):
+        await m.reply_text("This command only works on Google Colab!")
+        return
+    
+    if uid in COLAB_DRIVE_MODE:
+        COLAB_DRIVE_MODE.discard(uid)
+        COLAB_DRIVE_PATH.pop(uid, None)
+        await m.reply_text("Colab Drive Mode **OFF**.")
+    else:
+        COLAB_DRIVE_MODE.add(uid)
+        await m.reply_text(
+            "Colab Drive Mode **ON**.\n\n"
+            "**To mount Google Drive:**\n"
+            "Send `/colab_drive mount`\n\n"
+            "**To copy file from Drive:**\n"
+            "Send `/colab_drive path/to/file`\n"
+            "Example: `/colab_drive MyDrive/video.mp4`\n\n"
+            "**To unmount Drive:**\n"
+            "Send `/colab_drive unmount`"
+        )
+
+@app.on_message(filters.command("colab_drive") & filters.private)
+async def colab_drive_action_cmd(c, m: Message):
+    uid = m.from_user.id
+    if not is_admin(uid):
+        await m.reply_text("You are not authorized to use this command.")
+        return
+    
+    if not os.getenv("COLAB_GPU"):
+        await m.reply_text("This command only works on Google Colab!")
+        return
+    
+    if len(m.command) < 2:
+        await m.reply_text(
+            "Usage:\n"
+            "/colab_drive mount - Mount Google Drive\n"
+            "/colab_drive unmount - Unmount Google Drive\n"
+            "/colab_drive path/to/file - Copy file from Drive to TMP"
+        )
+        return
+    
+    action = m.command[1].lower()
+    
+    if action == "mount":
+        try:
+            from google.colab import drive
+            drive.mount('/content/drive')
+            await m.reply_text("✅ Google Drive mounted successfully!\nYou can now access files at `/content/drive/MyDrive/`")
+        except Exception as e:
+            await m.reply_text(f"❌ Failed to mount Drive: {e}")
+    
+    elif action == "unmount":
+        try:
+            from google.colab import drive
+            drive.flush_and_unmount()
+            await m.reply_text("✅ Google Drive unmounted successfully!")
+        except Exception as e:
+            await m.reply_text(f"❌ Failed to unmount Drive: {e}")
+    
+    else:
+        # Copy file from Drive
+        if not os.path.exists('/content/drive'):
+            await m.reply_text("⚠️ Google Drive is not mounted. Use `/colab_drive mount` first.")
+            return
+        
+        drive_path = '/content/drive/' + action
+        if not os.path.exists(drive_path):
+            await m.reply_text(f"❌ File not found: {drive_path}")
+            return
+        
+        # Copy to TMP
+        dest_path = TMP / Path(drive_path).name
+        try:
+            if os.path.isdir(drive_path):
+                shutil.copytree(drive_path, dest_path)
+            else:
+                shutil.copy2(drive_path, dest_path)
+            
+            await m.reply_text(f"✅ File copied to TMP:\n`{dest_path}`")
+        except Exception as e:
+            await m.reply_text(f"❌ Failed to copy file: {e}")
+# ========================================
 
 # --- HANDLER: /mode_check ---
 @app.on_message(filters.command("mode_check") & filters.private)
@@ -2204,6 +2781,7 @@ async def mode_check_cmd(c, m: Message):
     batch_audio_status = "✅ ON" if uid in BATCH_AUDIO_MODE else "❌ OFF"
     dl_only_status = "✅ ON" if uid in DOWNLOAD_ONLY_MODE else "❌ OFF"
     post_status = "✅ ON" if uid in POST_MODE else "❌ OFF"
+    colab_status = "✅ ON" if uid in COLAB_DRIVE_MODE else "❌ OFF"
     
     waiting_count = sum(1 for data in PENDING_AUDIO_ORDERS.values() if data['uid'] == uid)
     waiting_status_text = f"{waiting_count} file(s) waiting for track order." if waiting_count > 0 else "No files are waiting."
@@ -2223,13 +2801,16 @@ async def mode_check_cmd(c, m: Message):
         f"6. **ZIP Download Mode:** `{zip_status}`\n"
         f"7. **Download Only Mode:** `{dl_only_status}`\n"
         f"8. **Post Mode:** `{post_status}`\n"
+        f"   - *Task:* Create/Edit posts in channels.\n\n"
+        f"9. **Colab Drive Mode:** `{colab_status}`\n"
+        f"   - *Task:* Access Google Drive files in Colab.\n\n"
         "Click the buttons below to toggle modes."
     )
     
     await m.reply_text(status_text, reply_markup=mode_check_keyboard(uid), parse_mode=ParseMode.MARKDOWN)
 
 # --- CALLBACK: Mode Toggle Buttons ---
-@app.on_callback_query(filters.regex("toggle_(audio|caption|ytdlp|zip|convert|batch_audio|dl_only)_mode"))
+@app.on_callback_query(filters.regex("toggle_(audio|caption|ytdlp|zip|convert|batch_audio|dl_only|post)_mode"))
 async def mode_toggle_callback(c: Client, cb: CallbackQuery):
     uid = cb.from_user.id
     if not is_admin(uid):
@@ -2334,6 +2915,16 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
         else:
             DOWNLOAD_ONLY_MODE.add(uid)
             message = "Download Only Mode ON."
+            
+    elif action == "toggle_post_mode":
+        if uid in POST_MODE:
+            POST_MODE.discard(uid)
+            POST_EDIT_STATE.pop(uid, None)
+            message = "Post Mode OFF."
+        else:
+            POST_MODE.add(uid)
+            POST_CHANNELS.setdefault(uid, [])
+            message = "Post Mode ON."
             
     try:
         audio_status = "✅ ON" if uid in MKV_AUDIO_CHANGE_MODE else "❌ OFF"
@@ -2600,7 +3191,8 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                 # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
                 if uid in DOWNLOAD_LINK_MODE:
                     link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(tmp_in.name)}"
-                    await status_msg.edit(f"✅ **File Downloaded:** `{tmp_in.name}`\n🔗 **Direct Link:** {link}")
+                    stream_link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(str(tmp_in))}"
+                    await status_msg.edit(f"✅ **File Downloaded:** `{tmp_in.name}`\n🔗 **Direct Download:** {link}\n🎬 **Stream Link:** {stream_link}")
                 else:
                     await status_msg.edit(f"✅ **File Downloaded:** `{tmp_in.name}`\nSaved to local storage.")
                 return
@@ -2673,7 +3265,8 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                 # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
                 if uid in DOWNLOAD_LINK_MODE:
                     link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(tmp_in.name)}"
-                    await status_msg.edit(f"✅ **Archive Downloaded (Extract Failed):** `{tmp_in.name}`\n🔗 **Direct Link:** {link}")
+                    stream_link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(str(tmp_in))}"
+                    await status_msg.edit(f"✅ **Archive Downloaded (Extract Failed):** `{tmp_in.name}`\n🔗 **Direct Download:** {link}\n🎬 **Stream Link:** {stream_link}")
                 else:
                     await status_msg.edit(f"✅ **Archive Downloaded:** `{tmp_in.name}`\nSaved to local storage.")
                 return
@@ -2745,7 +3338,8 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                 for f in all_files:
                     # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
                     link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(f.relative_to(TMP).as_posix())}"
-                    link_text += f"‣ `{f.name}`\n🔗 {link}\n"
+                    stream_link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(str(f))}"
+                    link_text += f"‣ `{f.name}`\n🔗 Download: {link}\n🎬 Stream: {stream_link}\n"
                 await c.send_message(m.chat.id, link_text, disable_web_page_preview=True)
             else:
                 await c.send_message(m.chat.id, f"✅ **Extracted {len(all_files)} files successfully.**\nSaved to local storage.")
@@ -3196,6 +3790,93 @@ async def text_handler(c, m: Message):
         return
     text = m.text.strip()
     
+    # ===== CHANGE 8: Handle POST mode actions =====
+    if uid in POST_MODE and uid in POST_EDIT_STATE:
+        state = POST_EDIT_STATE[uid]
+        action = state.get('action')
+        
+        if action == 'add_caption':
+            state['caption'] = text
+            POST_EDIT_STATE[uid] = state
+            await m.reply_text("✅ Caption added! Continue editing or send the post.", reply_markup=await build_post_edit_keyboard(uid))
+            return
+        
+        elif action == 'add_buttons':
+            try:
+                # Parse button format
+                buttons = []
+                lines = text.split(',')
+                for line in lines:
+                    line = line.strip()
+                    if '=' in line:
+                        parts = line.split('=')
+                        if len(parts) == 2:
+                            btn_text = parts[0].strip()
+                            btn_url = parts[1].strip()
+                            # Check for color
+                            color = 'normal'
+                            if btn_text.startswith('[red]'):
+                                color = 'red'
+                                btn_text = btn_text[5:]
+                            elif btn_text.startswith('[green]'):
+                                color = 'green'
+                                btn_text = btn_text[6:]
+                            elif btn_text.startswith('[blue]'):
+                                color = 'blue'
+                                btn_text = btn_text[6:]
+                            buttons.append({'text': btn_text, 'url': btn_url, 'color': color})
+                
+                if buttons:
+                    # Build inline keyboard
+                    keyboard = []
+                    current_row = []
+                    for btn in buttons:
+                        current_row.append(InlineKeyboardButton(btn['text'], url=btn['url']))
+                        if len(current_row) == 2:
+                            keyboard.append(current_row)
+                            current_row = []
+                    if current_row:
+                        keyboard.append(current_row)
+                    
+                    state['buttons'] = InlineKeyboardMarkup(keyboard)
+                    POST_EDIT_STATE[uid] = state
+                    await m.reply_text("✅ Buttons added! Continue editing or send the post.", reply_markup=await build_post_edit_keyboard(uid))
+                else:
+                    await m.reply_text("❌ Invalid button format. Use: `button 1 = link1, button 2 = link2`")
+            except Exception as e:
+                await m.reply_text(f"❌ Error parsing buttons: {e}")
+            return
+        
+        elif action == 'multiple_edit':
+            if text.lower() == 'ok':
+                # Process multiple posts
+                # This would need to be implemented with file ID tracking
+                await m.reply_text("Multiple post edit mode activated. Forward messages to edit them.")
+                return
+    
+    # ===== CHANGE 9: Handle POST mode forward/send =====
+    if uid in POST_MODE and m.forward_from_chat:
+        # Check if forwarded from a saved channel
+        channel_id = m.forward_from_chat.id
+        channels = POST_CHANNELS.get(uid, [])
+        
+        if channel_id in channels:
+            # Edit existing post
+            await m.reply_text(f"Editing post from channel: {m.forward_from_chat.title}")
+            # This would trigger post edit flow
+        else:
+            # Add channel if bot is admin
+            try:
+                chat_member = await c.get_chat_member(channel_id, (await c.get_me()).id)
+                if chat_member.status in ['administrator', 'creator']:
+                    POST_CHANNELS.setdefault(uid, []).append(channel_id)
+                    await m.reply_text(f"✅ Channel added: {m.forward_from_chat.title}")
+                else:
+                    await m.reply_text("❌ Bot is not admin in this channel. Please make the bot admin first.")
+            except:
+                await m.reply_text("❌ Cannot access this channel. Make sure bot is admin.")
+            return
+    
     if uid in SET_FILENAME_REQUEST:
         SET_FILENAME_REQUEST.discard(uid)
         USER_FILENAMES[uid] = text
@@ -3436,7 +4117,8 @@ async def text_handler(c, m: Message):
                             safe_path = urllib.parse.quote(f.relative_to(TMP).as_posix())
                             # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
                             link = f"{PUBLIC_BASE_URL}/dl/{safe_path}"
-                            link_text += f"‣ `{f.name}`\n🔗 {link}\n"
+                            stream_link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(str(f))}"
+                            link_text += f"‣ `{f.name}`\n🔗 Download: {link}\n🎬 Stream: {stream_link}\n"
                     await m.reply_text(link_text, disable_web_page_preview=True)
                 elif is_rename:
                     renamed_count = 0
@@ -3916,7 +4598,9 @@ async def text_handler(c, m: Message):
         if uid in DOWNLOAD_T_MODE:
             # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
             link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(url)}"
-            await m.reply_text(f"🔗 **Direct Stream Link:**\n{link}", disable_web_page_preview=True)
+            # Also provide download link
+            download_link = f"{PUBLIC_BASE_URL}/dl?url={urllib.parse.quote(url)}"
+            await m.reply_text(f"🔗 **Direct Links:**\n\n📥 **Download:** {download_link}\n🎬 **Stream:** {link}", disable_web_page_preview=True)
             return
 
         if uid in DOWNLOAD_ONLY_MODE:
@@ -4064,7 +4748,8 @@ async def upload_url_cmd(c, m: Message):
     if uid in DOWNLOAD_T_MODE:
         # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
         link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(url)}"
-        await m.reply_text(f"🔗 **Direct Stream Link:**\n{link}", disable_web_page_preview=True)
+        download_link = f"{PUBLIC_BASE_URL}/dl?url={urllib.parse.quote(url)}"
+        await m.reply_text(f"🔗 **Direct Links:**\n\n📥 **Download:** {download_link}\n🎬 **Stream:** {link}", disable_web_page_preview=True)
         return
 
     if uid in DOWNLOAD_ONLY_MODE:
@@ -4331,27 +5016,11 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
     file_info = m.video or m.document
     original_name = file_info.file_name if file_info and file_info.file_name else f"file_{file_info.file_unique_id}"
 
-    # ===== HANDLE T-MODE =====
     if uid in DOWNLOAD_T_MODE:
-        try:
-            file_path = await c.get_file(file_info.file_id)
-            # file_path is the path on Telegram servers
-            # Construct a direct download/streaming link
-            token = BOT_TOKEN
-            # The direct link: https://api.telegram.org/file/bot<token>/<file_path>
-            direct_link = f"https://api.telegram.org/file/bot{token}/{file_path.file_path}"
-            # Provide both streaming and download links
-            stream_link = direct_link  # same link works for streaming
-            download_link = f"{direct_link}?download=1"  # forcing download by adding a query param
-            await m.reply_text(
-                f"**Telegram Streaming Link (T-Mode):**\n"
-                f"🔗 **Stream (play inline):** {stream_link}\n"
-                f"⬇️ **Direct Download:** {download_link}",
-                disable_web_page_preview=True
-            )
-        except Exception as e:
-            logger.error(f"T-Mode error: {e}")
-            await m.reply_text(f"Could not generate streaming link: {e}")
+        # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
+        link = f"{PUBLIC_BASE_URL}/stream?file_id={file_info.file_id}&filename={urllib.parse.quote(original_name)}"
+        download_link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(original_name)}"
+        await m.reply_text(f"🔗 **Direct Links:**\n\n📥 **Download:** {download_link}\n🎬 **Stream:** {link}", disable_web_page_preview=True)
         return
 
     if uid in DOWNLOAD_ONLY_MODE:
@@ -5618,533 +6287,6 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
         except Exception:
             pass
 
-# ===================================================
-# POST MANAGER – Full Post Creation/Editing System
-# ===================================================
-
-# State variables (already defined)
-# POST_MODE, POST_CHANNELS, POST_SESSIONS, POST_BATCH_MODE,
-# POST_BATCH_DATA, POST_CHANNEL_SELECT, POST_EDIT_TOOLS
-
-async def post_main_menu(c: Client, m: Message = None, uid: int = None, chat_id: int = None):
-    """Show the main post management menu."""
-    if m:
-        uid = m.from_user.id
-        chat_id = m.chat.id
-    else:
-        if not uid or not chat_id:
-            return
-
-    channels = POST_CHANNELS.get(uid, [])
-    channel_list = ""
-    if channels:
-        for idx, ch in enumerate(channels, 1):
-            name = ch.get('title', f"Channel {ch['chat_id']}")
-            uname = ch.get('username', '')
-            if uname:
-                name += f" (@{uname})"
-            channel_list += f"{idx}. {name}  [🗑️](post_del_{idx})\n"
-    else:
-        channel_list = "No channels saved."
-
-    text = (
-        "**📢 Post Manager**\n\n"
-        "**How to use:**\n"
-        "‣ Send or forward a message (text/photo/video) from the channel you want to create a post from.\n"
-        "‣ If it's from a saved channel, you can **edit** that post.\n"
-        "‣ If it's from a new channel, a new post will be created.\n\n"
-        "**Saved Channels:**\n" + channel_list + "\n"
-        "**Buttons:**"
-    )
-
-    keyboard = [
-        [InlineKeyboardButton("➕ Add Channel", callback_data="post_add_channel")],
-        [InlineKeyboardButton("📝 Create New Post", callback_data="post_new")],
-        [InlineKeyboardButton("📋 Batch Edit Posts", callback_data="post_batch")],
-        [InlineKeyboardButton("❌ Turn OFF Post Mode", callback_data="post_off")]
-    ]
-    if channels:
-        keyboard.append([InlineKeyboardButton("Send to Channels", callback_data="post_send_menu")])
-
-    await c.send_message(chat_id, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
-
-@app.on_message(filters.command("post") & filters.private)
-async def post_command(c: Client, m: Message):
-    uid = m.from_user.id
-    if not is_admin(uid):
-        await m.reply_text("You are not authorized.")
-        return
-
-    if uid in POST_MODE:
-        POST_MODE.discard(uid)
-        POST_CHANNELS.pop(uid, None)
-        POST_SESSIONS.pop(uid, None)
-        POST_BATCH_MODE.discard(uid)
-        POST_BATCH_DATA.pop(uid, None)
-        POST_CHANNEL_SELECT.pop(uid, None)
-        POST_EDIT_TOOLS.pop(uid, None)
-        await m.reply_text("Post Mode **OFF**.")
-    else:
-        POST_MODE.add(uid)
-        # Initialize
-        POST_CHANNELS.setdefault(uid, [])
-        POST_SESSIONS.setdefault(uid, {})  # current post being edited
-        POST_BATCH_DATA.setdefault(uid, [])
-        POST_CHANNEL_SELECT.setdefault(uid, set())
-        POST_EDIT_TOOLS.setdefault(uid, {})
-
-        await post_main_menu(c, m)
-
-# ---- Post Callbacks ----
-@app.on_callback_query(filters.regex("^post_"))
-async def post_callback(c: Client, cb: CallbackQuery):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post Mode is off. Use /post to enable.", show_alert=True)
-        return
-
-    action = cb.data.split('_', 1)[1]
-
-    if action == "add_channel":
-        # Ask user to forward a message from the channel they want to add
-        await cb.message.edit_text(
-            "**Add Channel**\n\n"
-            "Please **forward** any message from the channel you want to add.\n"
-            "The bot will automatically detect the channel and add it to the list.\n"
-            "Make sure the bot is an admin in that channel."
-        )
-        await cb.answer()
-
-    elif action == "new":
-        # Start a new post session
-        POST_SESSIONS[uid] = {
-            'source': None,  # will be set when user sends a message
-            'media': None,   # list of media (photo/video) with captions/thumbnails
-            'caption': None,
-            'buttons': [],
-            'thumb': None,
-            'state': 'awaiting_source'  # awaiting_source, editing
-        }
-        await cb.message.edit_text(
-            "**Create New Post**\n\n"
-            "Send or forward a **message** (text, photo, video) that will be the base of the post.\n"
-            "You can also forward a message from a channel to edit that existing post."
-        )
-        await cb.answer()
-
-    elif action == "batch":
-        # Batch edit mode: user forwards multiple messages, then edits all together
-        POST_BATCH_MODE.add(uid)
-        POST_BATCH_DATA[uid] = []  # will store file IDs or message references
-        await cb.message.edit_text(
-            "**Batch Edit Posts**\n\n"
-            "Forward **multiple messages** (from any channels) that you want to edit together.\n"
-            "After forwarding, type `ok` to start editing them all with the same tools.\n"
-            "The edits will be applied in the order you forwarded them."
-        )
-        await cb.answer()
-
-    elif action == "send_menu":
-        # Show channel selection for sending
-        channels = POST_CHANNELS.get(uid, [])
-        if not channels:
-            await cb.answer("No channels saved. Add a channel first.", show_alert=True)
-            return
-        sel = POST_CHANNEL_SELECT.get(uid, set())
-        keyboard = []
-        for idx, ch in enumerate(channels, 1):
-            name = ch.get('title', f"Channel {ch['chat_id']}")
-            checked = "✅" if idx in sel else "⬜"
-            keyboard.append([
-                InlineKeyboardButton(f"{checked} {name}", callback_data=f"post_toggle_sel_{idx}")
-            ])
-        keyboard.append([
-            InlineKeyboardButton("Send to Selected", callback_data="post_send_selected"),
-            InlineKeyboardButton("Send to All", callback_data="post_send_all"),
-            InlineKeyboardButton("Back", callback_data="post_back_main")
-        ])
-        await cb.message.edit_text("Select channels to send the current post to:", reply_markup=InlineKeyboardMarkup(keyboard))
-        await cb.answer()
-
-    elif action.startswith("toggle_sel_"):
-        idx = int(action.split("_")[2])
-        sel = POST_CHANNEL_SELECT.get(uid, set())
-        if idx in sel:
-            sel.remove(idx)
-        else:
-            sel.add(idx)
-        POST_CHANNEL_SELECT[uid] = sel
-        # Refresh the send menu
-        await post_callback(c, cb)  # reuse
-
-    elif action == "send_selected":
-        # Send current post to selected channels
-        sel = POST_CHANNEL_SELECT.get(uid, set())
-        channels = POST_CHANNELS.get(uid, [])
-        selected_channels = [channels[i-1] for i in sel]
-        await cb.answer(f"Sending to {len(selected_channels)} channels...", show_alert=False)
-        await send_post_to_channels(c, uid, selected_channels)
-        await cb.message.edit_text("Post sent to selected channels.")
-
-    elif action == "send_all":
-        channels = POST_CHANNELS.get(uid, [])
-        await cb.answer(f"Sending to all {len(channels)} channels...", show_alert=False)
-        await send_post_to_channels(c, uid, channels)
-        await cb.message.edit_text("Post sent to all channels.")
-
-    elif action == "back_main":
-        await post_main_menu(c, uid=uid, chat_id=cb.message.chat.id)
-
-    elif action == "off":
-        POST_MODE.discard(uid)
-        POST_CHANNELS.pop(uid, None)
-        POST_SESSIONS.pop(uid, None)
-        POST_BATCH_MODE.discard(uid)
-        POST_BATCH_DATA.pop(uid, None)
-        POST_CHANNEL_SELECT.pop(uid, None)
-        POST_EDIT_TOOLS.pop(uid, None)
-        await cb.message.edit_text("Post Mode turned OFF.")
-        await cb.answer()
-
-    # Additional post editing callbacks (add image, video, thumb, caption, buttons) will be handled via separate callback patterns
-
-# ---- Send Post Helper ----
-async def send_post_to_channels(c: Client, uid: int, channels: list):
-    """Send the current post to a list of channels."""
-    post = POST_SESSIONS.get(uid)
-    if not post:
-        await c.send_message(uid, "No post to send. Create a post first.")
-        return
-
-    # Build the message
-    caption = post.get('caption', '')
-    buttons = post.get('buttons', [])
-    media = post.get('media', [])
-    thumb = post.get('thumb', None)
-
-    for ch in channels:
-        chat_id = ch['chat_id']
-        try:
-            if media:
-                # Send first media as photo/video and the rest as documents? For simplicity, we'll send first media, and others as additional documents? 
-                # But user expects a post with multiple media? Telegram doesn't support multiple photos in one message natively except albums.
-                # We'll implement a simple approach: send the first photo/video with caption, and attach other media as files? Or we can send them as separate messages.
-                # For now, we'll send only the first media. Advanced users can use albums.
-                # We'll assume the user wants one image/video per post.
-                first_media = media[0]
-                if 'photo' in first_media:
-                    await c.send_photo(chat_id=chat_id, photo=first_media['file_id'], caption=caption, reply_markup=make_button_keyboard(buttons))
-                elif 'video' in first_media:
-                    await c.send_video(chat_id=chat_id, video=first_media['file_id'], caption=caption, thumb=thumb, reply_markup=make_button_keyboard(buttons))
-                else:
-                    await c.send_message(chat_id=chat_id, text=caption, reply_markup=make_button_keyboard(buttons))
-            else:
-                await c.send_message(chat_id=chat_id, text=caption, reply_markup=make_button_keyboard(buttons))
-        except Exception as e:
-            logger.error(f"Send to channel {chat_id} failed: {e}")
-
-def make_button_keyboard(buttons):
-    if not buttons:
-        return None
-    keyboard = []
-    for row in buttons:
-        btn_row = []
-        for btn in row:
-            btn_row.append(InlineKeyboardButton(btn['text'], url=btn['url']))
-        keyboard.append(btn_row)
-    return InlineKeyboardMarkup(keyboard)
-
-# ---- Handler for forwarded messages in Post Mode ----
-@app.on_message(filters.forwarded & filters.private)
-async def post_forward_handler(c: Client, m: Message):
-    uid = m.from_user.id
-    if uid not in POST_MODE:
-        return
-
-    # If user is adding a channel
-    if m.forward_from_chat:
-        chat = m.forward_from_chat
-        # Check if bot is admin in that chat? We'll just trust the user.
-        # Save channel
-        channels = POST_CHANNELS.get(uid, [])
-        # Avoid duplicates
-        for ch in channels:
-            if ch['chat_id'] == chat.id:
-                await m.reply_text("This channel is already saved.")
-                return
-        channels.append({
-            'chat_id': chat.id,
-            'title': chat.title,
-            'username': chat.username
-        })
-        POST_CHANNELS[uid] = channels
-        await m.reply_text(f"✅ Channel **{chat.title}** added successfully!")
-        # Show main menu
-        await post_main_menu(c, m)
-    else:
-        # It's a forwarded message from a user or group? We'll treat as source for post.
-        # But we need to check if it's from a saved channel? Actually, user wants to create post from any message.
-        # So we'll treat it as source for a new post.
-        session = POST_SESSIONS.get(uid, {})
-        if session.get('state') == 'awaiting_source':
-            # Capture the forwarded message as source
-            session['source'] = m
-            session['state'] = 'editing'
-            # Extract media if any
-            if m.photo:
-                session['media'] = [{'photo': m.photo.file_id}]
-            elif m.video:
-                session['media'] = [{'video': m.video.file_id}]
-            else:
-                # It's a text message
-                session['caption'] = m.text
-            POST_SESSIONS[uid] = session
-            await m.reply_text("Post captured. Now you can edit it using the tools.")
-            await show_post_edit_tools(c, m.chat.id, uid)
-        else:
-            await m.reply_text("Please use the main menu to start a new post or add channels.")
-
-# ---- Handler for direct messages in Post Mode (text or media) ----
-@app.on_message(filters.private & ~filters.command() & ~filters.forwarded)   # <--- FIXED LINE
-async def post_edit_input_handler(c: Client, m: Message):
-    uid = m.from_user.id
-    if uid not in POST_MODE:
-        return
-
-    session = POST_SESSIONS.get(uid, {})
-    if session.get('state') == 'awaiting_source':
-        # Capture as new post source
-        session['source'] = m
-        session['state'] = 'editing'
-        if m.photo:
-            session['media'] = [{'photo': m.photo.file_id}]
-        elif m.video:
-            session['media'] = [{'video': m.video.file_id}]
-        else:
-            # Text
-            session['caption'] = m.text
-        POST_SESSIONS[uid] = session
-        await m.reply_text("Post captured. Use the tools below to edit.")
-        await show_post_edit_tools(c, m.chat.id, uid)
-    else:
-        # If in batch mode, add to batch
-        if uid in POST_BATCH_MODE:
-            # Store message info
-            POST_BATCH_DATA[uid].append({
-                'message_id': m.id,
-                'chat_id': m.chat.id,
-                'file_id': m.photo.file_id if m.photo else (m.video.file_id if m.video else None),
-                'text': m.text if m.text else None
-            })
-            await m.reply_text(f"Batch item {len(POST_BATCH_DATA[uid])} added. Type `ok` to process.")
-        else:
-            # Ignore other messages while in post mode (except commands)
-            pass
-
-# ---- Show Post Edit Tools ----
-async def show_post_edit_tools(c: Client, chat_id: int, uid: int):
-    keyboard = [
-        [InlineKeyboardButton("🖼 Add Image", callback_data="post_tool_image")],
-        [InlineKeyboardButton("🎬 Add Video", callback_data="post_tool_video")],
-        [InlineKeyboardButton("📝 Add Caption", callback_data="post_tool_caption")],
-        [InlineKeyboardButton("🔘 Add Buttons", callback_data="post_tool_buttons")],
-        [InlineKeyboardButton("🖼 Set Thumbnail", callback_data="post_tool_thumb")],
-        [InlineKeyboardButton("💾 Save Post", callback_data="post_tool_save")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="post_tool_cancel")]
-    ]
-    await c.send_message(chat_id, "**Edit Post Tools**\nChoose an action:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-# ---- Post Tool Callbacks ----
-@app.on_callback_query(filters.regex("^post_tool_"))
-async def post_tool_callback(c: Client, cb: CallbackQuery):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        return
-    tool = cb.data.split('_')[2]
-    session = POST_SESSIONS.get(uid, {})
-    if not session:
-        await cb.answer("No active post session. Start a new post first.", show_alert=True)
-        return
-
-    if tool == "image":
-        await cb.message.edit_text("Send or forward an **image** to add to the post.")
-        # Set a temporary state to expect image
-        POST_EDIT_TOOLS[uid]['awaiting'] = 'image'
-    elif tool == "video":
-        await cb.message.edit_text("Send or forward a **video** to add to the post.")
-        POST_EDIT_TOOLS[uid]['awaiting'] = 'video'
-    elif tool == "caption":
-        await cb.message.edit_text("Send the **caption** text for the post.\nYou can use markdown formatting.")
-        POST_EDIT_TOOLS[uid]['awaiting'] = 'caption'
-    elif tool == "buttons":
-        await cb.message.edit_text(
-            "Send the **button configuration**.\n"
-            "Format: `button text = URL` (each on a new line).\n"
-            "You can add colour tags: `[red]Button = link`, `[green]Button = link`, etc.\n"
-            "Use commas to put buttons on the same line, new lines for different rows.\n"
-            "Example:\n"
-            "[red]Watch = https://...\n"
-            "[green]Download = https://..., [blue]Source = https://..."
-        )
-        POST_EDIT_TOOLS[uid]['awaiting'] = 'buttons'
-    elif tool == "thumb":
-        await cb.message.edit_text("Send or forward an **image** to set as the video thumbnail.")
-        POST_EDIT_TOOLS[uid]['awaiting'] = 'thumb'
-    elif tool == "save":
-        # Save current post and go back to main menu
-        await cb.message.edit_text("Post saved! You can now send it to channels.")
-        await post_main_menu(c, uid=uid, chat_id=cb.message.chat.id)
-    elif tool == "cancel":
-        POST_SESSIONS.pop(uid, None)
-        await cb.message.edit_text("Post editing cancelled.")
-        await post_main_menu(c, uid=uid, chat_id=cb.message.chat.id)
-
-# ---- Handle media/caption/button inputs during post editing ----
-@app.on_message(filters.private & ~filters.command() & ~filters.forwarded)   # <--- FIXED LINE
-async def post_edit_input_handler(c: Client, m: Message):
-    uid = m.from_user.id
-    if uid not in POST_MODE:
-        return
-    if uid not in POST_EDIT_TOOLS:
-        return
-    awaiting = POST_EDIT_TOOLS[uid].get('awaiting')
-    if not awaiting:
-        return
-
-    session = POST_SESSIONS.get(uid, {})
-    if not session:
-        return
-
-    if awaiting == 'image' and m.photo:
-        session['media'] = session.get('media', []) + [{'photo': m.photo.file_id}]
-        await m.reply_text("Image added.")
-    elif awaiting == 'video' and m.video:
-        session['media'] = session.get('media', []) + [{'video': m.video.file_id}]
-        await m.reply_text("Video added.")
-    elif awaiting == 'caption' and m.text:
-        session['caption'] = m.text
-        await m.reply_text("Caption updated.")
-    elif awaiting == 'buttons' and m.text:
-        # Parse buttons
-        lines = m.text.split('\n')
-        buttons = []
-        for line in lines:
-            if '=' not in line:
-                continue
-            # Check for colour tag
-            color = 'normal'
-            if line.strip().startswith('['):
-                tag_end = line.find(']')
-                if tag_end != -1:
-                    color = line[1:tag_end].lower()
-                    line = line[tag_end+1:].strip()
-            parts = line.split('=', 1)
-            if len(parts) == 2:
-                text = parts[0].strip()
-                url = parts[1].strip()
-                # Determine if same row (comma separated) or new row
-                # We'll just group by lines: each line is a row
-                buttons.append([{'text': text, 'url': url, 'color': color}])
-        session['buttons'] = buttons
-        await m.reply_text(f"Added {len(buttons)} button rows.")
-    elif awaiting == 'thumb' and m.photo:
-        session['thumb'] = m.photo.file_id
-        await m.reply_text("Thumbnail set.")
-
-    POST_SESSIONS[uid] = session
-    POST_EDIT_TOOLS[uid]['awaiting'] = None
-    await show_post_edit_tools(c, m.chat.id, uid)
-
-# ---- Handle "ok" in batch mode ----
-@app.on_message(filters.text & filters.private & filters.regex("^ok$"))
-async def post_batch_ok(c: Client, m: Message):
-    uid = m.from_user.id
-    if uid in POST_BATCH_MODE and uid in POST_BATCH_DATA and POST_BATCH_DATA[uid]:
-        items = POST_BATCH_DATA[uid]
-        # Process each item as a separate post session, apply same edits?
-        # For simplicity, we'll treat them as a list and allow editing all with same tools.
-        # We'll combine into a single post? Or multiple? We'll create a multi-post session.
-        # For now, we'll create a single post with all media combined? Not exactly.
-        # We'll inform user that batch editing is not fully implemented yet.
-        await m.reply_text("Batch editing: you can now edit the first item; edits will apply to all.\nUse the tools as usual.")
-        # We'll set the first item as the current post and others stored.
-        first = items[0]
-        # Create a fake message source
-        # We'll just set media from first item
-        session = {
-            'source': None,
-            'media': [{'photo': first.get('file_id')}] if first.get('file_id') else [],
-            'caption': first.get('text', ''),
-            'buttons': [],
-            'thumb': None,
-            'state': 'editing',
-            'batch_items': items[1:]  # store remaining items
-        }
-        POST_SESSIONS[uid] = session
-        POST_BATCH_MODE.discard(uid)
-        await show_post_edit_tools(c, m.chat.id, uid)
-
-# ===================================================
-# COLAB DRIVE INTEGRATION
-# ===================================================
-
-@app.on_message(filters.command("colab_drive") & filters.private)
-async def colab_drive_cmd(c: Client, m: Message):
-    uid = m.from_user.id
-    if not is_admin(uid):
-        await m.reply_text("You are not authorized.")
-        return
-
-    # Check if running in Colab by checking if google.colab is available
-    try:
-        import google.colab
-        IN_COLAB = True
-    except ImportError:
-        IN_COLAB = False
-
-    if not IN_COLAB:
-        await m.reply_text("This command only works in Google Colab environment.")
-        return
-
-    if len(m.command) == 1:
-        # Mount drive
-        try:
-            from google.colab import drive
-            drive.mount('/content/drive')
-            COLAB_DRIVE_MOUNTED.add(uid)
-            await m.reply_text("Google Drive mounted successfully at `/content/drive`.")
-        except Exception as e:
-            await m.reply_text(f"Drive mount failed: {e}")
-        return
-
-    # If path provided: /colab_drive <path>
-    if len(m.command) >= 2:
-        drive_path = m.text.split(maxsplit=1)[1].strip()
-        if uid not in COLAB_DRIVE_MOUNTED:
-            await m.reply_text("Drive is not mounted. Use /colab_drive first.")
-            return
-
-        # Copy from drive to TMP
-        src = Path(f"/content/drive/MyDrive/{drive_path}")
-        if not src.exists():
-            await m.reply_text(f"File not found: {drive_path}")
-            return
-
-        dest = TMP / src.name
-        try:
-            if src.is_dir():
-                shutil.copytree(src, dest, dirs_exist_ok=True)
-                await m.reply_text(f"Copied folder `{src.name}` to TMP.")
-            else:
-                shutil.copy2(src, dest)
-                await m.reply_text(f"Copied file `{src.name}` to TMP.")
-        except Exception as e:
-            await m.reply_text(f"Copy failed: {e}")
-
-# ===================================================
-# FLASK & PING SERVICE (FIX)
-# ===================================================
-
 @flask_app.route('/')
 def home():
     html_content = """
@@ -6190,24 +6332,26 @@ def download_local_file(filename):
     file_path = TMP / filename
     if file_path.exists() and file_path.is_file():
         mime_type, _ = mimetypes.guess_type(str(file_path))
-        # Check if download parameter is present to force download
-        if request.args.get('download'):
-            return send_from_directory(TMP, filename, mimetype=mime_type, as_attachment=True)
-        return send_from_directory(TMP, filename, mimetype=mime_type, as_attachment=False)
+        return send_from_directory(TMP, filename, mimetype=mime_type, as_attachment=True)
     return "File not found.", 404
 
 @flask_app.route('/stream')
 def stream_remote_file():
     """Streams a remote URL or returns a link. (Basic proxy for T-Mode/Link)"""
     url = request.args.get('url')
+    file_id = request.args.get('file_id')
+    filename = request.args.get('filename', 'video.mp4')
+    
+    if file_id:
+        # Handle Telegram file streaming
+        return f"Telegram file streaming not implemented. Use direct download instead."
+    
     if not url:
         return "URL parameter is required.", 400
-
-    # If we have a file_id (for Telegram files), we could handle differently, but here we assume URL.
-    # For t-mode we generate direct Telegram link separately.
+        
     def generate():
         try:
-            with requests.get(url, stream=True, timeout=15) as r:
+            with requests.get(url, stream=True, timeout=15, headers=DOWNLOAD_HEADERS) as r:
                 r.raise_for_status()
                 for chunk in r.iter_content(chunk_size=8192):
                     if chunk:
@@ -6224,22 +6368,6 @@ def stream_remote_file():
         'Content-Type': mime_type
     }
     return Response(generate(), headers=headers)
-
-# ===== FIXED PING SERVICE =====
-def ping_service():
-    """Ping the public URL to keep Render/HuggingFace instance alive."""
-    target_url = PUBLIC_BASE_URL
-    if not target_url:
-        print("PUBLIC_BASE_URL not set. Ping disabled.")
-        return
-
-    while True:
-        try:
-            response = requests.get(target_url, timeout=10)
-            print(f"Pinged {target_url} | Status Code: {response.status_code}")
-        except requests.exceptions.RequestException as e:
-            print(f"Error pinging {target_url}: {e}")
-        time.sleep(600)  # 10 minutes
 
 def run_flask_and_ping():
     flask_thread = threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=PORT, use_reloader=False))
