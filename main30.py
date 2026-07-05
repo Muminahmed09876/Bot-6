@@ -15,7 +15,7 @@ from hachoir.parser import createParser
 from hachoir.metadata import extractMetadata
 import subprocess
 import traceback
-import json 
+import json
 from flask import Flask, render_template_string, send_from_directory, Response, request, redirect
 import requests
 import time
@@ -48,120 +48,48 @@ try:
 except ImportError:
     pass
 
+# For Colab Drive (only works in Google Colab)
+try:
+    from google.colab import drive
+    import google.auth
+    COLAB_AVAILABLE = True
+except ImportError:
+    COLAB_AVAILABLE = False
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-PORT = int(os.getenv("PORT", "10000")) 
+PORT = int(os.getenv("PORT", "10000"))
 
-# ===== CHANGE 1: Improved PUBLIC_BASE_URL with multi-platform support =====
+# ===== CHANGE 1: Use PUBLIC_BASE_URL instead of RENDER_EXTERNAL_HOSTNAME =====
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
-RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-
 if not PUBLIC_BASE_URL:
-    if RENDER_EXTERNAL_HOSTNAME:
-        PUBLIC_BASE_URL = f"http://{RENDER_EXTERNAL_HOSTNAME}"
-    else:
-        # Try to detect environment
-        try:
-            # Check if running on Hugging Face
-            if os.getenv("SPACE_ID"):
-                PUBLIC_BASE_URL = f"https://{os.getenv('SPACE_ID')}.hf.space"
-            # Check if running on Colab
-            elif os.getenv("COLAB_GPU"):
-                # Colab typically uses ngrok or localhost
-                try:
-                    import urllib.request
-                    _public_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf8')
-                    PUBLIC_BASE_URL = f"http://{_public_ip}:{PORT}"
-                except:
-                    PUBLIC_BASE_URL = f"http://localhost:{PORT}"
-            # Check if running on Termux/Android
-            elif os.getenv("TERMUX_VERSION"):
-                PUBLIC_BASE_URL = f"http://localhost:{PORT}"
-            else:
-                # Default fallback
-                try:
-                    import urllib.request
-                    _public_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf8')
-                    PUBLIC_BASE_URL = f"http://{_public_ip}:{PORT}"
-                except Exception:
-                    try:
-                        _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                        _s.connect(("8.8.8.8", 80))
-                        _local_ip = _s.getsockname()[0]
-                        _s.close()
-                        PUBLIC_BASE_URL = f"http://{_local_ip}:{PORT}"
-                    except Exception:
-                        PUBLIC_BASE_URL = f"http://localhost:{PORT}"
-else:
-    if not PUBLIC_BASE_URL.startswith(('http://', 'https://')):
-        PUBLIC_BASE_URL = f"http://{PUBLIC_BASE_URL}"
-# ========================================================================
-
-# ===== CHANGE 2: Multi-platform ping service =====
-def ping_service():
-    """Ping service to keep bot alive on Render, Hugging Face, Colab, etc."""
-    # Determine which platform we're on
-    render_url = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-    hf_space_id = os.getenv("SPACE_ID")
-    is_render = bool(render_url)
-    is_hf = bool(hf_space_id)
-    is_colab = bool(os.getenv("COLAB_GPU"))
-    
-    # Build target URLs
-    target_urls = []
-    
-    if is_render:
-        target_urls.append(f"https://{render_url}")
-    elif is_hf:
-        target_urls.append(f"https://{hf_space_id}.hf.space")
-    else:
-        # Try to ping ourselves
-        target_urls.append(f"http://localhost:{PORT}")
-        # Also try public IP if available
+    RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+    if not RENDER_EXTERNAL_HOSTNAME:
         try:
             import urllib.request
             _public_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf8')
-            target_urls.append(f"http://{_public_ip}:{PORT}")
-        except:
-            pass
-    
-    # Also ping both Render and Hugging Face if both are available (fallback)
-    if is_render and hf_space_id:
-        target_urls.append(f"https://{hf_space_id}.hf.space")
-    if is_hf and render_url:
-        target_urls.append(f"https://{render_url}")
-    
-    # Remove duplicates
-    target_urls = list(dict.fromkeys(target_urls))
-    
-    logger.info(f"Ping service started. Will ping: {target_urls}")
-    
-    while True:
-        for url in target_urls:
+            RENDER_EXTERNAL_HOSTNAME = f"{_public_ip}:{PORT}"
+        except Exception:
             try:
-                response = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-                logger.info(f"Pinged {url} | Status: {response.status_code}")
-            except Exception as e:
-                logger.error(f"Error pinging {url}: {e}")
-        time.sleep(600)  # Ping every 10 minutes
-# ========================================================================
-
-# ===== CHANGE 3: Improved headers for all downloads =====
-DOWNLOAD_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive"
-}
+                _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                _s.connect(("8.8.8.8", 80))
+                _local_ip = _s.getsockname()[0]
+                _s.close()
+                RENDER_EXTERNAL_HOSTNAME = f"{_local_ip}:{PORT}"
+            except Exception:
+                RENDER_EXTERNAL_HOSTNAME = f"localhost:{PORT}"
+    PUBLIC_BASE_URL = f"http://{RENDER_EXTERNAL_HOSTNAME}"
+else:
+    if not PUBLIC_BASE_URL.startswith(('http://', 'https://')):
+        PUBLIC_BASE_URL = f"http://{PUBLIC_BASE_URL}"
 # ========================================================================
 
 # env
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-COOKIES_TXT = os.getenv("COOKIES_TXT") # Added for yt-dlp cookies
+COOKIES_TXT = os.getenv("COOKIES_TXT")
 
 TMP = Path("tmp")
 TMP.mkdir(parents=True, exist_ok=True)
@@ -169,17 +97,17 @@ TMP.mkdir(parents=True, exist_ok=True)
 # state
 USER_THUMBS = {}
 TASKS = {}
-USER_TASK_EVENTS = {} # New: uid -> {msg_id: cancel_event} for specific task cancel
+USER_TASK_EVENTS = {}
 SET_THUMB_REQUEST = set()
 SET_CAPTION_REQUEST = set()
-SET_FILENAME_REQUEST = set() # New for filename
+SET_FILENAME_REQUEST = set()
 USER_CAPTIONS = {}
-USER_FILENAMES = {} # New for filename
+USER_FILENAMES = {}
 USER_COUNTERS = {}
 EDIT_CAPTION_MODE = set()
 USER_THUMB_TIME = {}
 HIDE_PROGRESS_BAR = set()
-USER_PROGRESS_INTERVAL = {} # New: custom interval for progress bar
+USER_PROGRESS_INTERVAL = {}
 
 # --- NEW STATE FOR PAUSE/CONTINUE & AUTO ZIP ---
 USER_QUEUE_PAUSED = set()
@@ -188,39 +116,39 @@ AUTO_UPLOAD_ALL = set()
 
 # --- STATE FOR AUDIO CHANGE ---
 MKV_AUDIO_CHANGE_MODE = set()
-PENDING_AUDIO_ORDERS = {} 
+PENDING_AUDIO_ORDERS = {}
 # ------------------------------
 
 # --- NEW STATE FOR CONVERT MODE ---
 CONVERT_MODE = set()
 CONVERT_SESSIONS = {}
-ACTIVE_CONVERT_SESSION = {} # New: track active session to receive custom bitrate via message
-CONVERT_LOCKS = {} # To prevent CPU overload
+ACTIVE_CONVERT_SESSION = {}
+CONVERT_LOCKS = {}
 CONVERT_ZIP_MODE = set()
-CONVERT_BATCH_LIST = {} # uid -> list of files to convert
+CONVERT_BATCH_LIST = {}
 CONVERT_BATCH_UI_MSG = {}
 # ----------------------------------
 
 # --- NEW STATE FOR POST CREATION ---
 CREATE_POST_MODE = set()
-POST_CREATION_STATE = {} 
+POST_CREATION_STATE = {}
 
 DEFAULT_POST_DATA = {
     'image_name': "Image Name",
     'genres': "",
-    'season_list_raw': "1, 2" 
+    'season_list_raw': "1, 2"
 }
 # ------------------------------------------------
 
 # --- NEW STATE FOR BATCH CAPTION & QUEUE ---
-BATCH_CAPTION_MODE = set()  
+BATCH_CAPTION_MODE = set()
 BATCH_UPLOAD_MODE = set()
-BATCH_DATA = {}            
-BATCH_STATUS_MSG = {}      
+BATCH_DATA = {}
+BATCH_STATUS_MSG = {}
 
-USER_QUEUES = {}           
-USER_WORKERS = {}          
-USER_UPLOAD_LOCKS = {}     
+USER_QUEUES = {}
+USER_WORKERS = {}
+USER_UPLOAD_LOCKS = {}
 
 # --- NEW STATE FOR MULTI GROUP BATCH & CAPTION OVERRIDE & ZIP ---
 MULTI_GROUP_BATCH_MODE = set()
@@ -231,13 +159,13 @@ MULTI_GROUP_DONE_MSG = {}
 # --- NEW ZIP DOWNLOAD MODE STATE ---
 ZIP_DOWNLOAD_MODE = set()
 ZIP_NAV_STATE = {}
-ZIP_READY_LIST = {} # New: uid -> list of extracted zip info for serial display
-ZIP_DL_QUEUES = {}  # New: queue for serial zip downloading
-ZIP_DL_WORKERS = {} # New: worker for serial zip downloading
+ZIP_READY_LIST = {}
+ZIP_DL_QUEUES = {}
+ZIP_DL_WORKERS = {}
 # ------------------------------------------------
 
 # --- NEW STATE FOR PATH NAVIGATOR ---
-NAV_PATHS = {} # uid -> {"current": Path, "items": list, "selected_file": Path, "page": int}
+NAV_PATHS = {}
 # ------------------------------------------------
 
 # --- YT-DLP STATE & MODES ---
@@ -248,10 +176,10 @@ SAVED_YT_QUALITIES = {}
 
 # --- NEW STATE FOR BATCH AUDIO ADD MODE ---
 BATCH_AUDIO_MODE = set()
-BATCH_AUDIO_STATE = {} # uid -> 'list1', 'list2', 'mapping', 'ui'
-BATCH_AUDIO_LIST1 = {} # uid -> list of dicts: {'path': str, 'name': str}
-BATCH_AUDIO_LIST2 = {} # uid -> list of dicts: {'path': str, 'name': str}
-BATCH_AUDIO_MAPPING = {} # uid -> dict mapping pairs
+BATCH_AUDIO_STATE = {}
+BATCH_AUDIO_LIST1 = {}
+BATCH_AUDIO_LIST2 = {}
+BATCH_AUDIO_MAPPING = {}
 BATCH_AUDIO_CURRENT_PAIR_IDX = {}
 BATCH_AUDIO_TRACK_CONFIGS = {}
 BATCH_AUDIO_UI_MSG = {}
@@ -266,26 +194,18 @@ DOWNLOAD_LINK_MODE = set()
 DOWNLOAD_T_MODE = set()
 # ----------------------------------------
 
-# ===== CHANGE 4: New POST MODE state =====
-POST_MODE = set()
-POST_CHANNELS = {}  # uid -> list of channel IDs
-POST_EDIT_STATE = {}  # uid -> current post edit state
-POST_TUTORIAL_SENT = set()
-# ========================================
-
-# ===== CHANGE 5: New COLAB DRIVE state =====
+# --- NEW STATE FOR COLAB DRIVE ---
 COLAB_DRIVE_MODE = set()
-COLAB_DRIVE_PATH = {}  # uid -> drive path
-# ===========================================
+COLAB_DRIVE_STATE = {}
+# ---------------------------------
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", ""))
-MAX_SIZE = 1000 * 1024 * 1024 * 1024 # Increased to 1000GB
+MAX_SIZE = 1000 * 1024 * 1024 * 1024
 
-# Updated workers to 1000 as requested, added sleep_threshold to prevent FloodWait crashes
 app = Client("mybot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=1000, sleep_threshold=86400)
 flask_app = Flask(__name__)
 
-MAIN_LOOP = None # Required for TG streaming
+MAIN_LOOP = None
 
 # ---- utilities ----
 def get_unique_path(base_dir: Path, filename: str) -> Path:
@@ -393,7 +313,6 @@ def process_dynamic_caption(uid, caption_template, is_first_setup=False):
 
 
 def generate_new_filename(original_name: str, uid: int = None) -> str:
-    """Generates the new standardized filename while preserving the original extension."""
     file_path = Path(original_name)
     file_ext = file_path.suffix.lower()
     
@@ -410,7 +329,6 @@ def generate_new_filename(original_name: str, uid: int = None) -> str:
     return base_name + file_ext
 
 def get_video_metadata(file_path: Path) -> dict:
-    """Extracts duration, width, and height using FFprobe (with Hachoir fallback)."""
     data = {'duration': 0, 'width': 0, 'height': 0}
     try:
         cmd = [
@@ -473,7 +391,6 @@ def get_video_metadata(file_path: Path) -> dict:
     return data
 
 def get_detailed_metadata(file_path: Path) -> dict:
-    """Extracts very detailed metadata for conversion purposes."""
     data = {'duration': 0, 'width': 0, 'height': 0, 'v_bitrate': 0, 'audio_streams': [], 'filesize': 0}
     try:
         data['filesize'] = os.path.getsize(file_path)
@@ -507,7 +424,6 @@ def get_detailed_metadata(file_path: Path) -> dict:
                     'bitrate': ab_val
                 })
                 
-        # Estimate video bitrate if missing
         if data['v_bitrate'] == 0 and total_bitrate > 0:
             audio_total = sum([a['bitrate'] for a in data['audio_streams']])
             data['v_bitrate'] = max(100000, int(total_bitrate - audio_total))
@@ -558,7 +474,6 @@ def build_convert_ui(session_id):
             res_buttons.append(InlineKeyboardButton(f"✅ {r}p" if res == r else f"{r}p", callback_data=f"cv_res_{session_id}_{r}"))
     
     keyboard = []
-    # Splitting resolution buttons into chunks of 4 for better UI
     for i in range(0, len(res_buttons), 4):
         keyboard.append(res_buttons[i:i+4])
         
@@ -611,7 +526,6 @@ def format_duration(seconds):
     return f"{s}s"
 
 def progress_keyboard():
-    # Included Refresh button as per requirement
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Refresh 🔄", callback_data="refresh_btn")],
         [InlineKeyboardButton("Cancel ❌", callback_data="cancel_single"),
@@ -629,7 +543,6 @@ def mode_check_keyboard(uid: int) -> InlineKeyboardMarkup:
     convert_status = "✅ ON" if uid in CONVERT_MODE else "❌ OFF"
     batch_audio_status = "✅ ON" if uid in BATCH_AUDIO_MODE else "❌ OFF"
     dl_only_status = "✅ ON" if uid in DOWNLOAD_ONLY_MODE else "❌ OFF"
-    post_status = "✅ ON" if uid in POST_MODE else "❌ OFF"
     
     waiting_count = sum(1 for data in PENDING_AUDIO_ORDERS.values() if data['uid'] == uid)
     waiting_status = f" ({waiting_count} orders pending)" if waiting_count > 0 else ""
@@ -641,13 +554,11 @@ def mode_check_keyboard(uid: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"Edit Caption Mode {caption_status}", callback_data="toggle_caption_mode")],
         [InlineKeyboardButton(f"YT-DLP Mode {yt_dlp_status}", callback_data="toggle_ytdlp_mode")],
         [InlineKeyboardButton(f"ZIP Download Mode {zip_status}", callback_data="toggle_zip_mode")],
-        [InlineKeyboardButton(f"Download Only Mode {dl_only_status}", callback_data="toggle_dl_only_mode")],
-        [InlineKeyboardButton(f"Post Mode {post_status}", callback_data="toggle_post_mode")]
+        [InlineKeyboardButton(f"Download Only Mode {dl_only_status}", callback_data="toggle_dl_only_mode")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def get_audio_tracks_ffprobe(file_path: Path) -> list:
-    """Uses ffprobe to get a list of audio streams with their index and title."""
     try:
         cmd = [
             "ffprobe",
@@ -701,7 +612,6 @@ def format_size(bytes_size):
     return "%s %s" % (s, size_name[i])
 
 def make_bold(text):
-    """Utility to ensure text is bold formatted correctly"""
     if not text: return text
     text_str = str(text).strip()
     if not text_str.startswith("**"):
@@ -746,7 +656,6 @@ async def progress_callback(current, total, action, message, start_time, is_time
         size_str = f"{format_size(current)} / {format_size(total)}"
         speed_str = f"{format_size(speed)}/s"
     
-    # Original Name added to progress bar
     orig_name_str = f"**File:** `{original_name}`\n" if original_name else ""
     
     text = (
@@ -875,12 +784,10 @@ def generate_post_caption(data: dict) -> str:
     
     return final_caption
 
-# ===== CHANGE 2: Improved get_filename_from_url =====
 async def get_filename_from_url(url):
-    """Accurately detect filename from URL/Headers using regex without deprecated cgi module."""
     try:
         connector = aiohttp.TCPConnector(limit=0, family=socket.AF_INET, use_dns_cache=True, ttl_dns_cache=300)
-        async with aiohttp.ClientSession(connector=connector, headers=DOWNLOAD_HEADERS) as sess:
+        async with aiohttp.ClientSession(connector=connector) as sess:
             async with sess.head(url, allow_redirects=True, timeout=10) as resp:
                 cd = resp.headers.get('Content-Disposition')
                 if cd:
@@ -900,7 +807,6 @@ async def get_filename_from_url(url):
     path = urllib.parse.unquote(parsed_url.path)
     fname = os.path.basename(path)
     
-    # If fname is empty or too short (like "re"), try harder
     if not fname or len(fname) < 3:
         segments = path.split('/')
         for seg in reversed(segments):
@@ -908,10 +814,8 @@ async def get_filename_from_url(url):
                 fname = seg
                 break
         if not fname:
-            # Fallback: use a default name
             fname = "downloaded_file"
     
-    # Ensure extension is present (if not, caller may add)
     if len(fname) > 200:
         ext = Path(fname).suffix
         if not ext or len(ext) > 20:
@@ -922,7 +826,6 @@ async def get_filename_from_url(url):
         fname = "downloaded_file.mp4"
         
     return fname
-# ========================================================================
 
 async def download_stream(resp, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
     total = 0
@@ -954,9 +857,12 @@ async def download_stream(resp, out_path: Path, message: Message = None, cancel_
     return True, None
 
 async def download_url_generic(url: str, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
+    # User-Agent added for all downloads
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     for attempt in range(1, 11):
         timeout = aiohttp.ClientTimeout(total=7200, sock_connect=120)
-        headers = DOWNLOAD_HEADERS.copy()
         if out_path.exists():
             downloaded = out_path.stat().st_size
             headers["Range"] = f"bytes={downloaded}-"
@@ -983,13 +889,14 @@ async def download_url_generic(url: str, out_path: Path, message: Message = None
             return False, str(e)
     return False, "Failed after 10 attempts"
 
-# ===== CHANGE 3: Improved Google Drive download =====
 async def download_drive_file(file_id: str, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
     base = f"https://drive.google.com/uc?export=download&id={file_id}"
+    # User-Agent added
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     for attempt in range(1, 11):
         timeout = aiohttp.ClientTimeout(total=7200, sock_connect=120)
-        headers = DOWNLOAD_HEADERS.copy()
-        
         if out_path.exists():
             downloaded = out_path.stat().st_size
             headers["Range"] = f"bytes={downloaded}-"
@@ -1007,28 +914,25 @@ async def download_drive_file(file_id: str, out_path: Path, message: Message = N
                         if attempt < 10:
                             await asyncio.sleep(2)
                             continue
-                    
-                    # Try to get confirmation token
                     text = await resp.text(errors="ignore")
-                    
-                    # Check for virus scan warning
-                    if "confirm" in text or "download_warning" in text:
-                        # Try multiple methods to get the token
-                        token = None
-                        
-                        # Method 1: Regex for confirm token
-                        m = re.search(r"confirm=([0-9A-Za-z-_]+)", text)
-                        if m:
-                            token = m.group(1)
-                        
-                        # Method 2: Check cookies
-                        if not token:
-                            for k, v in resp.cookies.items():
-                                if k.startswith("download_warning"):
-                                    token = v.value
-                                    break
-                        
-                        if token:
+                    m = re.search(r"confirm=([0-9A-Za-z-_]+)", text)
+                    if m:
+                        token = m.group(1)
+                        download_url = f"https://drive.google.com/uc?export=download&confirm={token}&id={file_id}"
+                        async with sess.get(download_url, allow_redirects=True) as resp2:
+                            if resp2.status == 404 or resp2.status >= 500:
+                                if attempt < 10:
+                                    await asyncio.sleep(2)
+                                    continue
+                            if resp2.status not in (200, 206):
+                                return False, f"HTTP {resp2.status}"
+                            ok, err = await download_stream(resp2, out_path, message, cancel_event=cancel_event, original_name=original_name)
+                            if ok: return True, None
+                            if attempt < 10: await asyncio.sleep(2); continue
+                            
+                    for k, v in resp.cookies.items():
+                        if k.startswith("download_warning"):
+                            token = v.value
                             download_url = f"https://drive.google.com/uc?export=download&confirm={token}&id={file_id}"
                             async with sess.get(download_url, allow_redirects=True) as resp2:
                                 if resp2.status == 404 or resp2.status >= 500:
@@ -1041,18 +945,6 @@ async def download_drive_file(file_id: str, out_path: Path, message: Message = N
                                 if ok: return True, None
                                 if attempt < 10: await asyncio.sleep(2); continue
                     
-                    # Try alternative method with gdown-style URL
-                    download_url = f"https://docs.google.com/uc?export=download&id={file_id}&confirm=1"
-                    async with sess.get(download_url, allow_redirects=True) as resp3:
-                        if resp3.status == 404 or resp3.status >= 500:
-                            if attempt < 10:
-                                await asyncio.sleep(2)
-                                continue
-                        if resp3.status in (200, 206):
-                            ok, err = await download_stream(resp3, out_path, message, cancel_event=cancel_event, original_name=original_name)
-                            if ok: return True, None
-                            if attempt < 10: await asyncio.sleep(2); continue
-                    
                     if attempt < 10 and resp.status not in (200, 206):
                         await asyncio.sleep(2)
                         continue
@@ -1063,13 +955,11 @@ async def download_drive_file(file_id: str, out_path: Path, message: Message = N
                 continue
             return False, str(e)
     return False, "Failed after 10 attempts"
-# ========================================================================
 
 def process_dynamic_text_no_increment(uid, caption_template):
     if uid not in USER_COUNTERS:
         USER_COUNTERS[uid] = {'uploads': 0, 'episode_numbers': {}, 'dynamic_counters': {}, 're_options_count': 0}
     
-    # Initialize counters to ensure proper replacement
     counter_matches = re.findall(r"\[\s*(\(?\d+\)?)\s*\]", caption_template)
     for match in counter_matches:
         if match not in USER_COUNTERS[uid].get('dynamic_counters', {}):
@@ -1151,12 +1041,11 @@ async def set_bot_commands():
         BotCommand("yt_dlp", "Toggle YT-DLP mode for all URLs (admin only)"),
         BotCommand("convert", "Convert Video/Audio quality, bitrate & format (admin only)"),
         BotCommand("create_post", "Create new post (admin only)"), 
-        BotCommand("post", "Create/Edit posts in channels (admin only)"),
-        BotCommand("colab_drive", "Connect Google Drive in Colab (admin only)"),
         BotCommand("mode_check", "Check current mode status (admin only)"), 
         BotCommand("progress_bar", "Toggle progress bar ON/OFF or Custom Interval (admin only)"),
         BotCommand("continue", "Resume paused queue / Restore buttons"),
         BotCommand("restart", "Show Storage info and Clear Data"),
+        BotCommand("colab_drive", "Connect Google Drive (Colab only)"),
         BotCommand("help", "Help")
     ]
     try:
@@ -1165,7 +1054,6 @@ async def set_bot_commands():
         logger.warning("Set commands error: %s", e)
 
 async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, status_msg_id, cancel_event, default_caption=None, original_caption=None, original_download_name=None):
-    """Background task that waits for upload lock to ensure sequential uploads."""
     if uid not in USER_UPLOAD_LOCKS:
         USER_UPLOAD_LOCKS[uid] = asyncio.Lock()
     
@@ -1177,7 +1065,6 @@ async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, s
 
 # --- QUEUE WORKER WITH PAUSE LOGIC ---
 async def process_queue_handler(uid, client):
-    """Worker function that processes tasks sequentially for a user."""
     queue = USER_QUEUES[uid]
     while not queue.empty():
         while uid in USER_QUEUE_PAUSED:
@@ -1206,7 +1093,7 @@ async def process_queue_handler(uid, client):
                 safe_title = re.sub(r"[\\/*?\"<>|:]", "_", title)
                 if len(safe_title) > 100: safe_title = safe_title[:100]
                 
-                out_tmpl = str(TMP / f"{safe_title}.%(ext)s") # FIX 2: Download strictly without dl_uid_prefix
+                out_tmpl = str(TMP / f"{safe_title}.%(ext)s")
                 
                 ydl_opts = {
                     'format': fmt,
@@ -1275,10 +1162,9 @@ async def process_queue_handler(uid, client):
                 url = task_data.get('url')
                 await download_and_process_generic(client, m, url, status_msg, cancel_event)
             else:
-                # Start Processing
                 file_info = m.video or m.document
                 
-                tmp_path = get_unique_path(TMP, original_name) # FIX 2: Maintains original name downloaded
+                tmp_path = get_unique_path(TMP, original_name)
                 
                 try:
                     if status_msg:
@@ -1309,7 +1195,6 @@ async def process_queue_handler(uid, client):
 
                     renamed_file = get_dynamic_filename(uid, tmp_path.name)
                     
-                    # 2. Upload Phase (Pipelined)
                     asyncio.create_task(
                         sequential_upload_task(uid, client, m, tmp_path, renamed_file, status_msg.id if status_msg else None, cancel_event, default_caption=original_name, original_caption=original_caption, original_download_name=original_name)
                     )
@@ -1619,12 +1504,11 @@ async def start_handler(c, m: Message):
         "/yt_dlp - Toggle YT-DLP mode for all URLs (admin only)\n"
         "/convert - Convert Video/Audio quality, bitrate & format (admin only)\n"
         "/create_post - Create new post (admin only)\n" 
-        "/post - Create/Edit posts in channels (admin only)\n"
-        "/colab_drive - Connect Google Drive in Colab (admin only)\n"
         "/mode_check - Check current mode status (admin only)\n" 
         "/progress_bar - Toggle progress bar ON/OFF or Custom Interval (admin only)\n"
         "/continue - Resume paused queue / Restore buttons\n"
         "/restart - Show Storage info and Clear Data\n"
+        "/colab_drive - Connect Google Drive (Colab only)\n"
         "/help - Help"
     )
     await m.reply_text(text)
@@ -1677,7 +1561,6 @@ async def full_reset_bot_cb(c, cb):
     uid = cb.from_user.id
     if not is_admin(uid): return
     
-    # Fully Clear All State Vars
     USER_THUMBS.clear()
     TASKS.clear()
     USER_TASK_EVENTS.clear()
@@ -1718,10 +1601,6 @@ async def full_reset_bot_cb(c, cb):
     DOWNLOAD_ONLY_MODE.clear()
     DOWNLOAD_LINK_MODE.clear()
     DOWNLOAD_T_MODE.clear()
-    POST_MODE.clear()
-    POST_CHANNELS.clear()
-    POST_EDIT_STATE.clear()
-    POST_TUTORIAL_SENT.clear()
     
     if uid in USER_QUEUES:
         while not USER_QUEUES[uid].empty():
@@ -1764,7 +1643,6 @@ async def full_reset_bot_cb(c, cb):
     YT_DLP_MODE.clear()
     SAVED_YT_QUALITIES.clear()
     
-    # Clear Files
     shutil.rmtree(TMP, ignore_errors=True)
     TMP.mkdir(parents=True, exist_ok=True)
     
@@ -1795,7 +1673,20 @@ async def zip_file_download_cmd(c, m: Message):
         await m.reply_text("ZIP File Download Mode **OFF**.")
     else:
         ZIP_DOWNLOAD_MODE.add(uid)
-        await m.reply_text("ZIP File Download Mode **ON**.\nSend direct links or Telegram Files. Multiple items will be queued automatically.\nType `clear` to reset. Type `all` for auto upload all.")
+        tutorial = (
+            "**📦 ZIP Download Mode ON**\n\n"
+            "Send a **direct link**, **Telegram file**, or **ZIP file** to download and extract.\n"
+            "**Commands inside mode:**\n"
+            "• `clear` → Clear current queue and session.\n"
+            "• `all` → Auto upload all extracted files.\n"
+            "• `all off` → Disable auto upload.\n"
+            "• `path` → Open file manager to view/download extracted files.\n\n"
+            "After extraction, you will get a list of files with options to upload.\n"
+            "Send numbers (e.g., `1,3,5,8-15`) to upload in that order.\n"
+            "Send `e 1` to manually extract an archive.\n"
+            "Click **Upload All 🚀** to upload all files sequentially."
+        )
+        await m.reply_text(tutorial)
 
 
 @app.on_message(filters.command("yt_dlp") & filters.private)
@@ -1809,7 +1700,19 @@ async def toggle_yt_dlp(c, m: Message):
         await m.reply_text("YT-DLP Mode **OFF**. Normal URLs will use direct download.")
     else:
         YT_DLP_MODE.add(uid)
-        await m.reply_text("YT-DLP Mode **ON**. All URLs given to the bot will be processed via YT-DLP.")
+        tutorial = (
+            "**🎬 YT-DLP Mode ON**\n\n"
+            "Send a **YouTube URL** and the bot will fetch all available qualities.\n"
+            "You will see a list of resolutions with file sizes.\n"
+            "**Buttons:**\n"
+            "• `⬇️ 1080p` → Download that quality immediately.\n"
+            "• `🔲 Select 1080p` → Select multiple qualities.\n"
+            "• `OK ✅` → Download all selected qualities.\n"
+            "• `Add Save Quality 💾` → Save current selection for future.\n"
+            "• `Load Saved Quality 🔄` → Load saved selection.\n\n"
+            "Selected files will be processed in queue."
+        )
+        await m.reply_text(tutorial)
 
 @app.on_message(filters.command("convert") & filters.private)
 async def toggle_convert_mode(c, m: Message):
@@ -1826,7 +1729,22 @@ async def toggle_convert_mode(c, m: Message):
     else:
         CONVERT_MODE.add(uid)
         CONVERT_BATCH_LIST[uid] = []
-        await m.reply_text("Convert Mode **ON**.\nSend or forward any video, audio, or link/zip to compress and convert it.\n\nType `list` to view added items, `next` to select options, `off` to disable mode.\n(If ZIP is downloaded, it will extract and wait in the list).")
+        tutorial = (
+            "**🔄 Convert Mode ON**\n\n"
+            "Send **video/audio files**, **URLs**, or **ZIP files** to add to batch list.\n"
+            "**Commands inside mode:**\n"
+            "• `list` → View all added items.\n"
+            "• `next` → Start conversion with interactive UI.\n"
+            "• `off` → Disable mode.\n\n"
+            "In the conversion UI, you can adjust:\n"
+            "• **Resolution** (Original, 2160p, 1080p, etc.)\n"
+            "• **Video Bitrate** (+/- 100 kbps)\n"
+            "• **Audio Bitrate** (+/- 32 kbps)\n"
+            "• Toggle `Original: Uploading` to keep original file.\n\n"
+            "Click **Select All & Convert 🚀** to apply settings to all batch files.\n"
+            "Click **Next ✅** to convert current file only."
+        )
+        await m.reply_text(tutorial)
 
 @app.on_message(filters.command("download_only") & filters.private)
 async def toggle_download_only_mode(c, m: Message):
@@ -1840,7 +1758,19 @@ async def toggle_download_only_mode(c, m: Message):
         await m.reply_text("Download Only Mode **OFF**.")
     else:
         DOWNLOAD_ONLY_MODE.add(uid)
-        await m.reply_text("Download Only Mode **ON**.\nFiles/links will just be downloaded to storage. ZIP files will be extracted.\nSend `link` to turn on direct download link generation.\nSend `t` to generate telegram file direct download link without downloading to local storage.\nSend `off` to revert to default download only.")
+        tutorial = (
+            "**⬇️ Download Only Mode ON**\n\n"
+            "Send **URLs** or **Telegram files** – they will be downloaded to storage without upload.\n"
+            "**Commands inside mode:**\n"
+            "• `link` → Generate **Direct Download Link** and **Stream Link** after download.\n"
+            "• `t` → Generate **Direct Stream Link** for Telegram files without downloading (T-Mode).\n"
+            "• `off` → Disable mode.\n\n"
+            "**Link Types:**\n"
+            "• **Direct Download**: Click to start download immediately.\n"
+            "• **Stream**: Open in browser to play, change audio/subtitles, and download.\n\n"
+            "All downloads include proper User-Agent headers for compatibility."
+        )
+        await m.reply_text(tutorial)
 
 
 @app.on_message(filters.command("progress_bar") & filters.private)
@@ -1939,7 +1869,6 @@ async def photo_handler(c, m: Message):
         return
     uid = m.from_user.id
     
-    # --- Handle Create Post Mode ---
     if uid in CREATE_POST_MODE and uid in POST_CREATION_STATE and POST_CREATION_STATE[uid]['state'] == 'awaiting_image':
         
         state_data = POST_CREATION_STATE[uid]
@@ -2087,7 +2016,6 @@ async def toggle_edit_caption_mode(c, m: Message):
 
     if uid in EDIT_CAPTION_MODE:
         EDIT_CAPTION_MODE.discard(uid)
-        # Clear batch if active
         if uid in BATCH_CAPTION_MODE:
             BATCH_CAPTION_MODE.discard(uid)
             BATCH_DATA.pop(uid, None)
@@ -2101,10 +2029,26 @@ async def toggle_edit_caption_mode(c, m: Message):
             
         USE_ORIGINAL_CAPTION_IN_MULTI_GROUP.discard(uid)
             
-        await m.reply_text("edit video caption mode **OFF**.\nFrom now on, uploaded videos will be renamed, thumbnails changed, and saved caption added.")
+        await m.reply_text("Edit Caption Mode **OFF**.\nFrom now on, uploaded videos will be renamed, thumbnails changed, and saved caption added.")
     else:
         EDIT_CAPTION_MODE.add(uid)
-        await m.reply_text("edit video caption mode **ON**.\nFrom now on, only the saved caption will be added. Video name and thumbnail will remain the same.\n\n**New Feature:** Type `on` to enable file ID save mode. Type `no` to enable Multi-group Batch mode. Type `off` to disable.")
+        tutorial = (
+            "**✏️ Edit Caption Mode ON**\n\n"
+            "Forward or send a video/document – it will be re-uploaded with your saved caption.\n"
+            "**Commands inside mode:**\n"
+            "• `on` → Enable **Batch Caption Mode** (save file IDs to process later).\n"
+            "• `off` → Disable mode.\n"
+            "• `no` → Enable **Multi-group Batch Mode** (group videos by categories).\n"
+            "• `d` → Create a new group in Multi-group mode.\n"
+            "• `cap` → Toggle between saved caption and original caption.\n"
+            "• `ok` → Process all saved batch items.\n"
+            "• `ok 1=2 2=3` → Specify weights for groups in Multi-group mode.\n\n"
+            "**Multi-group Example:**\n"
+            "• Group 1: Episodes 1-10\n"
+            "• Group 2: Episodes 11-20\n"
+            "• Send `ok 1=2 2=1` to upload 2 from Group 1, then 1 from Group 2."
+        )
+        await m.reply_text(tutorial)
 
 # --- HANDLER: /batch_audio_add ---
 @app.on_message(filters.command("batch_audio_add") & filters.private)
@@ -2135,7 +2079,22 @@ async def batch_audio_add_mode(c, m: Message):
         BATCH_AUDIO_STATE[uid] = 'list1'
         BATCH_AUDIO_LIST1[uid] = []
         BATCH_AUDIO_LIST2[uid] = []
-        await m.reply_text("Batch Audio Add Mode **ON**.\nSend Base Videos / Links / ZIP files (List 1).\n*(Type next when done, or type list to view/delete)*")
+        tutorial = (
+            "**🎵 Batch Audio Add Mode ON**\n\n"
+            "Add **Base Videos** (List 1) and **Audio Sources** (List 2).\n"
+            "**Commands inside mode:**\n"
+            "• `list` → View current lists.\n"
+            "• `next` → Proceed to next step.\n"
+            "• `off` → Disable mode.\n\n"
+            "**Step 1:** Send Base Videos / URLs / ZIP files (List 1).\n"
+            "Type `next` when done.\n\n"
+            "**Step 2:** Send Audio Source files (List 2).\n"
+            "Type `next` when done.\n\n"
+            "**Step 3:** Map audios to videos.\n"
+            "Default: 1→1, 2→2. Custom: `1-13=1-13, 14=16, 15=14`\n"
+            "Click **Upload All 🚀** to process."
+        )
+        await m.reply_text(tutorial)
 
 # --- HANDLER: /mkv_video_audio_change ---
 @app.on_message(filters.command("mkv_video_audio_change") & filters.private)
@@ -2155,7 +2114,16 @@ async def toggle_audio_change_mode(c, m: Message):
         await m.reply_text("MKV audio change mode has been **TURNED OFF**.")
     else:
         MKV_AUDIO_CHANGE_MODE.add(uid)
-        await m.reply_text("MKV audio change mode has been **TURNED ON**. Now send a **SINGLE MKV file** or video.\nFor multiple files mapping, use /batch_audio_add")
+        tutorial = (
+            "**🎧 MKV Audio Change Mode ON**\n\n"
+            "Send a **single MKV/video file**. The bot will analyze audio tracks.\n"
+            "You will get a list of tracks with Language and Title.\n"
+            "**Reply with:** comma-separated track numbers to keep.\n"
+            "Example: `1,3` → keeps track 1 and 3.\n"
+            "Example: `2` → keeps only track 2.\n\n"
+            "If you don't want to change, click **Cancel ❌**."
+        )
+        await m.reply_text(tutorial)
 
 # --- HANDLER: /create_post ---
 @app.on_message(filters.command("create_post") & filters.private)
@@ -2191,579 +2159,19 @@ async def toggle_create_post_mode(c, m: Message):
             'post_data': DEFAULT_POST_DATA.copy(),
             'post_message_id': None
         }
-        await m.reply_text("Create Post Mode has been **TURNED ON**.\nSend an image (**Photo**) to be used for the post.")
-# ---------------------------------------------
-
-# ===== CHANGE 6: POST MODE HANDLERS =====
-def get_post_tutorial_text():
-    return (
-        "**📝 Post Mode Tutorial**\n\n"
-        "**Add Channel:**\n"
-        "• Forward any message from a channel to add it to the list\n"
-        "• The channel will be saved automatically\n"
-        "• **Note:** Bot must be admin in the channel\n\n"
-        "**Create/Edit Post:**\n"
-        "• **Send/Forward a message:** If from a saved channel, it will be edited. If from another channel, it will create a new post.\n"
-        "• **Image/Video:** Will be added to the post\n"
-        "• **Caption:** Will be saved with the post\n\n"
-        "**Editing Tools:**\n"
-        "• **Add Image/Video:** Send/forward media to add\n"
-        "• **Add Caption:** Send text to set as caption\n"
-        "• **Add Thumbnail:** Send image to set as video thumbnail\n"
-        "• **Add Buttons:** Format: `button 1 = link1, button 2 = link2`\n"
-        "  - Use `,` for new line, space for same line\n"
-        "  - Colors: `[red]button = link`, `[green]button = link`, `[blue]button = link`\n\n"
-        "**Post Options:**\n"
-        "• **Send:** Send to selected channels\n"
-        "• **Save:** Save post for later editing\n"
-        "• **Multiple Post Edit:** Forward multiple messages, then send `ok` to edit all at once\n\n"
-        "**Auto Channel Management:**\n"
-        "• If bot is added to a channel as admin, it will auto-add the channel\n"
-        "• If bot is removed as admin, it will auto-remove the channel\n"
-        "• Service messages and pinned messages will be auto-deleted\n\n"
-        "**Commands:**\n"
-        "/post - Toggle Post Mode\n"
-        "/mode_check - Check current mode status"
-    )
-
-async def send_post_mode_tutorial(c, chat_id):
-    """Send tutorial message for post mode"""
-    text = get_post_tutorial_text()
-    markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Channel List", callback_data="post_channels")],
-        [InlineKeyboardButton("➕ Add Channel", callback_data="post_add_channel")]
-    ])
-    await c.send_message(chat_id, text, reply_markup=markup, parse_mode=ParseMode.MARKDOWN)
-
-async def build_post_edit_keyboard(uid, has_media=False):
-    """Build keyboard for post editing"""
-    keyboard = []
-    
-    if not has_media:
-        keyboard.append([InlineKeyboardButton("🖼 Add Image", callback_data="post_add_image")])
-        keyboard.append([InlineKeyboardButton("🎬 Add Video", callback_data="post_add_video")])
-    
-    keyboard.append([InlineKeyboardButton("📝 Add Caption", callback_data="post_add_caption")])
-    keyboard.append([InlineKeyboardButton("🖼 Add Thumbnail", callback_data="post_add_thumbnail")])
-    keyboard.append([InlineKeyboardButton("🔘 Add Buttons", callback_data="post_add_buttons")])
-    
-    # Multiple post edit options
-    keyboard.append([InlineKeyboardButton("📚 Multiple Post Edit", callback_data="post_multiple_edit")])
-    keyboard.append([InlineKeyboardButton("💾 Use Saved Caption", callback_data="post_use_saved_caption")])
-    
-    keyboard.append([
-        InlineKeyboardButton("📤 Send Post", callback_data="post_send"),
-        InlineKeyboardButton("💾 Save Post", callback_data="post_save")
-    ])
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="post_cancel")])
-    
-    return InlineKeyboardMarkup(keyboard)
-
-async def send_channel_list(c, chat_id, uid, page=0):
-    """Send channel list with delete buttons"""
-    channels = POST_CHANNELS.get(uid, [])
-    
-    if not channels:
-        await c.send_message(chat_id, "No channels saved yet.\nForward a message from a channel to add it.")
-        return
-    
-    per_page = 5
-    total_pages = max(1, math.ceil(len(channels) / per_page))
-    page = min(page, total_pages - 1)
-    
-    start = page * per_page
-    end = min(start + per_page, len(channels))
-    
-    text = f"**📋 Saved Channels (Page {page+1}/{total_pages}):**\n\n"
-    keyboard = []
-    
-    for i in range(start, end):
-        channel_id = channels[i]
-        try:
-            chat = await c.get_chat(channel_id)
-            name = chat.title or f"Channel {i+1}"
-            if i > 0 and any(c == channel_id for c in channels[:i]):
-                # If duplicate, add number
-                count = 1
-                for cid in channels[:i]:
-                    if cid == channel_id:
-                        count += 1
-                name = f"{name} #{count}"
-        except:
-            name = f"Channel {i+1}"
-        
-        text += f"**{i+1}.** `{name}`\n"
-        keyboard.append([
-            InlineKeyboardButton(f"{name}", callback_data="ignore"),
-            InlineKeyboardButton("🗑 Delete", callback_data=f"post_del_channel_{i}")
-        ])
-    
-    # Navigation buttons
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"post_channels_page_{page-1}"))
-    if page < total_pages - 1:
-        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"post_channels_page_{page+1}"))
-    if nav:
-        keyboard.append(nav)
-    
-    keyboard.append([InlineKeyboardButton("➕ Add Channel", callback_data="post_add_channel")])
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="post_tutorial")])
-    
-    await c.send_message(chat_id, text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-@app.on_message(filters.command("post") & filters.private)
-async def post_mode_cmd(c, m: Message):
-    uid = m.from_user.id
-    if not is_admin(uid):
-        await m.reply_text("You are not authorized to use this command.")
-        return
-    
-    if uid in POST_MODE:
-        POST_MODE.discard(uid)
-        POST_EDIT_STATE.pop(uid, None)
-        await m.reply_text("Post Mode **OFF**.")
-    else:
-        POST_MODE.add(uid)
-        POST_CHANNELS.setdefault(uid, [])
-        await send_post_mode_tutorial(c, m.chat.id)
-
-@app.on_callback_query(filters.regex("post_tutorial"))
-async def post_tutorial_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    await send_post_mode_tutorial(c, cb.message.chat.id)
-    await cb.answer()
-
-@app.on_callback_query(filters.regex("post_channels"))
-async def post_channels_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    await send_channel_list(c, cb.message.chat.id, uid)
-    await cb.answer()
-
-@app.on_callback_query(filters.regex("post_channels_page_"))
-async def post_channels_page_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    page = int(cb.data.split('_')[-1])
-    await send_channel_list(c, cb.message.chat.id, uid, page)
-    await cb.answer()
-
-@app.on_callback_query(filters.regex("post_add_channel"))
-async def post_add_channel_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    await cb.message.edit_text("📨 **Forward any message from the channel** you want to add.\n\nMake sure the bot is admin in that channel.")
-    await cb.answer()
-
-@app.on_callback_query(filters.regex("post_del_channel_"))
-async def post_del_channel_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    idx = int(cb.data.split('_')[-1])
-    channels = POST_CHANNELS.get(uid, [])
-    if 0 <= idx < len(channels):
-        channel_id = channels.pop(idx)
-        try:
-            await c.send_message(channel_id, "Bot has been removed from channel management.")
-        except:
-            pass
-        await cb.answer("Channel removed from list.", show_alert=True)
-        await send_channel_list(c, cb.message.chat.id, uid)
-
-@app.on_callback_query(filters.regex("post_add_image"))
-async def post_add_image_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    POST_EDIT_STATE[uid] = {'action': 'add_image', 'message_id': cb.message.id}
-    await cb.message.edit_text("📷 **Send or forward an image** to add to the post.")
-    await cb.answer()
-
-@app.on_callback_query(filters.regex("post_add_video"))
-async def post_add_video_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    POST_EDIT_STATE[uid] = {'action': 'add_video', 'message_id': cb.message.id}
-    await cb.message.edit_text("🎬 **Send or forward a video** to add to the post.")
-    await cb.answer()
-
-@app.on_callback_query(filters.regex("post_add_caption"))
-async def post_add_caption_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    POST_EDIT_STATE[uid] = {'action': 'add_caption', 'message_id': cb.message.id}
-    await cb.message.edit_text("📝 **Send the caption text** for the post.\n\nYou can use **bold**, *italic*, `code`, etc.")
-    await cb.answer()
-
-@app.on_callback_query(filters.regex("post_add_thumbnail"))
-async def post_add_thumbnail_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    POST_EDIT_STATE[uid] = {'action': 'add_thumbnail', 'message_id': cb.message.id}
-    await cb.message.edit_text("🖼 **Send an image** to set as video thumbnail.")
-    await cb.answer()
-
-@app.on_callback_query(filters.regex("post_add_buttons"))
-async def post_add_buttons_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    POST_EDIT_STATE[uid] = {'action': 'add_buttons', 'message_id': cb.message.id}
-    await cb.message.edit_text(
-        "🔘 **Send button format:**\n\n"
-        "`button 1 = link1, button 2 = link2`\n\n"
-        "• Use `,` for new line (\\n)\n"
-        "• Use space for same line\n"
-        "• Colors: `[red]button = link`, `[green]button = link`, `[blue]button = link`\n\n"
-        "Example:\n"
-        "`[red]Download = https://t.me, [green]Channel = https://t.me`"
-    )
-    await cb.answer()
-
-@app.on_callback_query(filters.regex("post_send"))
-async def post_send_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    
-    channels = POST_CHANNELS.get(uid, [])
-    if not channels:
-        await cb.answer("No channels saved! Add a channel first.", show_alert=True)
-        return
-    
-    # Build channel selection keyboard
-    keyboard = []
-    for i, channel_id in enumerate(channels):
-        try:
-            chat = await c.get_chat(channel_id)
-            name = chat.title or f"Channel {i+1}"
-            keyboard.append([InlineKeyboardButton(f"{name} 🔲", callback_data=f"post_send_channel_{i}_0")])
-        except:
-            keyboard.append([InlineKeyboardButton(f"Channel {i+1} 🔲", callback_data=f"post_send_channel_{i}_0")])
-    
-    keyboard.append([InlineKeyboardButton("📤 Send to Selected", callback_data="post_send_selected")])
-    keyboard.append([InlineKeyboardButton("📤 Send to All", callback_data="post_send_all")])
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="post_edit_back")])
-    
-    await cb.message.edit_text(
-        "**Select channels to send the post to:**\n\n"
-        "Click on a channel to toggle selection.\n"
-        "Send to Selected: Send only to selected channels.\n"
-        "Send to All: Send to all channels.",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    await cb.answer()
-
-@app.on_callback_query(filters.regex("post_send_channel_"))
-async def post_send_channel_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    
-    parts = cb.data.split('_')
-    idx = int(parts[3])
-    state = int(parts[4])
-    
-    channels = POST_CHANNELS.get(uid, [])
-    if 0 <= idx < len(channels):
-        # Toggle selection
-        new_state = 1 if state == 0 else 0
-        # Update keyboard
-        keyboard = []
-        for i, channel_id in enumerate(channels):
-            try:
-                chat = await c.get_chat(channel_id)
-                name = chat.title or f"Channel {i+1}"
-                status = "✅" if (i == idx and new_state == 1) or (i != idx and state == 1) else "🔲"
-                keyboard.append([InlineKeyboardButton(f"{name} {status}", callback_data=f"post_send_channel_{i}_{1 if (i == idx and new_state == 1) or (i != idx and state == 1) else 0}")])
-            except:
-                keyboard.append([InlineKeyboardButton(f"Channel {i+1} {status}", callback_data=f"post_send_channel_{i}_{1 if (i == idx and new_state == 1) or (i != idx and state == 1) else 0}")])
-        
-        keyboard.append([InlineKeyboardButton("📤 Send to Selected", callback_data="post_send_selected")])
-        keyboard.append([InlineKeyboardButton("📤 Send to All", callback_data="post_send_all")])
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="post_edit_back")])
-        
-        await cb.message.edit_reply_markup(InlineKeyboardMarkup(keyboard))
-    await cb.answer()
-
-@app.on_callback_query(filters.regex("post_send_selected"))
-async def post_send_selected_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    
-    # Get selected channels from message keyboard
-    keyboard = cb.message.reply_markup.inline_keyboard
-    selected_channels = []
-    for row in keyboard:
-        for btn in row:
-            if btn.callback_data and btn.callback_data.startswith("post_send_channel_"):
-                parts = btn.callback_data.split('_')
-                idx = int(parts[3])
-                state = int(parts[4])
-                if state == 1:
-                    channels = POST_CHANNELS.get(uid, [])
-                    if 0 <= idx < len(channels):
-                        selected_channels.append(channels[idx])
-    
-    if not selected_channels:
-        await cb.answer("No channels selected! Select at least one channel.", show_alert=True)
-        return
-    
-    await send_post_to_channels(c, cb.message.chat.id, uid, selected_channels)
-    await cb.answer("Sending post to selected channels...", show_alert=True)
-
-@app.on_callback_query(filters.regex("post_send_all"))
-async def post_send_all_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    
-    channels = POST_CHANNELS.get(uid, [])
-    if not channels:
-        await cb.answer("No channels saved!", show_alert=True)
-        return
-    
-    await send_post_to_channels(c, cb.message.chat.id, uid, channels)
-    await cb.answer("Sending post to all channels...", show_alert=True)
-
-@app.on_callback_query(filters.regex("post_save"))
-async def post_save_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    
-    # Save current post state
-    if uid not in POST_EDIT_STATE:
-        POST_EDIT_STATE[uid] = {}
-    POST_EDIT_STATE[uid]['saved'] = True
-    
-    await cb.answer("Post saved! You can continue editing or send it later.", show_alert=True)
-    await cb.message.edit_text("✅ **Post saved successfully!**\n\nYou can continue editing using the tools below.", reply_markup=await build_post_edit_keyboard(uid))
-
-@app.on_callback_query(filters.regex("post_edit_back"))
-async def post_edit_back_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    
-    await cb.message.edit_text("**📝 Post Editor**\n\nSelect an option to edit the post:", reply_markup=await build_post_edit_keyboard(uid))
-    await cb.answer()
-
-@app.on_callback_query(filters.regex("post_cancel"))
-async def post_cancel_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    
-    POST_EDIT_STATE.pop(uid, None)
-    await cb.message.edit_text("❌ **Post editing cancelled.**")
-    await cb.answer()
-
-@app.on_callback_query(filters.regex("post_use_saved_caption"))
-async def post_use_saved_caption_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    
-    caption = USER_CAPTIONS.get(uid)
-    if not caption:
-        await cb.answer("No saved caption found! Use /set_caption first.", show_alert=True)
-        return
-    
-    if uid not in POST_EDIT_STATE:
-        POST_EDIT_STATE[uid] = {}
-    POST_EDIT_STATE[uid]['caption'] = caption
-    POST_EDIT_STATE[uid]['use_saved_caption'] = True
-    
-    await cb.answer("Saved caption applied to post!", show_alert=True)
-    await cb.message.edit_text("✅ **Saved caption applied!**\n\nContinue editing or send the post.", reply_markup=await build_post_edit_keyboard(uid))
-
-@app.on_callback_query(filters.regex("post_multiple_edit"))
-async def post_multiple_edit_cb(c, cb):
-    uid = cb.from_user.id
-    if uid not in POST_MODE:
-        await cb.answer("Post mode is OFF.", show_alert=True)
-        return
-    
-    POST_EDIT_STATE[uid] = {'action': 'multiple_edit', 'message_id': cb.message.id}
-    await cb.message.edit_text(
-        "📚 **Multiple Post Edit Mode**\n\n"
-        "Forward multiple messages from channels.\n"
-        "• If from saved channels: They will be edited\n"
-        "• If from other channels: New posts will be created\n\n"
-        "After forwarding all messages, send `ok` to start editing all at once.\n\n"
-        "**Order:** Messages will be processed from smallest to largest file ID."
-    )
-    await cb.answer()
-
-async def send_post_to_channels(c, chat_id, uid, channel_ids):
-    """Send the current post to specified channels"""
-    state = POST_EDIT_STATE.get(uid, {})
-    
-    if not state:
-        await c.send_message(chat_id, "No post data to send. Start by forwarding a message or adding content.")
-        return
-    
-    media = state.get('media')
-    media_type = state.get('media_type')
-    caption = state.get('caption', '')
-    buttons = state.get('buttons', [])
-    thumbnail = state.get('thumbnail')
-    
-    for channel_id in channel_ids:
-        try:
-            if media_type == 'photo':
-                await c.send_photo(
-                    channel_id,
-                    photo=media,
-                    caption=caption,
-                    reply_markup=buttons if buttons else None,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            elif media_type == 'video':
-                await c.send_video(
-                    channel_id,
-                    video=media,
-                    caption=caption,
-                    thumb=thumbnail,
-                    reply_markup=buttons if buttons else None,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            else:
-                await c.send_message(
-                    channel_id,
-                    caption,
-                    reply_markup=buttons if buttons else None,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            await asyncio.sleep(1)  # Rate limit
-        except Exception as e:
-            logger.error(f"Error sending post to channel {channel_id}: {e}")
-            await c.send_message(chat_id, f"Error sending to channel {channel_id}: {e}")
-    
-    await c.send_message(chat_id, "✅ **Post sent to all selected channels!**")
-# ========================================
-
-# ===== CHANGE 7: COLAB DRIVE HANDLERS =====
-@app.on_message(filters.command("colab_drive") & filters.private)
-async def colab_drive_cmd(c, m: Message):
-    uid = m.from_user.id
-    if not is_admin(uid):
-        await m.reply_text("You are not authorized to use this command.")
-        return
-    
-    # Check if running on Colab
-    if not os.getenv("COLAB_GPU"):
-        await m.reply_text("This command only works on Google Colab!")
-        return
-    
-    if uid in COLAB_DRIVE_MODE:
-        COLAB_DRIVE_MODE.discard(uid)
-        COLAB_DRIVE_PATH.pop(uid, None)
-        await m.reply_text("Colab Drive Mode **OFF**.")
-    else:
-        COLAB_DRIVE_MODE.add(uid)
-        await m.reply_text(
-            "Colab Drive Mode **ON**.\n\n"
-            "**To mount Google Drive:**\n"
-            "Send `/colab_drive mount`\n\n"
-            "**To copy file from Drive:**\n"
-            "Send `/colab_drive path/to/file`\n"
-            "Example: `/colab_drive MyDrive/video.mp4`\n\n"
-            "**To unmount Drive:**\n"
-            "Send `/colab_drive unmount`"
+        tutorial = (
+            "**📝 Create Post Mode ON**\n\n"
+            "Step-by-step post creation with image and custom caption.\n"
+            "**Steps:**\n"
+            "1. Send an **image** (photo) → will be used as post image.\n"
+            "2. Send **Image Name** (e.g., `One Piece`).\n"
+            "3. Send **Genres** (e.g., `Comedy, Romance, Action`).\n"
+            "4. Send **Season List** (e.g., `1-2, 4-5`).\n\n"
+            "The bot will generate a professional post with collapsible season list.\n"
+            "All temporary messages will be deleted after completion."
         )
+        await m.reply_text(tutorial)
 
-@app.on_message(filters.command("colab_drive") & filters.private)
-async def colab_drive_action_cmd(c, m: Message):
-    uid = m.from_user.id
-    if not is_admin(uid):
-        await m.reply_text("You are not authorized to use this command.")
-        return
-    
-    if not os.getenv("COLAB_GPU"):
-        await m.reply_text("This command only works on Google Colab!")
-        return
-    
-    if len(m.command) < 2:
-        await m.reply_text(
-            "Usage:\n"
-            "/colab_drive mount - Mount Google Drive\n"
-            "/colab_drive unmount - Unmount Google Drive\n"
-            "/colab_drive path/to/file - Copy file from Drive to TMP"
-        )
-        return
-    
-    action = m.command[1].lower()
-    
-    if action == "mount":
-        try:
-            from google.colab import drive
-            drive.mount('/content/drive')
-            await m.reply_text("✅ Google Drive mounted successfully!\nYou can now access files at `/content/drive/MyDrive/`")
-        except Exception as e:
-            await m.reply_text(f"❌ Failed to mount Drive: {e}")
-    
-    elif action == "unmount":
-        try:
-            from google.colab import drive
-            drive.flush_and_unmount()
-            await m.reply_text("✅ Google Drive unmounted successfully!")
-        except Exception as e:
-            await m.reply_text(f"❌ Failed to unmount Drive: {e}")
-    
-    else:
-        # Copy file from Drive
-        if not os.path.exists('/content/drive'):
-            await m.reply_text("⚠️ Google Drive is not mounted. Use `/colab_drive mount` first.")
-            return
-        
-        drive_path = '/content/drive/' + action
-        if not os.path.exists(drive_path):
-            await m.reply_text(f"❌ File not found: {drive_path}")
-            return
-        
-        # Copy to TMP
-        dest_path = TMP / Path(drive_path).name
-        try:
-            if os.path.isdir(drive_path):
-                shutil.copytree(drive_path, dest_path)
-            else:
-                shutil.copy2(drive_path, dest_path)
-            
-            await m.reply_text(f"✅ File copied to TMP:\n`{dest_path}`")
-        except Exception as e:
-            await m.reply_text(f"❌ Failed to copy file: {e}")
-# ========================================
 
 # --- HANDLER: /mode_check ---
 @app.on_message(filters.command("mode_check") & filters.private)
@@ -2780,8 +2188,6 @@ async def mode_check_cmd(c, m: Message):
     convert_status = "✅ ON" if uid in CONVERT_MODE else "❌ OFF"
     batch_audio_status = "✅ ON" if uid in BATCH_AUDIO_MODE else "❌ OFF"
     dl_only_status = "✅ ON" if uid in DOWNLOAD_ONLY_MODE else "❌ OFF"
-    post_status = "✅ ON" if uid in POST_MODE else "❌ OFF"
-    colab_status = "✅ ON" if uid in COLAB_DRIVE_MODE else "❌ OFF"
     
     waiting_count = sum(1 for data in PENDING_AUDIO_ORDERS.values() if data['uid'] == uid)
     waiting_status_text = f"{waiting_count} file(s) waiting for track order." if waiting_count > 0 else "No files are waiting."
@@ -2800,17 +2206,13 @@ async def mode_check_cmd(c, m: Message):
         f"5. **YT-DLP Mode:** `{yt_dlp_status}`\n"
         f"6. **ZIP Download Mode:** `{zip_status}`\n"
         f"7. **Download Only Mode:** `{dl_only_status}`\n"
-        f"8. **Post Mode:** `{post_status}`\n"
-        f"   - *Task:* Create/Edit posts in channels.\n\n"
-        f"9. **Colab Drive Mode:** `{colab_status}`\n"
-        f"   - *Task:* Access Google Drive files in Colab.\n\n"
         "Click the buttons below to toggle modes."
     )
     
     await m.reply_text(status_text, reply_markup=mode_check_keyboard(uid), parse_mode=ParseMode.MARKDOWN)
 
 # --- CALLBACK: Mode Toggle Buttons ---
-@app.on_callback_query(filters.regex("toggle_(audio|caption|ytdlp|zip|convert|batch_audio|dl_only|post)_mode"))
+@app.on_callback_query(filters.regex("toggle_(audio|caption|ytdlp|zip|convert|batch_audio|dl_only)_mode"))
 async def mode_toggle_callback(c: Client, cb: CallbackQuery):
     uid = cb.from_user.id
     if not is_admin(uid):
@@ -2916,16 +2318,6 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
             DOWNLOAD_ONLY_MODE.add(uid)
             message = "Download Only Mode ON."
             
-    elif action == "toggle_post_mode":
-        if uid in POST_MODE:
-            POST_MODE.discard(uid)
-            POST_EDIT_STATE.pop(uid, None)
-            message = "Post Mode OFF."
-        else:
-            POST_MODE.add(uid)
-            POST_CHANNELS.setdefault(uid, [])
-            message = "Post Mode ON."
-            
     try:
         audio_status = "✅ ON" if uid in MKV_AUDIO_CHANGE_MODE else "❌ OFF"
         caption_status = "✅ ON" if uid in EDIT_CAPTION_MODE else "❌ OFF"
@@ -2934,7 +2326,6 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
         convert_status = "✅ ON" if uid in CONVERT_MODE else "❌ OFF"
         batch_audio_status = "✅ ON" if uid in BATCH_AUDIO_MODE else "❌ OFF"
         dl_only_status = "✅ ON" if uid in DOWNLOAD_ONLY_MODE else "❌ OFF"
-        post_status = "✅ ON" if uid in POST_MODE else "❌ OFF"
         
         waiting_count = sum(1 for data in PENDING_AUDIO_ORDERS.values() if data['uid'] == uid)
         waiting_status_text = f"{waiting_count} file(s) waiting for track order." if waiting_count > 0 else "No files are waiting."
@@ -2953,7 +2344,6 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
             f"5. **YT-DLP Mode:** `{yt_dlp_status}`\n"
             f"6. **ZIP Download Mode:** `{zip_status}`\n"
             f"7. **Download Only Mode:** `{dl_only_status}`\n"
-            f"8. **Post Mode:** `{post_status}`\n"
             "Click the buttons below to toggle modes."
         )
         
@@ -3063,7 +2453,7 @@ async def process_zip_uploads(c, message_or_chat_id, uid, final_order):
         while uid in USER_QUEUE_PAUSED:
              await asyncio.sleep(1)
         if uid not in ZIP_NAV_STATE or ZIP_NAV_STATE[uid].get('state') != 'uploading':
-            break # Cancelled or cleared during upload
+            break
             
         fpath = files[idx - 1]
         if not fpath.exists(): continue
@@ -3072,7 +2462,6 @@ async def process_zip_uploads(c, message_or_chat_id, uid, final_order):
         cancel_event = asyncio.Event()
         TASKS.setdefault(uid, []).append(cancel_event)
         
-        # Creating a fake message object if message_or_chat_id is just an ID (for auto upload)
         class FakeMessage:
             def __init__(self, cid):
                 class Chat:
@@ -3143,7 +2532,6 @@ def is_archive_file(filepath: Path) -> bool:
     except: pass
     return False
 
-# FIX 3: Py7zr + Robust Extraction
 async def execute_zip_download_and_extract(c, m, url=None, local_path=None, target_list=None, is_dl_only=False):
     uid = m.from_user.id
     status_msg = await c.send_message(m.chat.id, "Downloading Queue Item..." if url else "Processing Local Archive...", reply_markup=progress_keyboard())
@@ -3174,7 +2562,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                 if fid: ok, err = await download_drive_file(fid, tmp_in, status_msg, cancel_event, original_name=original_name_pass)
             else:
                 ok, err = await download_url_generic(url, tmp_in, status_msg, cancel_event, original_name=original_name_pass)
-        else: # Telegram File
+        else:
             start_t = time.time()
             async def dl_prog(current, total):
                 if cancel_event.is_set():
@@ -3188,11 +2576,17 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
             
         if not is_archive_file(tmp_in):
             if is_dl_only:
-                # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
                 if uid in DOWNLOAD_LINK_MODE:
-                    link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(tmp_in.name)}"
-                    stream_link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(str(tmp_in))}"
-                    await status_msg.edit(f"✅ **File Downloaded:** `{tmp_in.name}`\n🔗 **Direct Download:** {link}\n🎬 **Stream Link:** {stream_link}")
+                    # ===== CHANGE 2: Two links for download only =====
+                    # 1. Direct Download Link
+                    direct_link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(tmp_in.name)}"
+                    # 2. Stream Link (for video files)
+                    stream_link = f"{PUBLIC_BASE_URL}/stream?file_path={urllib.parse.quote(str(tmp_in))}"
+                    await status_msg.edit(
+                        f"✅ **File Downloaded:** `{tmp_in.name}`\n\n"
+                        f"🔗 **Direct Download:** {direct_link}\n"
+                        f"▶️ **Stream:** {stream_link}"
+                    )
                 else:
                     await status_msg.edit(f"✅ **File Downloaded:** `{tmp_in.name}`\nSaved to local storage.")
                 return
@@ -3216,7 +2610,6 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
         
         start_t = time.time()
         
-        # FIX 3: Extended Extraction with Zip/Tar/Py7zr Python Native Fallbacks
         try:
             ext = tmp_in.suffix.lower()
             if ext == '.zip':
@@ -3244,7 +2637,6 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                 with tarfile.open(tmp_in, 'r:*') as tar_ref:
                     await asyncio.to_thread(tar_ref.extractall, path=ext_dir)
             else:
-                # Use robust 7z fallback, if failed try python shutil unpack
                 try:
                     cmd = ['7z', 'x', str(tmp_in), '-p-', '-aoa', f'-o{ext_dir}']
                     process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -3262,11 +2654,14 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                 target_list.append({'path': str(new_path), 'name': new_path.name})
                 return
             if is_dl_only:
-                # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
                 if uid in DOWNLOAD_LINK_MODE:
-                    link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(tmp_in.name)}"
-                    stream_link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(str(tmp_in))}"
-                    await status_msg.edit(f"✅ **Archive Downloaded (Extract Failed):** `{tmp_in.name}`\n🔗 **Direct Download:** {link}\n🎬 **Stream Link:** {stream_link}")
+                    direct_link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(tmp_in.name)}"
+                    stream_link = f"{PUBLIC_BASE_URL}/stream?file_path={urllib.parse.quote(str(tmp_in))}"
+                    await status_msg.edit(
+                        f"✅ **Archive Downloaded (Extract Failed):** `{tmp_in.name}`\n\n"
+                        f"🔗 **Direct Download:** {direct_link}\n"
+                        f"▶️ **Stream:** {stream_link}"
+                    )
                 else:
                     await status_msg.edit(f"✅ **Archive Downloaded:** `{tmp_in.name}`\nSaved to local storage.")
                 return
@@ -3312,7 +2707,6 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                         except Exception as e:
                             logger.error(f"Nested Archive extraction error: {e}")
         
-        # Extract source archive delete
         tmp_in.unlink(missing_ok=True)
         
         all_files = []
@@ -3321,7 +2715,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
             for f in files:
                 p = Path(root) / f
                 if target_list is not None and p.suffix.lower() not in video_exts:
-                    continue # only add videos to lists if from zip in convert/batch
+                    continue
                 all_files.append(p)
         all_files.sort(key=lambda x: x.name.lower())
         
@@ -3334,12 +2728,13 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
             try: await status_msg.delete()
             except: pass
             if uid in DOWNLOAD_LINK_MODE:
-                link_text = "**Extracted Files Direct Links:**\n"
+                # ===== CHANGE 2: Two links for each file =====
+                link_text = "**Extracted Files Links:**\n"
                 for f in all_files:
-                    # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
-                    link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(f.relative_to(TMP).as_posix())}"
-                    stream_link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(str(f))}"
-                    link_text += f"‣ `{f.name}`\n🔗 Download: {link}\n🎬 Stream: {stream_link}\n"
+                    rel_path = f.relative_to(TMP).as_posix()
+                    direct_link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(rel_path)}"
+                    stream_link = f"{PUBLIC_BASE_URL}/stream?file_path={urllib.parse.quote(str(f))}"
+                    link_text += f"‣ `{f.name}`\n🔗 **Direct:** {direct_link}\n▶️ **Stream:** {stream_link}\n\n"
                 await c.send_message(m.chat.id, link_text, disable_web_page_preview=True)
             else:
                 await c.send_message(m.chat.id, f"✅ **Extracted {len(all_files)} files successfully.**\nSaved to local storage.")
@@ -3370,7 +2765,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
 
 # -----------------------------
 
-# --- LIST UI & PAGINATION (Reused for Batch Audio and Convert) ---
+# --- LIST UI & PAGINATION ---
 async def send_batch_audio_list_page(c, chat_id, uid, list_id, page=0, msg_id=None):
     if list_id == 'list1':
         target_list = BATCH_AUDIO_LIST1.get(uid, [])
@@ -3425,7 +2820,6 @@ async def send_batch_audio_list_page(c, chat_id, uid, list_id, page=0, msg_id=No
         except Exception: pass
     else:
         await c.send_message(chat_id, text, reply_markup=markup)
-# ----------------------------------------
 
 
 # --- PATH NAVIGATOR FUNCTIONS ---
@@ -3503,15 +2897,11 @@ async def process_path_uploads(uid, c, m, files_to_upload):
             await c.send_message(m.chat.id, f"Upload Failed: {e}\nQueue Paused.", reply_markup=markup)
     await c.send_message(m.chat.id, "Path selected files queued/uploaded successfully.")
 
-# ----------------------------------------
 
 # --- CONVERT MODE LOGIC ---
 async def process_convert_queue_worker(uid, client):
-    """Processes covert tasks serially for a user to avoid CPU overload"""
     if uid not in CONVERT_LOCKS:
         CONVERT_LOCKS[uid] = asyncio.Lock()
-    
-    # We will just use the global lock during execution.
     pass
 
 async def handle_convert_input(c, m, url=None, file_info=None, override_path=None):
@@ -3532,7 +2922,6 @@ async def handle_convert_input(c, m, url=None, file_info=None, override_path=Non
             original_name = Path(override_path).name
             
         safe_name = re.sub(r"[\\/*?\"<>|:]", "_", original_name)
-        # FIX 2: Do not use prefix on local file download to keep path manager clean
         tmp_in = get_unique_path(TMP, safe_name)
         
         ok = False
@@ -3626,7 +3015,6 @@ async def convert_cb_handler(c: Client, cb: CallbackQuery):
     elif action == "orig":
         session['upload_original'] = not session['upload_original']
     elif action == "all":
-        # Save config and apply to batch
         session['configs'].append({
             'res': session['curr_res'],
             'v_bitrate': session['curr_v_bitrate'],
@@ -3672,12 +3060,11 @@ async def execute_conversions(session_id, client, batch_apply=False):
                 f_meta = await asyncio.to_thread(get_detailed_metadata, f_path)
                 if f_meta['duration'] > 0:
                     target_files.append({'path': f_path, 'name': f_path.name, 'meta': f_meta})
-        CONVERT_BATCH_LIST[uid] = [] # Clear list
+        CONVERT_BATCH_LIST[uid] = []
     
     if uid not in CONVERT_LOCKS:
         CONVERT_LOCKS[uid] = asyncio.Lock()
         
-    # Creating a dedicated event for this batch to avoid cancelling other downloads
     cancel_event = asyncio.Event()
     TASKS.setdefault(uid, []).append(cancel_event)
     USER_TASK_EVENTS.setdefault(uid, {})[status_msg_id] = cancel_event
@@ -3691,7 +3078,6 @@ async def execute_conversions(session_id, client, batch_apply=False):
             original_name = file_data['name']
             meta = file_data['meta']
             
-            # Use lock to process one conversion sequentially
             async with CONVERT_LOCKS[uid]:
                 if cancel_event.is_set(): break
                 for idx, config in enumerate(configs, 1):
@@ -3759,7 +3145,6 @@ async def execute_conversions(session_id, client, batch_apply=False):
                     if cancel_event.is_set(): raise Exception("Cancelled by user")
                     
                     if out_path.exists() and out_path.stat().st_size > 0:
-                        # Queue for upload, don't wait for upload to finish before starting next conversion
                         asyncio.create_task(sequential_upload_task(uid, client, msg, out_path, out_name, None, cancel_event, default_caption=out_name, original_caption=None, original_download_name=out_name))
                     else:
                         logger.error("FFmpeg convert output failed.")
@@ -3768,7 +3153,6 @@ async def execute_conversions(session_id, client, batch_apply=False):
                     out_name = get_dynamic_filename(uid, original_name)
                     asyncio.create_task(sequential_upload_task(uid, client, msg, in_path, out_name, None, cancel_event, default_caption=original_name, original_caption=None, original_download_name=original_name))
                 else:
-                    # Clean original if not uploading
                     in_path.unlink(missing_ok=True)
             
     except Exception as e:
@@ -3790,92 +3174,42 @@ async def text_handler(c, m: Message):
         return
     text = m.text.strip()
     
-    # ===== CHANGE 8: Handle POST mode actions =====
-    if uid in POST_MODE and uid in POST_EDIT_STATE:
-        state = POST_EDIT_STATE[uid]
-        action = state.get('action')
-        
-        if action == 'add_caption':
-            state['caption'] = text
-            POST_EDIT_STATE[uid] = state
-            await m.reply_text("✅ Caption added! Continue editing or send the post.", reply_markup=await build_post_edit_keyboard(uid))
+    # ===== NEW: Colab Drive Command =====
+    if text.lower().startswith("/colab_drive"):
+        if not COLAB_AVAILABLE:
+            await m.reply_text("❌ This command only works in Google Colab environment.")
             return
         
-        elif action == 'add_buttons':
+        parts = text.split(maxsplit=1)
+        if len(parts) == 1:
+            # Connect to Google Drive
             try:
-                # Parse button format
-                buttons = []
-                lines = text.split(',')
-                for line in lines:
-                    line = line.strip()
-                    if '=' in line:
-                        parts = line.split('=')
-                        if len(parts) == 2:
-                            btn_text = parts[0].strip()
-                            btn_url = parts[1].strip()
-                            # Check for color
-                            color = 'normal'
-                            if btn_text.startswith('[red]'):
-                                color = 'red'
-                                btn_text = btn_text[5:]
-                            elif btn_text.startswith('[green]'):
-                                color = 'green'
-                                btn_text = btn_text[6:]
-                            elif btn_text.startswith('[blue]'):
-                                color = 'blue'
-                                btn_text = btn_text[6:]
-                            buttons.append({'text': btn_text, 'url': btn_url, 'color': color})
-                
-                if buttons:
-                    # Build inline keyboard
-                    keyboard = []
-                    current_row = []
-                    for btn in buttons:
-                        current_row.append(InlineKeyboardButton(btn['text'], url=btn['url']))
-                        if len(current_row) == 2:
-                            keyboard.append(current_row)
-                            current_row = []
-                    if current_row:
-                        keyboard.append(current_row)
-                    
-                    state['buttons'] = InlineKeyboardMarkup(keyboard)
-                    POST_EDIT_STATE[uid] = state
-                    await m.reply_text("✅ Buttons added! Continue editing or send the post.", reply_markup=await build_post_edit_keyboard(uid))
-                else:
-                    await m.reply_text("❌ Invalid button format. Use: `button 1 = link1, button 2 = link2`")
+                drive.mount('/content/drive')
+                await m.reply_text("✅ Google Drive mounted successfully! You can now use `/colab_drive <path>` to copy files.")
             except Exception as e:
-                await m.reply_text(f"❌ Error parsing buttons: {e}")
+                await m.reply_text(f"❌ Failed to mount Google Drive: {e}")
             return
-        
-        elif action == 'multiple_edit':
-            if text.lower() == 'ok':
-                # Process multiple posts
-                # This would need to be implemented with file ID tracking
-                await m.reply_text("Multiple post edit mode activated. Forward messages to edit them.")
-                return
-    
-    # ===== CHANGE 9: Handle POST mode forward/send =====
-    if uid in POST_MODE and m.forward_from_chat:
-        # Check if forwarded from a saved channel
-        channel_id = m.forward_from_chat.id
-        channels = POST_CHANNELS.get(uid, [])
-        
-        if channel_id in channels:
-            # Edit existing post
-            await m.reply_text(f"Editing post from channel: {m.forward_from_chat.title}")
-            # This would trigger post edit flow
         else:
-            # Add channel if bot is admin
+            # Copy file/folder from Drive to TMP
+            src_path = parts[1].strip()
+            if not src_path.startswith('/content/drive/MyDrive/'):
+                src_path = '/content/drive/MyDrive/' + src_path.lstrip('/')
+            
+            if not os.path.exists(src_path):
+                await m.reply_text(f"❌ Path does not exist: {src_path}")
+                return
+            
+            dest_path = TMP / Path(src_path).name
             try:
-                chat_member = await c.get_chat_member(channel_id, (await c.get_me()).id)
-                if chat_member.status in ['administrator', 'creator']:
-                    POST_CHANNELS.setdefault(uid, []).append(channel_id)
-                    await m.reply_text(f"✅ Channel added: {m.forward_from_chat.title}")
+                if os.path.isdir(src_path):
+                    shutil.copytree(src_path, dest_path)
                 else:
-                    await m.reply_text("❌ Bot is not admin in this channel. Please make the bot admin first.")
-            except:
-                await m.reply_text("❌ Cannot access this channel. Make sure bot is admin.")
+                    shutil.copy2(src_path, dest_path)
+                await m.reply_text(f"✅ Copied `{src_path}` to `{dest_path}` successfully!")
+            except Exception as e:
+                await m.reply_text(f"❌ Error copying: {e}")
             return
+    # ===================================
     
     if uid in SET_FILENAME_REQUEST:
         SET_FILENAME_REQUEST.discard(uid)
@@ -3900,7 +3234,6 @@ async def text_handler(c, m: Message):
 
     text_lower = text.lower()
     
-    # UI Delete List support
     if text_lower == "list":
         if uid in BATCH_AUDIO_MODE:
             state = BATCH_AUDIO_STATE.get(uid)
@@ -3918,7 +3251,6 @@ async def text_handler(c, m: Message):
         await send_path_ui(c, m.chat.id, uid, page=0)
         return
 
-    # Handle Convert mode
     if uid in CONVERT_MODE:
         if text_lower == "off":
             CONVERT_MODE.discard(uid)
@@ -3934,17 +3266,14 @@ async def text_handler(c, m: Message):
             if not CONVERT_BATCH_LIST.get(uid):
                 await m.reply_text("Convert List is empty. Please send videos/zips first.")
                 return
-            # Use the first video for UI settings setup
             first_item = CONVERT_BATCH_LIST[uid][0]
             await handle_convert_input(c, m, override_path=first_item['path'])
             return
 
-    # Handle all for zip
     if uid in ZIP_DOWNLOAD_MODE:
         if text_lower == "all":
             AUTO_UPLOAD_ALL.add(uid)
             await m.reply_text("Auto Upload All is now **ON**.")
-            # Trigger if one is waiting
             if uid in ZIP_NAV_STATE and ZIP_NAV_STATE[uid]['state'] == 'awaiting_selection':
                 files = ZIP_NAV_STATE[uid]['files_to_upload']
                 final_order = list(range(1, len(files) + 1))
@@ -4111,14 +3440,14 @@ async def text_handler(c, m: Message):
                     await m.reply_text(f"Deleted {len(files_to_process)} items.")
                     await send_path_ui(c, m.chat.id, uid, page=NAV_PATHS[uid].get('page', 0))
                 elif is_link:
-                    link_text = "**Direct Download Links:**\n"
+                    # ===== CHANGE 2: Two links for path manager =====
+                    link_text = "**Direct Download & Stream Links:**\n"
                     for f in files_to_process:
                         if f.is_file():
-                            safe_path = urllib.parse.quote(f.relative_to(TMP).as_posix())
-                            # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
-                            link = f"{PUBLIC_BASE_URL}/dl/{safe_path}"
-                            stream_link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(str(f))}"
-                            link_text += f"‣ `{f.name}`\n🔗 Download: {link}\n🎬 Stream: {stream_link}\n"
+                            rel_path = f.relative_to(TMP).as_posix()
+                            direct_link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(rel_path)}"
+                            stream_link = f"{PUBLIC_BASE_URL}/stream?file_path={urllib.parse.quote(str(f))}"
+                            link_text += f"‣ `{f.name}`\n🔗 **Direct:** {direct_link}\n▶️ **Stream:** {stream_link}\n\n"
                     await m.reply_text(link_text, disable_web_page_preview=True)
                 elif is_rename:
                     renamed_count = 0
@@ -4139,7 +3468,6 @@ async def text_handler(c, m: Message):
                         if is_archive_file(f):
                             if uid not in ZIP_DL_QUEUES: ZIP_DL_QUEUES[uid] = asyncio.Queue()
                             queue_msg = await m.reply_text(f"Queued manual extract: `{f.name}`")
-                            # Add is_dl_only flag to extract and keep in folder without uploading
                             await ZIP_DL_QUEUES[uid].put({'local_path': str(f), 'message': m, 'queue_msg': queue_msg, 'is_dl_only': True})
                     if uid not in ZIP_DL_WORKERS or ZIP_DL_WORKERS[uid].done():
                         ZIP_DL_WORKERS[uid] = asyncio.create_task(zip_download_worker(uid, c))
@@ -4149,18 +3477,23 @@ async def text_handler(c, m: Message):
                     asyncio.create_task(process_path_uploads(uid, c, m, file_uploads))
                 return
 
-    # Handle Download Only Command toggles
     if uid in DOWNLOAD_ONLY_MODE:
         if text_lower == "link":
             DOWNLOAD_LINK_MODE.add(uid)
             DOWNLOAD_T_MODE.discard(uid)
-            await m.reply_text("Download Link Mode **ON**. Direct download links will be provided after downloading.")
+            await m.reply_text("Download Link Mode **ON**. Direct download and stream links will be provided after downloading.")
             return
         elif text_lower == "t":
             DOWNLOAD_T_MODE.add(uid)
             DOWNLOAD_LINK_MODE.discard(uid)
-            # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
-            await m.reply_text("Telegram Stream Link Mode **ON**. Direct streaming link will be provided without downloading to local storage.")
+            # ===== CHANGE 2: T-Mode gives two links =====
+            await m.reply_text(
+                "Telegram Stream Link Mode **ON**.\n"
+                "Send a Telegram file or URL to get:\n"
+                "1. **Direct Download Link** – Click to download instantly.\n"
+                "2. **Stream Link** – Open in browser to play, change audio/subtitles, and download.\n\n"
+                "No local storage is used."
+            )
             return
         elif text_lower == "off":
             DOWNLOAD_ONLY_MODE.discard(uid)
@@ -4169,7 +3502,6 @@ async def text_handler(c, m: Message):
             await m.reply_text("Download Only Mode **OFF**.")
             return
 
-    # Handle Batch Audio Add Commands
     if uid in BATCH_AUDIO_MODE:
         if text_lower == "next":
             state = BATCH_AUDIO_STATE.get(uid, 'list1')
@@ -4188,7 +3520,6 @@ async def text_handler(c, m: Message):
                     return
                 BATCH_AUDIO_STATE[uid] = 'mapping'
                 
-                # Chunking Lists to avoid Message limit
                 def chunk_and_send(lst, title):
                     chunks = []
                     curr = f"**{title}:**\n"
@@ -4596,11 +3927,16 @@ async def text_handler(c, m: Message):
     if text.startswith("http://") or text.startswith("https://"):
         url = text
         if uid in DOWNLOAD_T_MODE:
-            # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
-            link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(url)}"
-            # Also provide download link
-            download_link = f"{PUBLIC_BASE_URL}/dl?url={urllib.parse.quote(url)}"
-            await m.reply_text(f"🔗 **Direct Links:**\n\n📥 **Download:** {download_link}\n🎬 **Stream:** {link}", disable_web_page_preview=True)
+            # ===== CHANGE 2: T-Mode gives two links =====
+            # 1. Direct Download via proxy (since we don't download, we use stream with download header)
+            direct_link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(url)}&download=true"
+            # 2. Stream link (normal)
+            stream_link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(url)}"
+            await m.reply_text(
+                f"🔗 **Direct Download:** {direct_link}\n"
+                f"▶️ **Stream:** {stream_link}",
+                disable_web_page_preview=True
+            )
             return
 
         if uid in DOWNLOAD_ONLY_MODE:
@@ -4613,7 +3949,6 @@ async def text_handler(c, m: Message):
             return
 
         if uid in CONVERT_MODE:
-            # Download URL via Queue, then add to batch list for conversion
             if uid not in BATCH_AUDIO_QUEUES:
                 BATCH_AUDIO_QUEUES[uid] = asyncio.Queue()
             original_name = await get_filename_from_url(url)
@@ -4626,7 +3961,6 @@ async def text_handler(c, m: Message):
         if uid in BATCH_AUDIO_MODE:
             state = BATCH_AUDIO_STATE.get(uid)
             target_list = BATCH_AUDIO_LIST1[uid] if state == 'list1' else BATCH_AUDIO_LIST2[uid]
-            # Use Background Queue Worker for URLs to keep chronological order
             if uid not in BATCH_AUDIO_QUEUES:
                 BATCH_AUDIO_QUEUES[uid] = asyncio.Queue()
             
@@ -4689,7 +4023,6 @@ async def process_batch_audio_input(uid, c, m, url=None, file_info=None, target_
     if target_list is CONVERT_BATCH_LIST.get(uid): list_num = "Convert Batch List"
     else: list_num = "1" if target_list is BATCH_AUDIO_LIST1.get(uid) else "2"
     
-    # Generic entry for ALL links in batch audio - will extract ONLY if zip file
     if url or file_info:
         status_msg = None
         try:
@@ -4716,10 +4049,8 @@ async def process_batch_audio_input(uid, c, m, url=None, file_info=None, target_
                 await m.download(file_name=str(tmp_in), progress=dl_prog)
                 
             if tmp_in.exists():
-                # Correctly Handle Zip Files if it is an archive
                 if is_archive_file(tmp_in):
                     await status_msg.delete()
-                    # Execute extract using the already downloaded file path
                     await execute_zip_download_and_extract(c, m, url=None, local_path=str(tmp_in), target_list=target_list)
                     tmp_in.unlink(missing_ok=True)
                 else:
@@ -4746,10 +4077,14 @@ async def upload_url_cmd(c, m: Message):
     uid = m.from_user.id
     
     if uid in DOWNLOAD_T_MODE:
-        # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
-        link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(url)}"
-        download_link = f"{PUBLIC_BASE_URL}/dl?url={urllib.parse.quote(url)}"
-        await m.reply_text(f"🔗 **Direct Links:**\n\n📥 **Download:** {download_link}\n🎬 **Stream:** {link}", disable_web_page_preview=True)
+        # ===== CHANGE 2: T-Mode gives two links =====
+        direct_link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(url)}&download=true"
+        stream_link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(url)}"
+        await m.reply_text(
+            f"🔗 **Direct Download:** {direct_link}\n"
+            f"▶️ **Stream:** {stream_link}",
+            disable_web_page_preview=True
+        )
         return
 
     if uid in DOWNLOAD_ONLY_MODE:
@@ -4829,7 +4164,6 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
         fname = await get_filename_from_url(url)
         safe_name = re.sub(r"[\\/*?\"<>|:]", "_", fname)
 
-        # Removed forcing MP4 to keep original download name format intact
         if len(safe_name) > 100:
             ext = Path(safe_name).suffix
             safe_name = safe_name[:100 - len(ext)] + ext
@@ -5017,10 +4351,14 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
     original_name = file_info.file_name if file_info and file_info.file_name else f"file_{file_info.file_unique_id}"
 
     if uid in DOWNLOAD_T_MODE:
-        # ===== CHANGE 1: Use PUBLIC_BASE_URL =====
-        link = f"{PUBLIC_BASE_URL}/stream?file_id={file_info.file_id}&filename={urllib.parse.quote(original_name)}"
-        download_link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(original_name)}"
-        await m.reply_text(f"🔗 **Direct Links:**\n\n📥 **Download:** {download_link}\n🎬 **Stream:** {link}", disable_web_page_preview=True)
+        # ===== CHANGE 2: T-Mode gives two links for Telegram files =====
+        direct_link = f"{PUBLIC_BASE_URL}/stream?file_id={file_info.file_id}&filename={urllib.parse.quote(original_name)}&download=true"
+        stream_link = f"{PUBLIC_BASE_URL}/stream?file_id={file_info.file_id}&filename={urllib.parse.quote(original_name)}"
+        await m.reply_text(
+            f"🔗 **Direct Download:** {direct_link}\n"
+            f"▶️ **Stream:** {stream_link}",
+            disable_web_page_preview=True
+        )
         return
 
     if uid in DOWNLOAD_ONLY_MODE:
@@ -5128,7 +4466,6 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
 
     await add_to_queue(uid, c, m, original_name, is_url=False, original_caption=m.caption)
 
-# ===== CHANGE 3: Fix duplicate audio tracks in batch_audio_add when list2 is empty =====
 async def show_batch_audio_ui(c, chat_id, uid):
     pair_idx = BATCH_AUDIO_CURRENT_PAIR_IDX[uid]
     pairs = BATCH_AUDIO_MAPPING[uid]
@@ -5152,7 +4489,7 @@ async def show_batch_audio_ui(c, chat_id, uid):
                     msg = await c.edit_message_text(chat_id, BATCH_AUDIO_UI_MSG[uid], "Analyzing tracks...")
                 except Exception as e:
                     if "MESSAGE_NOT_MODIFIED" in str(e):
-                        pass # Ignore if it already says this
+                        pass
                     else:
                         msg = await c.send_message(chat_id, "Analyzing tracks...")
                         BATCH_AUDIO_UI_MSG[uid] = msg.id
@@ -5160,11 +4497,9 @@ async def show_batch_audio_ui(c, chat_id, uid):
                 msg = await c.send_message(chat_id, "Analyzing tracks...")
                 BATCH_AUDIO_UI_MSG[uid] = msg.id
                 
-            # Get tracks for both the base video and the audio source
             tracks1 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid_path1)
             tracks2 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid_path2)
             
-            # ===== CHANGE 3: If tracks2 is empty, remove duplicates from tracks1 =====
             if not tracks2:
                 seen = set()
                 unique_tracks = []
@@ -5175,7 +4510,6 @@ async def show_batch_audio_ui(c, chat_id, uid):
                         unique_tracks.append(t)
                 tracks1 = unique_tracks
 
-            # Combine tracks, keeping track of their source (1 or 2)
             combined_tracks = [{'src': 1, 'data': t} for t in tracks1] + [{'src': 2, 'data': t} for t in tracks2]
             
             BATCH_AUDIO_TRACK_CONFIGS[uid][str(pair_idx)] = {
@@ -5191,7 +4525,6 @@ async def show_batch_audio_ui(c, chat_id, uid):
     config = BATCH_AUDIO_TRACK_CONFIGS[uid][str(pair_idx)]
     combined_tracks = config['tracks']
     
-    # Build text message with full names as requested
     text = (
         f"**🎵 Batch Audio Selection ({pair_idx + 1}/{len(pairs)})**\n\n"
         f"**Base Video:** `{name1}`\n"
@@ -5217,7 +4550,6 @@ async def show_batch_audio_ui(c, chat_id, uid):
             
     text += "\nSelect which tracks to keep and which should play by default:"
     
-    # Build buttons with short names (List 1 will be first/top, List 2 below)
     keyboard = []
     for i, track_wrap in enumerate(combined_tracks):
         is_def = config['default'] == i
@@ -5227,7 +4559,6 @@ async def show_batch_audio_ui(c, chat_id, uid):
         keep_text = "✅ Keep" if is_keep else "❌ Drop"
         
         t_data = track_wrap['data']
-        # Short name for the button: only language code
         lang_code = t_data.get('language', 'und').lower()
         short_name = f"({lang_code})"
             
@@ -5248,7 +4579,6 @@ async def show_batch_audio_ui(c, chat_id, uid):
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
             logger.error(f"UI edit error: {e}")
-# ========================================================================
 
 @app.on_callback_query(filters.regex(r"^baud_"))
 async def batch_audio_callback(c: Client, cb: CallbackQuery):
@@ -5275,7 +4605,6 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
             )
         return
         
-    # Handle list actions which don't have pair_idx
     if action == "list":
         sub_action = parts[2]
         if sub_action == "close":
@@ -5313,7 +4642,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
             BATCH_AUDIO_UI_MSG[uid] = cb.message.id
             await show_batch_audio_ui(c, cb.message.chat.id, uid)
         elif sub_action == "cancel":
-            if len(parts) == 3: # baud_list_cancel
+            if len(parts) == 3:
                 keyboard = InlineKeyboardMarkup([
                     [InlineKeyboardButton("Yes ✅", callback_data="baud_list_cancel_yes"),
                      InlineKeyboardButton("No ❌", callback_data="baud_list_cancel_no")]
@@ -5321,7 +4650,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
                 try:
                     await cb.message.edit_text("Are you sure you want to cancel and clear the list?", reply_markup=keyboard)
                 except Exception: pass
-            elif parts[3] == "yes": # baud_list_cancel_yes
+            elif parts[3] == "yes":
                 BATCH_AUDIO_MODE.discard(uid)
                 BATCH_AUDIO_STATE.pop(uid, None)
                 for item in BATCH_AUDIO_LIST1.get(uid, []):
@@ -5339,9 +4668,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
                 try:
                     await cb.message.edit_text("Batch Audio Add Mode cancelled and data cleared.")
                 except Exception: pass
-            elif parts[3] == "no": # baud_list_cancel_no
-                
-                # Chunking Lists again
+            elif parts[3] == "no":
                 def chunk_and_send_return(lst, title):
                     chunks = []
                     curr = f"**{title}:**\n"
@@ -5375,7 +4702,6 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
                 except Exception: pass
         return
 
-    # Handle track selection actions
     if action == "cancel":
         BATCH_AUDIO_MODE.discard(uid)
         BATCH_AUDIO_STATE.pop(uid, None)
@@ -5407,7 +4733,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
         track_idx = int(parts[4])
         config['default'] = track_idx
         if track_idx not in config['keep']:
-            config['keep'].append(track_idx) # Default must be kept
+            config['keep'].append(track_idx)
         await show_batch_audio_ui(c, cb.message.chat.id, uid)
         await cb.answer()
         
@@ -5428,7 +4754,6 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
         await cb.answer()
         
     elif action == "all":
-        # Apply this config to all remaining pairs IF track count matches
         pairs = BATCH_AUDIO_MAPPING[uid]
         keep_idxs = config['keep']
         def_idx = config['default']
@@ -5441,10 +4766,8 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
             vid1 = BATCH_AUDIO_LIST1[uid][idx1]['path']
             vid2 = BATCH_AUDIO_LIST2[uid][idx2]['path']
             
-            # Reconstruct combined tracks for this pair to check count
             t1 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid1)
             t2 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid2)
-            # If list2 is empty, apply same duplicate removal logic
             if not t2:
                 seen = set()
                 unique_tracks = []
@@ -5457,7 +4780,6 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
             c_tracks = [{'src': 1, 'data': t} for t in t1] + [{'src': 2, 'data': t} for t in t2]
             
             if len(c_tracks) != target_count:
-                # Stop auto applying if mismatch
                 BATCH_AUDIO_CURRENT_PAIR_IDX[uid] = i
                 await cb.message.reply_text(f"Track mismatch at pair {i+1}. Found {len(c_tracks)} tracks instead of {target_count}. Manual selection required.")
                 await show_batch_audio_ui(c, cb.message.chat.id, uid)
@@ -5497,7 +4819,6 @@ async def execute_batch_audio_remux(uid, c, chat_id):
             await status_msg.edit(f"Remuxing {i+1}/{len(pairs)}...\nBase: `{base_name}`")
         except Exception: pass
         
-        # Audio default mapping fix & re-encode code (Issue 3 & 5)
         map_args = ["-map", "0:v", "-map", "0:s?", "-map", "0:d?"]
         ordered_audio_keep = []
         
@@ -5524,13 +4845,11 @@ async def execute_batch_audio_remux(uid, c, chat_id):
         if def_track != -1 and def_track in keep_tracks:
             cmd.extend(["-disposition:a:0", "default"])
             
-        # Metadata renaming logic to handle duplicates
         used_titles = set()
         for idx, k in enumerate(ordered_audio_keep):
             t = tracks_data[k]['data']['title']
             if not t or t == 'N/A': t = "Audio"
             
-            # Handle duplicate names gracefully
             original_t = t
             if t in used_titles:
                 j = 2
@@ -5550,25 +4869,22 @@ async def execute_batch_audio_remux(uid, c, chat_id):
             "-metadata:s:s", "title=[@TA_HD_Anime] Telegram Channel",
             "-metadata:s:s", "handler_name=[@TA_HD_Anime] Telegram Channel",
             "-c:v", "copy",
-            "-c:a", "aac", "-ac", "2", "-b:a", "128k", # Re-encoding audio to fix weird voices Issue
+            "-c:a", "aac", "-ac", "2", "-b:a", "128k",
             "-c:s", "copy",
-            "-shortest", # Fixed Lag/Desync issue for batch audio
+            "-shortest",
             str(out_path)
         ])
         
         try:
             res = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
             if res.returncode == 0 and out_path.exists():
-                # Use caption logic
                 final_caption_template = USER_CAPTIONS.get(uid)
                 if not final_caption_template or uid in USE_ORIGINAL_CAPTION_IN_MULTI_GROUP:
-                    # In batch audio mode, if set caption is not set, use base video name as caption
                     cap = base_name
                 else:
                     advance_dynamic_counters(uid)
                     cap = process_dynamic_caption(uid, final_caption_template)
                 
-                # Mock a message for sequential_upload_task
                 class FakeMessage:
                     def __init__(self, cid):
                         class Chat: id = cid
@@ -5594,7 +4910,6 @@ async def execute_batch_audio_remux(uid, c, chat_id):
     try: await status_msg.edit("Batch Audio Processing Complete!")
     except Exception: pass
     
-    # Cleanup files
     for p in BATCH_AUDIO_LIST1.get(uid, []):
         try: Path(p['path']).unlink(missing_ok=True)
         except: pass
@@ -5607,7 +4922,6 @@ async def execute_batch_audio_remux(uid, c, chat_id):
     BATCH_AUDIO_LIST2[uid] = []
     try: await c.send_message(chat_id, "Batch processing complete. Batch Audio Add Mode is still ON.\nSend Base Videos for List 1, or type `off` to exit.")
     except Exception: pass
-# -----------------------------
 
 async def handle_audio_change_file(c: Client, m: Message):
     uid = m.from_user.id
@@ -5727,7 +5041,7 @@ async def sequential_remux_upload_task(uid, c, m, in_path, out_name, new_stream_
             "-metadata:s:s", "title=[@TA_HD_Anime] Telegram Channel",
             "-metadata:s:s", "handler_name=[@TA_HD_Anime] Telegram Channel",
             "-c:v", "copy",
-            "-c:a", "aac", "-ac", "2", "-b:a", "128k", # MX Player compatibility & voice loss fix
+            "-c:a", "aac", "-ac", "2", "-b:a", "128k",
             "-c:s", "copy",
             str(out_path)
         ]
@@ -6106,7 +5420,6 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
         if cancel_event.is_set():
             raise Exception("Cancelled")
         
-        # Determine caption logic
         use_orig_cap = False
         if not final_caption_template or uid in USE_ORIGINAL_CAPTION_IN_MULTI_GROUP:
             use_orig_cap = True
@@ -6122,7 +5435,6 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
             advance_dynamic_counters(uid)
             caption_to_use = process_dynamic_caption(uid, final_caption_template)
             
-        # Make caption bold
         caption_to_use = make_bold(caption_to_use)
 
         parts_to_upload = [(upload_path, target_name, None, duration_sec)]
@@ -6332,26 +5644,72 @@ def download_local_file(filename):
     file_path = TMP / filename
     if file_path.exists() and file_path.is_file():
         mime_type, _ = mimetypes.guess_type(str(file_path))
-        return send_from_directory(TMP, filename, mimetype=mime_type, as_attachment=True)
+        # Force download by setting Content-Disposition
+        response = send_from_directory(TMP, filename, mimetype=mime_type, as_attachment=False)
+        response.headers['Content-Disposition'] = f'attachment; filename="{Path(filename).name}"'
+        return response
     return "File not found.", 404
 
 @flask_app.route('/stream')
 def stream_remote_file():
-    """Streams a remote URL or returns a link. (Basic proxy for T-Mode/Link)"""
+    """Streams a remote URL or a local file path, or Telegram file ID."""
     url = request.args.get('url')
+    file_path = request.args.get('file_path')
     file_id = request.args.get('file_id')
+    download = request.args.get('download', 'false').lower() == 'true'
     filename = request.args.get('filename', 'video.mp4')
     
+    # Telegram file ID streaming (t-mode)
     if file_id:
-        # Handle Telegram file streaming
-        return f"Telegram file streaming not implemented. Use direct download instead."
+        try:
+            # Use Pyrogram to download the file and stream it
+            # This is a simplified proxy; in production, you'd need async handling
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            # We'll use a temporary file to serve
+            temp_file = TMP / f"stream_{file_id}_{int(time.time())}.mp4"
+            loop.run_until_complete(app.download_media(file_id, file_name=str(temp_file)))
+            if temp_file.exists():
+                def generate():
+                    with open(temp_file, 'rb') as f:
+                        while chunk := f.read(8192):
+                            yield chunk
+                    temp_file.unlink(missing_ok=True)
+                headers = {
+                    'Content-Disposition': 'inline' if not download else f'attachment; filename="{filename}"',
+                    'Content-Type': 'video/mp4'
+                }
+                return Response(generate(), headers=headers)
+            return "File not found.", 404
+        except Exception as e:
+            return f"Error: {e}", 500
     
+    # Local file path streaming
+    if file_path:
+        file_path = Path(file_path)
+        if file_path.exists() and file_path.is_file():
+            def generate():
+                with open(file_path, 'rb') as f:
+                    while chunk := f.read(8192):
+                        yield chunk
+            mime_type, _ = mimetypes.guess_type(str(file_path))
+            headers = {
+                'Content-Disposition': 'inline' if not download else f'attachment; filename="{file_path.name}"',
+                'Content-Type': mime_type or 'video/mp4'
+            }
+            return Response(generate(), headers=headers)
+        return "File not found.", 404
+    
+    # Remote URL streaming (proxy)
     if not url:
-        return "URL parameter is required.", 400
+        return "URL, file_path, or file_id parameter is required.", 400
         
     def generate():
         try:
-            with requests.get(url, stream=True, timeout=15, headers=DOWNLOAD_HEADERS) as r:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            with requests.get(url, stream=True, timeout=15, headers=headers) as r:
                 r.raise_for_status()
                 for chunk in r.iter_content(chunk_size=8192):
                     if chunk:
@@ -6364,10 +5722,40 @@ def stream_remote_file():
         mime_type = 'video/mp4'
 
     headers = {
-        'Content-Disposition': 'inline',
+        'Content-Disposition': 'inline' if not download else f'attachment; filename="{Path(url).name}"',
         'Content-Type': mime_type
     }
     return Response(generate(), headers=headers)
+
+def ping_service():
+    # Determine which URL to ping
+    base_url = PUBLIC_BASE_URL
+    if not base_url:
+        print("PUBLIC_BASE_URL is not set. Ping service is disabled.")
+        return
+
+    # Ensure URL has protocol
+    if not base_url.startswith(('http://', 'https://')):
+        base_url = f"http://{base_url}"
+    
+    # Check if running on Hugging Face or Render
+    if 'HUGGINGFACE_SPACE_ID' in os.environ:
+        # Hugging Face: ping itself
+        target_url = base_url
+    elif 'RENDER_EXTERNAL_HOSTNAME' in os.environ:
+        # Render: ping itself
+        target_url = base_url
+    else:
+        # Local/Colab/Termux: ping localhost
+        target_url = f"http://localhost:{PORT}"
+    
+    while True:
+        try:
+            response = requests.get(target_url, timeout=10)
+            print(f"Pinged {target_url} | Status Code: {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            print(f"Error pinging {target_url}: {e}")
+        time.sleep(600)
 
 def run_flask_and_ping():
     flask_thread = threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=PORT, use_reloader=False))
