@@ -3980,13 +3980,6 @@ async def text_handler(c, m: Message):
         url = text
         if uid in DOWNLOAD_T_MODE:
             # ===== CHANGE: Generate two links for T-mode =====
-            # Streaming link (as before) and direct download link (using /download?file_id=...)
-            # But for URLs we only have streaming via /stream?url=...
-            # We can offer direct download via /dl_attachment?url=... or just the streaming link.
-            # For simplicity, we'll provide streaming link and also a direct download link if possible.
-            # Since we don't download locally in T-mode, we can't give direct download.
-            # However we can proxy the file with attachment via /download?url=...
-            # Let's create a new route /download_attachment?url=...
             stream_link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(url)}"
             download_link = f"{PUBLIC_BASE_URL}/download_attachment?url={urllib.parse.quote(url)}"
             await m.reply_text(
@@ -4526,6 +4519,16 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
         count = len(BATCH_DATA[uid])
         status_text = f"{count} files saved for batch upload.\nLast: `{original_name}`"
         await update_batch_status(c, m, uid, status_text)
+        return
+
+    # ===== NEW: Drive Upload Mode =====
+    if uid in UPLOAD_DRIVE_MODE:
+        if uid not in UPLOAD_DRIVE_QUEUES:
+            UPLOAD_DRIVE_QUEUES[uid] = asyncio.Queue()
+        queue_msg = await m.reply_text(f"Added to Drive upload queue. Position: {UPLOAD_DRIVE_QUEUES[uid].qsize() + 1}")
+        await UPLOAD_DRIVE_QUEUES[uid].put({'message': m, 'file_info': file_info, 'original_name': original_name})
+        if uid not in UPLOAD_DRIVE_WORKERS or UPLOAD_DRIVE_WORKERS[uid].done():
+            UPLOAD_DRIVE_WORKERS[uid] = asyncio.create_task(upload_drive_worker(uid, c))
         return
 
     await add_to_queue(uid, c, m, original_name, is_url=False, original_caption=m.caption)
@@ -5690,6 +5693,42 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
             pass
 
 # ===== NEW: Google Drive Upload Mode =====
+@app.on_message(filters.command("upload_drive") & filters.private)
+async def upload_drive_cmd(c, m: Message):
+    uid = m.from_user.id
+    if not is_admin(uid):
+        await m.reply_text("You are not authorized to use this command.")
+        return
+    if not drive_service:
+        await m.reply_text("❌ Google Drive service not configured. Please set GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON environment variable.")
+        return
+    if uid in UPLOAD_DRIVE_MODE:
+        UPLOAD_DRIVE_MODE.discard(uid)
+        if uid in UPLOAD_DRIVE_QUEUES:
+            while not UPLOAD_DRIVE_QUEUES[uid].empty():
+                try: UPLOAD_DRIVE_QUEUES[uid].get_nowait(); UPLOAD_DRIVE_QUEUES[uid].task_done()
+                except: pass
+        if uid in UPLOAD_DRIVE_WORKERS:
+            UPLOAD_DRIVE_WORKERS[uid].cancel()
+            del UPLOAD_DRIVE_WORKERS[uid]
+        await m.reply_text("Google Drive Upload Mode **OFF**.")
+    else:
+        UPLOAD_DRIVE_MODE.add(uid)
+        UPLOAD_DRIVE_QUEUES[uid] = asyncio.Queue()
+        tutorial = (
+            "**☁️ Google Drive Upload Mode ON**\n\n"
+            "All media files (videos, photos) sent or forwarded will be downloaded and uploaded to your Google Drive.\n\n"
+            "**What you can send:**\n"
+            "• Telegram video/photo files\n"
+            "• Direct URLs (including Google Drive links)\n\n"
+            "**Commands during mode:**\n"
+            "• `off` – turn off this mode\n"
+            "• `list` – view queued items (not yet implemented)\n\n"
+            "Files are uploaded with their original names. If the name is too long, it will be shortened.\n"
+            "After upload, you'll receive both a view link and a direct download link."
+        )
+        await m.reply_text(tutorial)
+
 async def upload_drive_worker(uid, c):
     while uid in UPLOAD_DRIVE_QUEUES and not UPLOAD_DRIVE_QUEUES[uid].empty():
         task_data = await UPLOAD_DRIVE_QUEUES[uid].get()
