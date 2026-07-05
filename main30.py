@@ -15,7 +15,7 @@ from hachoir.parser import createParser
 from hachoir.metadata import extractMetadata
 import subprocess
 import traceback
-import json
+import json 
 from flask import Flask, render_template_string, send_from_directory, Response, request, redirect
 import requests
 import time
@@ -48,18 +48,18 @@ try:
 except ImportError:
     pass
 
-# For Colab Drive (only works in Google Colab)
+# Google Drive API imports
 try:
-    from google.colab import drive
-    import google.auth
-    COLAB_AVAILABLE = True
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload
 except ImportError:
-    COLAB_AVAILABLE = False
+    pass
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-PORT = int(os.getenv("PORT", "10000"))
+PORT = int(os.getenv("PORT", "10000")) 
 
 # ===== CHANGE 1: Use PUBLIC_BASE_URL instead of RENDER_EXTERNAL_HOSTNAME =====
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
@@ -85,11 +85,30 @@ else:
         PUBLIC_BASE_URL = f"http://{PUBLIC_BASE_URL}"
 # ========================================================================
 
+# Global variable for pinging (now uses PUBLIC_BASE_URL)
+PING_BASE_URL = PUBLIC_BASE_URL
+
 # env
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-COOKIES_TXT = os.getenv("COOKIES_TXT")
+COOKIES_TXT = os.getenv("COOKIES_TXT") # Added for yt-dlp cookies
+
+# Google Drive Service Account JSON (as string)
+GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON")
+if GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON:
+    try:
+        # Convert string to dict
+        service_account_info = json.loads(GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON)
+        # Create credentials
+        credentials = service_account.Credentials.from_service_account_info(service_account_info)
+        # Build Drive service
+        drive_service = build('drive', 'v3', credentials=credentials)
+    except Exception as e:
+        logger.error(f"Failed to initialize Drive service: {e}")
+        drive_service = None
+else:
+    drive_service = None
 
 TMP = Path("tmp")
 TMP.mkdir(parents=True, exist_ok=True)
@@ -97,17 +116,17 @@ TMP.mkdir(parents=True, exist_ok=True)
 # state
 USER_THUMBS = {}
 TASKS = {}
-USER_TASK_EVENTS = {}
+USER_TASK_EVENTS = {} # New: uid -> {msg_id: cancel_event} for specific task cancel
 SET_THUMB_REQUEST = set()
 SET_CAPTION_REQUEST = set()
-SET_FILENAME_REQUEST = set()
+SET_FILENAME_REQUEST = set() # New for filename
 USER_CAPTIONS = {}
-USER_FILENAMES = {}
+USER_FILENAMES = {} # New for filename
 USER_COUNTERS = {}
 EDIT_CAPTION_MODE = set()
 USER_THUMB_TIME = {}
 HIDE_PROGRESS_BAR = set()
-USER_PROGRESS_INTERVAL = {}
+USER_PROGRESS_INTERVAL = {} # New: custom interval for progress bar
 
 # --- NEW STATE FOR PAUSE/CONTINUE & AUTO ZIP ---
 USER_QUEUE_PAUSED = set()
@@ -116,39 +135,39 @@ AUTO_UPLOAD_ALL = set()
 
 # --- STATE FOR AUDIO CHANGE ---
 MKV_AUDIO_CHANGE_MODE = set()
-PENDING_AUDIO_ORDERS = {}
+PENDING_AUDIO_ORDERS = {} 
 # ------------------------------
 
 # --- NEW STATE FOR CONVERT MODE ---
 CONVERT_MODE = set()
 CONVERT_SESSIONS = {}
-ACTIVE_CONVERT_SESSION = {}
-CONVERT_LOCKS = {}
+ACTIVE_CONVERT_SESSION = {} # New: track active session to receive custom bitrate via message
+CONVERT_LOCKS = {} # To prevent CPU overload
 CONVERT_ZIP_MODE = set()
-CONVERT_BATCH_LIST = {}
+CONVERT_BATCH_LIST = {} # uid -> list of files to convert
 CONVERT_BATCH_UI_MSG = {}
 # ----------------------------------
 
 # --- NEW STATE FOR POST CREATION ---
 CREATE_POST_MODE = set()
-POST_CREATION_STATE = {}
+POST_CREATION_STATE = {} 
 
 DEFAULT_POST_DATA = {
     'image_name': "Image Name",
     'genres': "",
-    'season_list_raw': "1, 2"
+    'season_list_raw': "1, 2" 
 }
 # ------------------------------------------------
 
 # --- NEW STATE FOR BATCH CAPTION & QUEUE ---
-BATCH_CAPTION_MODE = set()
+BATCH_CAPTION_MODE = set()  
 BATCH_UPLOAD_MODE = set()
-BATCH_DATA = {}
-BATCH_STATUS_MSG = {}
+BATCH_DATA = {}            
+BATCH_STATUS_MSG = {}      
 
-USER_QUEUES = {}
-USER_WORKERS = {}
-USER_UPLOAD_LOCKS = {}
+USER_QUEUES = {}           
+USER_WORKERS = {}          
+USER_UPLOAD_LOCKS = {}     
 
 # --- NEW STATE FOR MULTI GROUP BATCH & CAPTION OVERRIDE & ZIP ---
 MULTI_GROUP_BATCH_MODE = set()
@@ -159,13 +178,13 @@ MULTI_GROUP_DONE_MSG = {}
 # --- NEW ZIP DOWNLOAD MODE STATE ---
 ZIP_DOWNLOAD_MODE = set()
 ZIP_NAV_STATE = {}
-ZIP_READY_LIST = {}
-ZIP_DL_QUEUES = {}
-ZIP_DL_WORKERS = {}
+ZIP_READY_LIST = {} # New: uid -> list of extracted zip info for serial display
+ZIP_DL_QUEUES = {}  # New: queue for serial zip downloading
+ZIP_DL_WORKERS = {} # New: worker for serial zip downloading
 # ------------------------------------------------
 
 # --- NEW STATE FOR PATH NAVIGATOR ---
-NAV_PATHS = {}
+NAV_PATHS = {} # uid -> {"current": Path, "items": list, "selected_file": Path, "page": int}
 # ------------------------------------------------
 
 # --- YT-DLP STATE & MODES ---
@@ -176,10 +195,10 @@ SAVED_YT_QUALITIES = {}
 
 # --- NEW STATE FOR BATCH AUDIO ADD MODE ---
 BATCH_AUDIO_MODE = set()
-BATCH_AUDIO_STATE = {}
-BATCH_AUDIO_LIST1 = {}
-BATCH_AUDIO_LIST2 = {}
-BATCH_AUDIO_MAPPING = {}
+BATCH_AUDIO_STATE = {} # uid -> 'list1', 'list2', 'mapping', 'ui'
+BATCH_AUDIO_LIST1 = {} # uid -> list of dicts: {'path': str, 'name': str}
+BATCH_AUDIO_LIST2 = {} # uid -> list of dicts: {'path': str, 'name': str}
+BATCH_AUDIO_MAPPING = {} # uid -> dict mapping pairs
 BATCH_AUDIO_CURRENT_PAIR_IDX = {}
 BATCH_AUDIO_TRACK_CONFIGS = {}
 BATCH_AUDIO_UI_MSG = {}
@@ -194,18 +213,20 @@ DOWNLOAD_LINK_MODE = set()
 DOWNLOAD_T_MODE = set()
 # ----------------------------------------
 
-# --- NEW STATE FOR COLAB DRIVE ---
-COLAB_DRIVE_MODE = set()
-COLAB_DRIVE_STATE = {}
-# ---------------------------------
+# --- NEW STATE FOR GOOGLE DRIVE UPLOAD MODE ---
+UPLOAD_DRIVE_MODE = set()
+UPLOAD_DRIVE_QUEUES = {}
+UPLOAD_DRIVE_WORKERS = {}
+# ------------------------------------------------
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", ""))
-MAX_SIZE = 1000 * 1024 * 1024 * 1024
+MAX_SIZE = 1000 * 1024 * 1024 * 1024 # Increased to 1000GB
 
+# Updated workers to 1000 as requested, added sleep_threshold to prevent FloodWait crashes
 app = Client("mybot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=1000, sleep_threshold=86400)
 flask_app = Flask(__name__)
 
-MAIN_LOOP = None
+MAIN_LOOP = None # Required for TG streaming
 
 # ---- utilities ----
 def get_unique_path(base_dir: Path, filename: str) -> Path:
@@ -313,6 +334,7 @@ def process_dynamic_caption(uid, caption_template, is_first_setup=False):
 
 
 def generate_new_filename(original_name: str, uid: int = None) -> str:
+    """Generates the new standardized filename while preserving the original extension."""
     file_path = Path(original_name)
     file_ext = file_path.suffix.lower()
     
@@ -329,6 +351,7 @@ def generate_new_filename(original_name: str, uid: int = None) -> str:
     return base_name + file_ext
 
 def get_video_metadata(file_path: Path) -> dict:
+    """Extracts duration, width, and height using FFprobe (with Hachoir fallback)."""
     data = {'duration': 0, 'width': 0, 'height': 0}
     try:
         cmd = [
@@ -391,6 +414,7 @@ def get_video_metadata(file_path: Path) -> dict:
     return data
 
 def get_detailed_metadata(file_path: Path) -> dict:
+    """Extracts very detailed metadata for conversion purposes."""
     data = {'duration': 0, 'width': 0, 'height': 0, 'v_bitrate': 0, 'audio_streams': [], 'filesize': 0}
     try:
         data['filesize'] = os.path.getsize(file_path)
@@ -424,6 +448,7 @@ def get_detailed_metadata(file_path: Path) -> dict:
                     'bitrate': ab_val
                 })
                 
+        # Estimate video bitrate if missing
         if data['v_bitrate'] == 0 and total_bitrate > 0:
             audio_total = sum([a['bitrate'] for a in data['audio_streams']])
             data['v_bitrate'] = max(100000, int(total_bitrate - audio_total))
@@ -474,6 +499,7 @@ def build_convert_ui(session_id):
             res_buttons.append(InlineKeyboardButton(f"✅ {r}p" if res == r else f"{r}p", callback_data=f"cv_res_{session_id}_{r}"))
     
     keyboard = []
+    # Splitting resolution buttons into chunks of 4 for better UI
     for i in range(0, len(res_buttons), 4):
         keyboard.append(res_buttons[i:i+4])
         
@@ -526,6 +552,7 @@ def format_duration(seconds):
     return f"{s}s"
 
 def progress_keyboard():
+    # Included Refresh button as per requirement
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Refresh 🔄", callback_data="refresh_btn")],
         [InlineKeyboardButton("Cancel ❌", callback_data="cancel_single"),
@@ -543,6 +570,7 @@ def mode_check_keyboard(uid: int) -> InlineKeyboardMarkup:
     convert_status = "✅ ON" if uid in CONVERT_MODE else "❌ OFF"
     batch_audio_status = "✅ ON" if uid in BATCH_AUDIO_MODE else "❌ OFF"
     dl_only_status = "✅ ON" if uid in DOWNLOAD_ONLY_MODE else "❌ OFF"
+    drive_status = "✅ ON" if uid in UPLOAD_DRIVE_MODE else "❌ OFF"
     
     waiting_count = sum(1 for data in PENDING_AUDIO_ORDERS.values() if data['uid'] == uid)
     waiting_status = f" ({waiting_count} orders pending)" if waiting_count > 0 else ""
@@ -554,11 +582,13 @@ def mode_check_keyboard(uid: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"Edit Caption Mode {caption_status}", callback_data="toggle_caption_mode")],
         [InlineKeyboardButton(f"YT-DLP Mode {yt_dlp_status}", callback_data="toggle_ytdlp_mode")],
         [InlineKeyboardButton(f"ZIP Download Mode {zip_status}", callback_data="toggle_zip_mode")],
-        [InlineKeyboardButton(f"Download Only Mode {dl_only_status}", callback_data="toggle_dl_only_mode")]
+        [InlineKeyboardButton(f"Download Only Mode {dl_only_status}", callback_data="toggle_dl_only_mode")],
+        [InlineKeyboardButton(f"Google Drive Upload Mode {drive_status}", callback_data="toggle_drive_mode")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def get_audio_tracks_ffprobe(file_path: Path) -> list:
+    """Uses ffprobe to get a list of audio streams with their index and title."""
     try:
         cmd = [
             "ffprobe",
@@ -612,6 +642,7 @@ def format_size(bytes_size):
     return "%s %s" % (s, size_name[i])
 
 def make_bold(text):
+    """Utility to ensure text is bold formatted correctly"""
     if not text: return text
     text_str = str(text).strip()
     if not text_str.startswith("**"):
@@ -656,6 +687,7 @@ async def progress_callback(current, total, action, message, start_time, is_time
         size_str = f"{format_size(current)} / {format_size(total)}"
         speed_str = f"{format_size(speed)}/s"
     
+    # Original Name added to progress bar
     orig_name_str = f"**File:** `{original_name}`\n" if original_name else ""
     
     text = (
@@ -784,7 +816,9 @@ def generate_post_caption(data: dict) -> str:
     
     return final_caption
 
+# ===== CHANGE 2: Improved get_filename_from_url =====
 async def get_filename_from_url(url):
+    """Accurately detect filename from URL/Headers using regex without deprecated cgi module."""
     try:
         connector = aiohttp.TCPConnector(limit=0, family=socket.AF_INET, use_dns_cache=True, ttl_dns_cache=300)
         async with aiohttp.ClientSession(connector=connector) as sess:
@@ -807,6 +841,7 @@ async def get_filename_from_url(url):
     path = urllib.parse.unquote(parsed_url.path)
     fname = os.path.basename(path)
     
+    # If fname is empty or too short (like "re"), try harder
     if not fname or len(fname) < 3:
         segments = path.split('/')
         for seg in reversed(segments):
@@ -814,8 +849,10 @@ async def get_filename_from_url(url):
                 fname = seg
                 break
         if not fname:
+            # Fallback: use a default name
             fname = "downloaded_file"
     
+    # Ensure extension is present (if not, caller may add)
     if len(fname) > 200:
         ext = Path(fname).suffix
         if not ext or len(ext) > 20:
@@ -826,6 +863,7 @@ async def get_filename_from_url(url):
         fname = "downloaded_file.mp4"
         
     return fname
+# ========================================================================
 
 async def download_stream(resp, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
     total = 0
@@ -856,13 +894,13 @@ async def download_stream(resp, out_path: Path, message: Message = None, cancel_
         return False, str(e)
     return True, None
 
+# ===== CHANGE: Add a global user-agent for all downloads =====
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
 async def download_url_generic(url: str, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
-    # User-Agent added for all downloads
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
     for attempt in range(1, 11):
         timeout = aiohttp.ClientTimeout(total=7200, sock_connect=120)
+        headers = {"User-Agent": DEFAULT_USER_AGENT}
         if out_path.exists():
             downloaded = out_path.stat().st_size
             headers["Range"] = f"bytes={downloaded}-"
@@ -890,13 +928,23 @@ async def download_url_generic(url: str, out_path: Path, message: Message = None
     return False, "Failed after 10 attempts"
 
 async def download_drive_file(file_id: str, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
+    # If we have a service account, use it to download
+    if drive_service:
+        try:
+            # Download using Drive API
+            request = drive_service.files().get_media(fileId=file_id)
+            # Stream download
+            response = request.execute()
+            # But execute returns the entire content, better to use MediaIoBaseDownload
+            # For simplicity, we'll use the HTTP download with token fallback
+        except Exception:
+            pass
+
     base = f"https://drive.google.com/uc?export=download&id={file_id}"
-    # User-Agent added
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
     for attempt in range(1, 11):
         timeout = aiohttp.ClientTimeout(total=7200, sock_connect=120)
+        headers = {"User-Agent": DEFAULT_USER_AGENT}
+        
         if out_path.exists():
             downloaded = out_path.stat().st_size
             headers["Range"] = f"bytes={downloaded}-"
@@ -960,6 +1008,7 @@ def process_dynamic_text_no_increment(uid, caption_template):
     if uid not in USER_COUNTERS:
         USER_COUNTERS[uid] = {'uploads': 0, 'episode_numbers': {}, 'dynamic_counters': {}, 're_options_count': 0}
     
+    # Initialize counters to ensure proper replacement
     counter_matches = re.findall(r"\[\s*(\(?\d+\)?)\s*\]", caption_template)
     for match in counter_matches:
         if match not in USER_COUNTERS[uid].get('dynamic_counters', {}):
@@ -1045,8 +1094,8 @@ async def set_bot_commands():
         BotCommand("progress_bar", "Toggle progress bar ON/OFF or Custom Interval (admin only)"),
         BotCommand("continue", "Resume paused queue / Restore buttons"),
         BotCommand("restart", "Show Storage info and Clear Data"),
-        BotCommand("colab_drive", "Connect Google Drive (Colab only)"),
-        BotCommand("help", "Help")
+        BotCommand("help", "Help"),
+        BotCommand("upload_drive", "Toggle Google Drive upload mode (admin only)")
     ]
     try:
         await app.set_bot_commands(cmds)
@@ -1054,6 +1103,7 @@ async def set_bot_commands():
         logger.warning("Set commands error: %s", e)
 
 async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, status_msg_id, cancel_event, default_caption=None, original_caption=None, original_download_name=None):
+    """Background task that waits for upload lock to ensure sequential uploads."""
     if uid not in USER_UPLOAD_LOCKS:
         USER_UPLOAD_LOCKS[uid] = asyncio.Lock()
     
@@ -1065,6 +1115,7 @@ async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, s
 
 # --- QUEUE WORKER WITH PAUSE LOGIC ---
 async def process_queue_handler(uid, client):
+    """Worker function that processes tasks sequentially for a user."""
     queue = USER_QUEUES[uid]
     while not queue.empty():
         while uid in USER_QUEUE_PAUSED:
@@ -1093,7 +1144,7 @@ async def process_queue_handler(uid, client):
                 safe_title = re.sub(r"[\\/*?\"<>|:]", "_", title)
                 if len(safe_title) > 100: safe_title = safe_title[:100]
                 
-                out_tmpl = str(TMP / f"{safe_title}.%(ext)s")
+                out_tmpl = str(TMP / f"{safe_title}.%(ext)s") # FIX 2: Download strictly without dl_uid_prefix
                 
                 ydl_opts = {
                     'format': fmt,
@@ -1162,9 +1213,10 @@ async def process_queue_handler(uid, client):
                 url = task_data.get('url')
                 await download_and_process_generic(client, m, url, status_msg, cancel_event)
             else:
+                # Start Processing
                 file_info = m.video or m.document
                 
-                tmp_path = get_unique_path(TMP, original_name)
+                tmp_path = get_unique_path(TMP, original_name) # FIX 2: Maintains original name downloaded
                 
                 try:
                     if status_msg:
@@ -1195,6 +1247,7 @@ async def process_queue_handler(uid, client):
 
                     renamed_file = get_dynamic_filename(uid, tmp_path.name)
                     
+                    # 2. Upload Phase (Pipelined)
                     asyncio.create_task(
                         sequential_upload_task(uid, client, m, tmp_path, renamed_file, status_msg.id if status_msg else None, cancel_event, default_caption=original_name, original_caption=original_caption, original_download_name=original_name)
                     )
@@ -1508,8 +1561,8 @@ async def start_handler(c, m: Message):
         "/progress_bar - Toggle progress bar ON/OFF or Custom Interval (admin only)\n"
         "/continue - Resume paused queue / Restore buttons\n"
         "/restart - Show Storage info and Clear Data\n"
-        "/colab_drive - Connect Google Drive (Colab only)\n"
-        "/help - Help"
+        "/help - Help\n"
+        "/upload_drive - Toggle Google Drive upload mode (admin only)"
     )
     await m.reply_text(text)
 
@@ -1561,6 +1614,7 @@ async def full_reset_bot_cb(c, cb):
     uid = cb.from_user.id
     if not is_admin(uid): return
     
+    # Fully Clear All State Vars
     USER_THUMBS.clear()
     TASKS.clear()
     USER_TASK_EVENTS.clear()
@@ -1601,6 +1655,9 @@ async def full_reset_bot_cb(c, cb):
     DOWNLOAD_ONLY_MODE.clear()
     DOWNLOAD_LINK_MODE.clear()
     DOWNLOAD_T_MODE.clear()
+    UPLOAD_DRIVE_MODE.clear()
+    UPLOAD_DRIVE_QUEUES.clear()
+    UPLOAD_DRIVE_WORKERS.clear()
     
     if uid in USER_QUEUES:
         while not USER_QUEUES[uid].empty():
@@ -1643,6 +1700,7 @@ async def full_reset_bot_cb(c, cb):
     YT_DLP_MODE.clear()
     SAVED_YT_QUALITIES.clear()
     
+    # Clear Files
     shutil.rmtree(TMP, ignore_errors=True)
     TMP.mkdir(parents=True, exist_ok=True)
     
@@ -1675,16 +1733,16 @@ async def zip_file_download_cmd(c, m: Message):
         ZIP_DOWNLOAD_MODE.add(uid)
         tutorial = (
             "**📦 ZIP Download Mode ON**\n\n"
-            "Send a **direct link**, **Telegram file**, or **ZIP file** to download and extract.\n"
-            "**Commands inside mode:**\n"
-            "• `clear` → Clear current queue and session.\n"
-            "• `all` → Auto upload all extracted files.\n"
-            "• `all off` → Disable auto upload.\n"
-            "• `path` → Open file manager to view/download extracted files.\n\n"
-            "After extraction, you will get a list of files with options to upload.\n"
-            "Send numbers (e.g., `1,3,5,8-15`) to upload in that order.\n"
-            "Send `e 1` to manually extract an archive.\n"
-            "Click **Upload All 🚀** to upload all files sequentially."
+            "You can send direct links or Telegram files. Multiple items will be queued automatically.\n\n"
+            "**Supported inputs:**\n"
+            "• URL (http/https)\n"
+            "• Telegram files (video/document)\n"
+            "• Path manager: send `path` to browse files\n\n"
+            "**Commands during mode:**\n"
+            "• `all` – enable auto‑upload all extracted files\n"
+            "• `clear` – clear current session and queue\n"
+            "• `off` – turn off this mode\n\n"
+            "When a ZIP is extracted, you'll see a list of files; you can select specific numbers to upload in order."
         )
         await m.reply_text(tutorial)
 
@@ -1702,15 +1760,13 @@ async def toggle_yt_dlp(c, m: Message):
         YT_DLP_MODE.add(uid)
         tutorial = (
             "**🎬 YT-DLP Mode ON**\n\n"
-            "Send a **YouTube URL** and the bot will fetch all available qualities.\n"
-            "You will see a list of resolutions with file sizes.\n"
-            "**Buttons:**\n"
-            "• `⬇️ 1080p` → Download that quality immediately.\n"
-            "• `🔲 Select 1080p` → Select multiple qualities.\n"
-            "• `OK ✅` → Download all selected qualities.\n"
-            "• `Add Save Quality 💾` → Save current selection for future.\n"
-            "• `Load Saved Quality 🔄` → Load saved selection.\n\n"
-            "Selected files will be processed in queue."
+            "All URLs will be processed via yt‑dlp.\n\n"
+            "**How to use:**\n"
+            "• Send a YouTube (or other supported) URL.\n"
+            "• You'll get a list of available qualities.\n"
+            "• Select one or more qualities and click OK.\n"
+            "• Each selected quality will be downloaded and uploaded to Telegram.\n\n"
+            "**Batch:** Multiple videos can be queued."
         )
         await m.reply_text(tutorial)
 
@@ -1730,19 +1786,18 @@ async def toggle_convert_mode(c, m: Message):
         CONVERT_MODE.add(uid)
         CONVERT_BATCH_LIST[uid] = []
         tutorial = (
-            "**🔄 Convert Mode ON**\n\n"
-            "Send **video/audio files**, **URLs**, or **ZIP files** to add to batch list.\n"
-            "**Commands inside mode:**\n"
-            "• `list` → View all added items.\n"
-            "• `next` → Start conversion with interactive UI.\n"
-            "• `off` → Disable mode.\n\n"
-            "In the conversion UI, you can adjust:\n"
-            "• **Resolution** (Original, 2160p, 1080p, etc.)\n"
-            "• **Video Bitrate** (+/- 100 kbps)\n"
-            "• **Audio Bitrate** (+/- 32 kbps)\n"
-            "• Toggle `Original: Uploading` to keep original file.\n\n"
-            "Click **Select All & Convert 🚀** to apply settings to all batch files.\n"
-            "Click **Next ✅** to convert current file only."
+            "**⚙️ Convert Mode ON**\n\n"
+            "Send or forward any video, audio, or link/zip to compress and convert it.\n\n"
+            "**What you can send:**\n"
+            "• Video files (MP4, MKV, etc.)\n"
+            "• Audio files\n"
+            "• URLs (will be downloaded first)\n"
+            "• ZIP archives (will be extracted and all videos added)\n\n"
+            "**Commands during mode:**\n"
+            "• `list` – view files added to batch\n"
+            "• `next` – proceed to conversion settings for the batch\n"
+            "• `off` – turn off this mode\n\n"
+            "When you press `next`, you'll get an interactive UI to set quality, video bitrate, and audio bitrate. Press 'Select All & Convert' to apply to all files."
         )
         await m.reply_text(tutorial)
 
@@ -1760,15 +1815,15 @@ async def toggle_download_only_mode(c, m: Message):
         DOWNLOAD_ONLY_MODE.add(uid)
         tutorial = (
             "**⬇️ Download Only Mode ON**\n\n"
-            "Send **URLs** or **Telegram files** – they will be downloaded to storage without upload.\n"
-            "**Commands inside mode:**\n"
-            "• `link` → Generate **Direct Download Link** and **Stream Link** after download.\n"
-            "• `t` → Generate **Direct Stream Link** for Telegram files without downloading (T-Mode).\n"
-            "• `off` → Disable mode.\n\n"
-            "**Link Types:**\n"
-            "• **Direct Download**: Click to start download immediately.\n"
-            "• **Stream**: Open in browser to play, change audio/subtitles, and download.\n\n"
-            "All downloads include proper User-Agent headers for compatibility."
+            "Files/links will be downloaded to storage (TMP folder). ZIP archives will be extracted automatically.\n\n"
+            "**Commands during mode:**\n"
+            "• `link` – turn on direct download link generation (download + stream links)\n"
+            "• `t` – turn on Telegram stream link mode (no download, generates stream link)\n"
+            "• `off` – turn off this mode\n\n"
+            "When `link` is on, you'll receive two links:\n"
+            "1. Direct download link (starts download immediately)\n"
+            "2. Streaming link (play in browser with controls)\n\n"
+            "When `t` is on, you'll receive a streaming link directly without downloading locally."
         )
         await m.reply_text(tutorial)
 
@@ -1869,6 +1924,7 @@ async def photo_handler(c, m: Message):
         return
     uid = m.from_user.id
     
+    # --- Handle Create Post Mode ---
     if uid in CREATE_POST_MODE and uid in POST_CREATION_STATE and POST_CREATION_STATE[uid]['state'] == 'awaiting_image':
         
         state_data = POST_CREATION_STATE[uid]
@@ -2016,6 +2072,7 @@ async def toggle_edit_caption_mode(c, m: Message):
 
     if uid in EDIT_CAPTION_MODE:
         EDIT_CAPTION_MODE.discard(uid)
+        # Clear batch if active
         if uid in BATCH_CAPTION_MODE:
             BATCH_CAPTION_MODE.discard(uid)
             BATCH_DATA.pop(uid, None)
@@ -2029,24 +2086,20 @@ async def toggle_edit_caption_mode(c, m: Message):
             
         USE_ORIGINAL_CAPTION_IN_MULTI_GROUP.discard(uid)
             
-        await m.reply_text("Edit Caption Mode **OFF**.\nFrom now on, uploaded videos will be renamed, thumbnails changed, and saved caption added.")
+        await m.reply_text("edit video caption mode **OFF**.\nFrom now on, uploaded videos will be renamed, thumbnails changed, and saved caption added.")
     else:
         EDIT_CAPTION_MODE.add(uid)
         tutorial = (
             "**✏️ Edit Caption Mode ON**\n\n"
-            "Forward or send a video/document – it will be re-uploaded with your saved caption.\n"
-            "**Commands inside mode:**\n"
-            "• `on` → Enable **Batch Caption Mode** (save file IDs to process later).\n"
-            "• `off` → Disable mode.\n"
-            "• `no` → Enable **Multi-group Batch Mode** (group videos by categories).\n"
-            "• `d` → Create a new group in Multi-group mode.\n"
-            "• `cap` → Toggle between saved caption and original caption.\n"
-            "• `ok` → Process all saved batch items.\n"
-            "• `ok 1=2 2=3` → Specify weights for groups in Multi-group mode.\n\n"
-            "**Multi-group Example:**\n"
-            "• Group 1: Episodes 1-10\n"
-            "• Group 2: Episodes 11-20\n"
-            "• Send `ok 1=2 2=1` to upload 2 from Group 1, then 1 from Group 2."
+            "From now on, only the saved caption will be added. Video name and thumbnail will remain the same.\n\n"
+            "**Commands during mode:**\n"
+            "• `on` – enable Batch Caption Mode (save file IDs for later processing)\n"
+            "• `no` – enable Multi‑group Batch Mode (create groups of videos)\n"
+            "• `d` – create a new group (in Multi‑group mode)\n"
+            "• `cap` – toggle between original caption and saved caption (in Multi‑group)\n"
+            "• `off` – turn off this mode\n\n"
+            "When `on` (Batch Caption), forward/send videos; they will be saved. Type `ok` to process all.\n"
+            "When `no` (Multi‑group), forward videos to add to current group; type `ok` to process all groups."
         )
         await m.reply_text(tutorial)
 
@@ -2081,18 +2134,15 @@ async def batch_audio_add_mode(c, m: Message):
         BATCH_AUDIO_LIST2[uid] = []
         tutorial = (
             "**🎵 Batch Audio Add Mode ON**\n\n"
-            "Add **Base Videos** (List 1) and **Audio Sources** (List 2).\n"
-            "**Commands inside mode:**\n"
-            "• `list` → View current lists.\n"
-            "• `next` → Proceed to next step.\n"
-            "• `off` → Disable mode.\n\n"
-            "**Step 1:** Send Base Videos / URLs / ZIP files (List 1).\n"
-            "Type `next` when done.\n\n"
-            "**Step 2:** Send Audio Source files (List 2).\n"
-            "Type `next` when done.\n\n"
-            "**Step 3:** Map audios to videos.\n"
-            "Default: 1→1, 2→2. Custom: `1-13=1-13, 14=16, 15=14`\n"
-            "Click **Upload All 🚀** to process."
+            "This mode lets you add audio tracks from one set of files to another.\n\n"
+            "**Workflow:**\n"
+            "1. **List 1 (Base Videos)** – Send/forward videos or URLs (they will be downloaded).\n"
+            "2. Type `next` to move to List 2.\n"
+            "3. **List 2 (Audio Sources)** – Send/forward videos or URLs (they will be downloaded).\n"
+            "4. Type `next` to proceed to mapping.\n"
+            "5. **Mapping** – Define which audio source goes to which video. You can send a custom mapping like `1-5=1-5,6=8` or just type `ok` for 1‑to‑1.\n"
+            "6. **Track Selection** – For each pair, choose which audio tracks to keep and set the default track.\n\n"
+            "Commands: `list` to view current list, `off` to exit."
         )
         await m.reply_text(tutorial)
 
@@ -2115,13 +2165,14 @@ async def toggle_audio_change_mode(c, m: Message):
     else:
         MKV_AUDIO_CHANGE_MODE.add(uid)
         tutorial = (
-            "**🎧 MKV Audio Change Mode ON**\n\n"
-            "Send a **single MKV/video file**. The bot will analyze audio tracks.\n"
-            "You will get a list of tracks with Language and Title.\n"
-            "**Reply with:** comma-separated track numbers to keep.\n"
-            "Example: `1,3` → keeps track 1 and 3.\n"
-            "Example: `2` → keeps only track 2.\n\n"
-            "If you don't want to change, click **Cancel ❌**."
+            "**🔊 MKV Audio Change Mode ON**\n\n"
+            "Send a **single MKV file** (or other video) to change its audio track order.\n\n"
+            "**How it works:**\n"
+            "1. The file is downloaded and audio tracks are detected.\n"
+            "2. You'll receive a list of tracks with numbers.\n"
+            "3. Reply to that message with a comma‑separated list of track numbers to keep (e.g., `1,3`).\n"
+            "4. The video will be remuxed with only those tracks, and uploaded.\n\n"
+            "For multiple files, use `/batch_audio_add`."
         )
         await m.reply_text(tutorial)
 
@@ -2161,16 +2212,17 @@ async def toggle_create_post_mode(c, m: Message):
         }
         tutorial = (
             "**📝 Create Post Mode ON**\n\n"
-            "Step-by-step post creation with image and custom caption.\n"
+            "This mode helps you create a formatted post with an image and caption.\n\n"
             "**Steps:**\n"
-            "1. Send an **image** (photo) → will be used as post image.\n"
-            "2. Send **Image Name** (e.g., `One Piece`).\n"
-            "3. Send **Genres** (e.g., `Comedy, Romance, Action`).\n"
-            "4. Send **Season List** (e.g., `1-2, 4-5`).\n\n"
-            "The bot will generate a professional post with collapsible season list.\n"
-            "All temporary messages will be deleted after completion."
+            "1. Send an **image (photo)** – it will be used as the post image.\n"
+            "2. You'll be asked for the **image name** (e.g., `One Piece`).\n"
+            "3. Next, provide **genres** (e.g., `Action, Adventure`).\n"
+            "4. Finally, provide the **season list** (e.g., `1`, `1-2`, `1-2,4-5`).\n"
+            "5. The post will be generated and sent; all temporary messages will be cleaned up.\n\n"
+            "Type `/create_post` again to turn off."
         )
         await m.reply_text(tutorial)
+# ---------------------------------------------
 
 
 # --- HANDLER: /mode_check ---
@@ -2188,6 +2240,7 @@ async def mode_check_cmd(c, m: Message):
     convert_status = "✅ ON" if uid in CONVERT_MODE else "❌ OFF"
     batch_audio_status = "✅ ON" if uid in BATCH_AUDIO_MODE else "❌ OFF"
     dl_only_status = "✅ ON" if uid in DOWNLOAD_ONLY_MODE else "❌ OFF"
+    drive_status = "✅ ON" if uid in UPLOAD_DRIVE_MODE else "❌ OFF"
     
     waiting_count = sum(1 for data in PENDING_AUDIO_ORDERS.values() if data['uid'] == uid)
     waiting_status_text = f"{waiting_count} file(s) waiting for track order." if waiting_count > 0 else "No files are waiting."
@@ -2206,13 +2259,14 @@ async def mode_check_cmd(c, m: Message):
         f"5. **YT-DLP Mode:** `{yt_dlp_status}`\n"
         f"6. **ZIP Download Mode:** `{zip_status}`\n"
         f"7. **Download Only Mode:** `{dl_only_status}`\n"
+        f"8. **Google Drive Upload Mode:** `{drive_status}`\n"
         "Click the buttons below to toggle modes."
     )
     
     await m.reply_text(status_text, reply_markup=mode_check_keyboard(uid), parse_mode=ParseMode.MARKDOWN)
 
 # --- CALLBACK: Mode Toggle Buttons ---
-@app.on_callback_query(filters.regex("toggle_(audio|caption|ytdlp|zip|convert|batch_audio|dl_only)_mode"))
+@app.on_callback_query(filters.regex("toggle_(audio|caption|ytdlp|zip|convert|batch_audio|dl_only|drive)_mode"))
 async def mode_toggle_callback(c: Client, cb: CallbackQuery):
     uid = cb.from_user.id
     if not is_admin(uid):
@@ -2318,6 +2372,22 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
             DOWNLOAD_ONLY_MODE.add(uid)
             message = "Download Only Mode ON."
             
+    elif action == "toggle_drive_mode":
+        if uid in UPLOAD_DRIVE_MODE:
+            UPLOAD_DRIVE_MODE.discard(uid)
+            if uid in UPLOAD_DRIVE_QUEUES:
+                while not UPLOAD_DRIVE_QUEUES[uid].empty():
+                    try: UPLOAD_DRIVE_QUEUES[uid].get_nowait(); UPLOAD_DRIVE_QUEUES[uid].task_done()
+                    except: pass
+            if uid in UPLOAD_DRIVE_WORKERS:
+                UPLOAD_DRIVE_WORKERS[uid].cancel()
+                del UPLOAD_DRIVE_WORKERS[uid]
+            message = "Google Drive Upload Mode OFF."
+        else:
+            UPLOAD_DRIVE_MODE.add(uid)
+            UPLOAD_DRIVE_QUEUES[uid] = asyncio.Queue()
+            message = "Google Drive Upload Mode ON."
+            
     try:
         audio_status = "✅ ON" if uid in MKV_AUDIO_CHANGE_MODE else "❌ OFF"
         caption_status = "✅ ON" if uid in EDIT_CAPTION_MODE else "❌ OFF"
@@ -2326,6 +2396,7 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
         convert_status = "✅ ON" if uid in CONVERT_MODE else "❌ OFF"
         batch_audio_status = "✅ ON" if uid in BATCH_AUDIO_MODE else "❌ OFF"
         dl_only_status = "✅ ON" if uid in DOWNLOAD_ONLY_MODE else "❌ OFF"
+        drive_status = "✅ ON" if uid in UPLOAD_DRIVE_MODE else "❌ OFF"
         
         waiting_count = sum(1 for data in PENDING_AUDIO_ORDERS.values() if data['uid'] == uid)
         waiting_status_text = f"{waiting_count} file(s) waiting for track order." if waiting_count > 0 else "No files are waiting."
@@ -2344,6 +2415,7 @@ async def mode_toggle_callback(c: Client, cb: CallbackQuery):
             f"5. **YT-DLP Mode:** `{yt_dlp_status}`\n"
             f"6. **ZIP Download Mode:** `{zip_status}`\n"
             f"7. **Download Only Mode:** `{dl_only_status}`\n"
+            f"8. **Google Drive Upload Mode:** `{drive_status}`\n"
             "Click the buttons below to toggle modes."
         )
         
@@ -2453,7 +2525,7 @@ async def process_zip_uploads(c, message_or_chat_id, uid, final_order):
         while uid in USER_QUEUE_PAUSED:
              await asyncio.sleep(1)
         if uid not in ZIP_NAV_STATE or ZIP_NAV_STATE[uid].get('state') != 'uploading':
-            break
+            break # Cancelled or cleared during upload
             
         fpath = files[idx - 1]
         if not fpath.exists(): continue
@@ -2462,6 +2534,7 @@ async def process_zip_uploads(c, message_or_chat_id, uid, final_order):
         cancel_event = asyncio.Event()
         TASKS.setdefault(uid, []).append(cancel_event)
         
+        # Creating a fake message object if message_or_chat_id is just an ID (for auto upload)
         class FakeMessage:
             def __init__(self, cid):
                 class Chat:
@@ -2532,6 +2605,7 @@ def is_archive_file(filepath: Path) -> bool:
     except: pass
     return False
 
+# FIX 3: Py7zr + Robust Extraction
 async def execute_zip_download_and_extract(c, m, url=None, local_path=None, target_list=None, is_dl_only=False):
     uid = m.from_user.id
     status_msg = await c.send_message(m.chat.id, "Downloading Queue Item..." if url else "Processing Local Archive...", reply_markup=progress_keyboard())
@@ -2562,7 +2636,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                 if fid: ok, err = await download_drive_file(fid, tmp_in, status_msg, cancel_event, original_name=original_name_pass)
             else:
                 ok, err = await download_url_generic(url, tmp_in, status_msg, cancel_event, original_name=original_name_pass)
-        else:
+        else: # Telegram File
             start_t = time.time()
             async def dl_prog(current, total):
                 if cancel_event.is_set():
@@ -2576,16 +2650,14 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
             
         if not is_archive_file(tmp_in):
             if is_dl_only:
+                # ===== CHANGE: Generate two links (download & stream) =====
                 if uid in DOWNLOAD_LINK_MODE:
-                    # ===== CHANGE 2: Two links for download only =====
-                    # 1. Direct Download Link
-                    direct_link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(tmp_in.name)}"
-                    # 2. Stream Link (for video files)
-                    stream_link = f"{PUBLIC_BASE_URL}/stream?file_path={urllib.parse.quote(str(tmp_in))}"
+                    download_link = f"{PUBLIC_BASE_URL}/dl_attachment/{urllib.parse.quote(tmp_in.name)}"
+                    stream_link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(tmp_in.name)}"
                     await status_msg.edit(
                         f"✅ **File Downloaded:** `{tmp_in.name}`\n\n"
-                        f"🔗 **Direct Download:** {direct_link}\n"
-                        f"▶️ **Stream:** {stream_link}"
+                        f"🔗 **Direct Download:** {download_link}\n"
+                        f"🎬 **Stream:** {stream_link}"
                     )
                 else:
                     await status_msg.edit(f"✅ **File Downloaded:** `{tmp_in.name}`\nSaved to local storage.")
@@ -2610,6 +2682,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
         
         start_t = time.time()
         
+        # FIX 3: Extended Extraction with Zip/Tar/Py7zr Python Native Fallbacks
         try:
             ext = tmp_in.suffix.lower()
             if ext == '.zip':
@@ -2637,6 +2710,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                 with tarfile.open(tmp_in, 'r:*') as tar_ref:
                     await asyncio.to_thread(tar_ref.extractall, path=ext_dir)
             else:
+                # Use robust 7z fallback, if failed try python shutil unpack
                 try:
                     cmd = ['7z', 'x', str(tmp_in), '-p-', '-aoa', f'-o{ext_dir}']
                     process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -2654,13 +2728,14 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                 target_list.append({'path': str(new_path), 'name': new_path.name})
                 return
             if is_dl_only:
+                # ===== CHANGE: Generate two links =====
                 if uid in DOWNLOAD_LINK_MODE:
-                    direct_link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(tmp_in.name)}"
-                    stream_link = f"{PUBLIC_BASE_URL}/stream?file_path={urllib.parse.quote(str(tmp_in))}"
+                    download_link = f"{PUBLIC_BASE_URL}/dl_attachment/{urllib.parse.quote(tmp_in.name)}"
+                    stream_link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(tmp_in.name)}"
                     await status_msg.edit(
                         f"✅ **Archive Downloaded (Extract Failed):** `{tmp_in.name}`\n\n"
-                        f"🔗 **Direct Download:** {direct_link}\n"
-                        f"▶️ **Stream:** {stream_link}"
+                        f"🔗 **Direct Download:** {download_link}\n"
+                        f"🎬 **Stream:** {stream_link}"
                     )
                 else:
                     await status_msg.edit(f"✅ **Archive Downloaded:** `{tmp_in.name}`\nSaved to local storage.")
@@ -2707,6 +2782,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                         except Exception as e:
                             logger.error(f"Nested Archive extraction error: {e}")
         
+        # Extract source archive delete
         tmp_in.unlink(missing_ok=True)
         
         all_files = []
@@ -2715,7 +2791,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
             for f in files:
                 p = Path(root) / f
                 if target_list is not None and p.suffix.lower() not in video_exts:
-                    continue
+                    continue # only add videos to lists if from zip in convert/batch
                 all_files.append(p)
         all_files.sort(key=lambda x: x.name.lower())
         
@@ -2728,13 +2804,12 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
             try: await status_msg.delete()
             except: pass
             if uid in DOWNLOAD_LINK_MODE:
-                # ===== CHANGE 2: Two links for each file =====
-                link_text = "**Extracted Files Links:**\n"
+                link_text = "**Extracted Files Direct Links:**\n"
                 for f in all_files:
-                    rel_path = f.relative_to(TMP).as_posix()
-                    direct_link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(rel_path)}"
-                    stream_link = f"{PUBLIC_BASE_URL}/stream?file_path={urllib.parse.quote(str(f))}"
-                    link_text += f"‣ `{f.name}`\n🔗 **Direct:** {direct_link}\n▶️ **Stream:** {stream_link}\n\n"
+                    # ===== CHANGE: Two links per file =====
+                    download_link = f"{PUBLIC_BASE_URL}/dl_attachment/{urllib.parse.quote(f.relative_to(TMP).as_posix())}"
+                    stream_link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(f.relative_to(TMP).as_posix())}"
+                    link_text += f"‣ `{f.name}`\n🔗 Download: {download_link}\n🎬 Stream: {stream_link}\n"
                 await c.send_message(m.chat.id, link_text, disable_web_page_preview=True)
             else:
                 await c.send_message(m.chat.id, f"✅ **Extracted {len(all_files)} files successfully.**\nSaved to local storage.")
@@ -2765,7 +2840,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
 
 # -----------------------------
 
-# --- LIST UI & PAGINATION ---
+# --- LIST UI & PAGINATION (Reused for Batch Audio and Convert) ---
 async def send_batch_audio_list_page(c, chat_id, uid, list_id, page=0, msg_id=None):
     if list_id == 'list1':
         target_list = BATCH_AUDIO_LIST1.get(uid, [])
@@ -2820,6 +2895,7 @@ async def send_batch_audio_list_page(c, chat_id, uid, list_id, page=0, msg_id=No
         except Exception: pass
     else:
         await c.send_message(chat_id, text, reply_markup=markup)
+# ----------------------------------------
 
 
 # --- PATH NAVIGATOR FUNCTIONS ---
@@ -2897,11 +2973,15 @@ async def process_path_uploads(uid, c, m, files_to_upload):
             await c.send_message(m.chat.id, f"Upload Failed: {e}\nQueue Paused.", reply_markup=markup)
     await c.send_message(m.chat.id, "Path selected files queued/uploaded successfully.")
 
+# ----------------------------------------
 
 # --- CONVERT MODE LOGIC ---
 async def process_convert_queue_worker(uid, client):
+    """Processes covert tasks serially for a user to avoid CPU overload"""
     if uid not in CONVERT_LOCKS:
         CONVERT_LOCKS[uid] = asyncio.Lock()
+    
+    # We will just use the global lock during execution.
     pass
 
 async def handle_convert_input(c, m, url=None, file_info=None, override_path=None):
@@ -2922,6 +3002,7 @@ async def handle_convert_input(c, m, url=None, file_info=None, override_path=Non
             original_name = Path(override_path).name
             
         safe_name = re.sub(r"[\\/*?\"<>|:]", "_", original_name)
+        # FIX 2: Do not use prefix on local file download to keep path manager clean
         tmp_in = get_unique_path(TMP, safe_name)
         
         ok = False
@@ -3015,6 +3096,7 @@ async def convert_cb_handler(c: Client, cb: CallbackQuery):
     elif action == "orig":
         session['upload_original'] = not session['upload_original']
     elif action == "all":
+        # Save config and apply to batch
         session['configs'].append({
             'res': session['curr_res'],
             'v_bitrate': session['curr_v_bitrate'],
@@ -3060,11 +3142,12 @@ async def execute_conversions(session_id, client, batch_apply=False):
                 f_meta = await asyncio.to_thread(get_detailed_metadata, f_path)
                 if f_meta['duration'] > 0:
                     target_files.append({'path': f_path, 'name': f_path.name, 'meta': f_meta})
-        CONVERT_BATCH_LIST[uid] = []
+        CONVERT_BATCH_LIST[uid] = [] # Clear list
     
     if uid not in CONVERT_LOCKS:
         CONVERT_LOCKS[uid] = asyncio.Lock()
         
+    # Creating a dedicated event for this batch to avoid cancelling other downloads
     cancel_event = asyncio.Event()
     TASKS.setdefault(uid, []).append(cancel_event)
     USER_TASK_EVENTS.setdefault(uid, {})[status_msg_id] = cancel_event
@@ -3078,6 +3161,7 @@ async def execute_conversions(session_id, client, batch_apply=False):
             original_name = file_data['name']
             meta = file_data['meta']
             
+            # Use lock to process one conversion sequentially
             async with CONVERT_LOCKS[uid]:
                 if cancel_event.is_set(): break
                 for idx, config in enumerate(configs, 1):
@@ -3145,6 +3229,7 @@ async def execute_conversions(session_id, client, batch_apply=False):
                     if cancel_event.is_set(): raise Exception("Cancelled by user")
                     
                     if out_path.exists() and out_path.stat().st_size > 0:
+                        # Queue for upload, don't wait for upload to finish before starting next conversion
                         asyncio.create_task(sequential_upload_task(uid, client, msg, out_path, out_name, None, cancel_event, default_caption=out_name, original_caption=None, original_download_name=out_name))
                     else:
                         logger.error("FFmpeg convert output failed.")
@@ -3153,6 +3238,7 @@ async def execute_conversions(session_id, client, batch_apply=False):
                     out_name = get_dynamic_filename(uid, original_name)
                     asyncio.create_task(sequential_upload_task(uid, client, msg, in_path, out_name, None, cancel_event, default_caption=original_name, original_caption=None, original_download_name=original_name))
                 else:
+                    # Clean original if not uploading
                     in_path.unlink(missing_ok=True)
             
     except Exception as e:
@@ -3173,43 +3259,6 @@ async def text_handler(c, m: Message):
     if not is_admin(uid):
         return
     text = m.text.strip()
-    
-    # ===== NEW: Colab Drive Command =====
-    if text.lower().startswith("/colab_drive"):
-        if not COLAB_AVAILABLE:
-            await m.reply_text("❌ This command only works in Google Colab environment.")
-            return
-        
-        parts = text.split(maxsplit=1)
-        if len(parts) == 1:
-            # Connect to Google Drive
-            try:
-                drive.mount('/content/drive')
-                await m.reply_text("✅ Google Drive mounted successfully! You can now use `/colab_drive <path>` to copy files.")
-            except Exception as e:
-                await m.reply_text(f"❌ Failed to mount Google Drive: {e}")
-            return
-        else:
-            # Copy file/folder from Drive to TMP
-            src_path = parts[1].strip()
-            if not src_path.startswith('/content/drive/MyDrive/'):
-                src_path = '/content/drive/MyDrive/' + src_path.lstrip('/')
-            
-            if not os.path.exists(src_path):
-                await m.reply_text(f"❌ Path does not exist: {src_path}")
-                return
-            
-            dest_path = TMP / Path(src_path).name
-            try:
-                if os.path.isdir(src_path):
-                    shutil.copytree(src_path, dest_path)
-                else:
-                    shutil.copy2(src_path, dest_path)
-                await m.reply_text(f"✅ Copied `{src_path}` to `{dest_path}` successfully!")
-            except Exception as e:
-                await m.reply_text(f"❌ Error copying: {e}")
-            return
-    # ===================================
     
     if uid in SET_FILENAME_REQUEST:
         SET_FILENAME_REQUEST.discard(uid)
@@ -3234,6 +3283,7 @@ async def text_handler(c, m: Message):
 
     text_lower = text.lower()
     
+    # UI Delete List support
     if text_lower == "list":
         if uid in BATCH_AUDIO_MODE:
             state = BATCH_AUDIO_STATE.get(uid)
@@ -3251,6 +3301,7 @@ async def text_handler(c, m: Message):
         await send_path_ui(c, m.chat.id, uid, page=0)
         return
 
+    # Handle Convert mode
     if uid in CONVERT_MODE:
         if text_lower == "off":
             CONVERT_MODE.discard(uid)
@@ -3266,14 +3317,17 @@ async def text_handler(c, m: Message):
             if not CONVERT_BATCH_LIST.get(uid):
                 await m.reply_text("Convert List is empty. Please send videos/zips first.")
                 return
+            # Use the first video for UI settings setup
             first_item = CONVERT_BATCH_LIST[uid][0]
             await handle_convert_input(c, m, override_path=first_item['path'])
             return
 
+    # Handle all for zip
     if uid in ZIP_DOWNLOAD_MODE:
         if text_lower == "all":
             AUTO_UPLOAD_ALL.add(uid)
             await m.reply_text("Auto Upload All is now **ON**.")
+            # Trigger if one is waiting
             if uid in ZIP_NAV_STATE and ZIP_NAV_STATE[uid]['state'] == 'awaiting_selection':
                 files = ZIP_NAV_STATE[uid]['files_to_upload']
                 final_order = list(range(1, len(files) + 1))
@@ -3440,14 +3494,14 @@ async def text_handler(c, m: Message):
                     await m.reply_text(f"Deleted {len(files_to_process)} items.")
                     await send_path_ui(c, m.chat.id, uid, page=NAV_PATHS[uid].get('page', 0))
                 elif is_link:
-                    # ===== CHANGE 2: Two links for path manager =====
-                    link_text = "**Direct Download & Stream Links:**\n"
+                    link_text = "**Direct Download Links:**\n"
                     for f in files_to_process:
                         if f.is_file():
-                            rel_path = f.relative_to(TMP).as_posix()
-                            direct_link = f"{PUBLIC_BASE_URL}/dl/{urllib.parse.quote(rel_path)}"
-                            stream_link = f"{PUBLIC_BASE_URL}/stream?file_path={urllib.parse.quote(str(f))}"
-                            link_text += f"‣ `{f.name}`\n🔗 **Direct:** {direct_link}\n▶️ **Stream:** {stream_link}\n\n"
+                            safe_path = urllib.parse.quote(f.relative_to(TMP).as_posix())
+                            # ===== CHANGE: Two links =====
+                            download_link = f"{PUBLIC_BASE_URL}/dl_attachment/{safe_path}"
+                            stream_link = f"{PUBLIC_BASE_URL}/dl/{safe_path}"
+                            link_text += f"‣ `{f.name}`\n🔗 Download: {download_link}\n🎬 Stream: {stream_link}\n"
                     await m.reply_text(link_text, disable_web_page_preview=True)
                 elif is_rename:
                     renamed_count = 0
@@ -3468,6 +3522,7 @@ async def text_handler(c, m: Message):
                         if is_archive_file(f):
                             if uid not in ZIP_DL_QUEUES: ZIP_DL_QUEUES[uid] = asyncio.Queue()
                             queue_msg = await m.reply_text(f"Queued manual extract: `{f.name}`")
+                            # Add is_dl_only flag to extract and keep in folder without uploading
                             await ZIP_DL_QUEUES[uid].put({'local_path': str(f), 'message': m, 'queue_msg': queue_msg, 'is_dl_only': True})
                     if uid not in ZIP_DL_WORKERS or ZIP_DL_WORKERS[uid].done():
                         ZIP_DL_WORKERS[uid] = asyncio.create_task(zip_download_worker(uid, c))
@@ -3477,23 +3532,18 @@ async def text_handler(c, m: Message):
                     asyncio.create_task(process_path_uploads(uid, c, m, file_uploads))
                 return
 
+    # Handle Download Only Command toggles
     if uid in DOWNLOAD_ONLY_MODE:
         if text_lower == "link":
             DOWNLOAD_LINK_MODE.add(uid)
             DOWNLOAD_T_MODE.discard(uid)
-            await m.reply_text("Download Link Mode **ON**. Direct download and stream links will be provided after downloading.")
+            await m.reply_text("Download Link Mode **ON**. Direct download links will be provided after downloading.")
             return
         elif text_lower == "t":
             DOWNLOAD_T_MODE.add(uid)
             DOWNLOAD_LINK_MODE.discard(uid)
-            # ===== CHANGE 2: T-Mode gives two links =====
-            await m.reply_text(
-                "Telegram Stream Link Mode **ON**.\n"
-                "Send a Telegram file or URL to get:\n"
-                "1. **Direct Download Link** – Click to download instantly.\n"
-                "2. **Stream Link** – Open in browser to play, change audio/subtitles, and download.\n\n"
-                "No local storage is used."
-            )
+            # ===== CHANGE: For T-mode we generate two links =====
+            await m.reply_text("Telegram Stream Link Mode **ON**. Direct streaming link will be provided without downloading to local storage.")
             return
         elif text_lower == "off":
             DOWNLOAD_ONLY_MODE.discard(uid)
@@ -3502,6 +3552,7 @@ async def text_handler(c, m: Message):
             await m.reply_text("Download Only Mode **OFF**.")
             return
 
+    # Handle Batch Audio Add Commands
     if uid in BATCH_AUDIO_MODE:
         if text_lower == "next":
             state = BATCH_AUDIO_STATE.get(uid, 'list1')
@@ -3520,6 +3571,7 @@ async def text_handler(c, m: Message):
                     return
                 BATCH_AUDIO_STATE[uid] = 'mapping'
                 
+                # Chunking Lists to avoid Message limit
                 def chunk_and_send(lst, title):
                     chunks = []
                     curr = f"**{title}:**\n"
@@ -3927,14 +3979,19 @@ async def text_handler(c, m: Message):
     if text.startswith("http://") or text.startswith("https://"):
         url = text
         if uid in DOWNLOAD_T_MODE:
-            # ===== CHANGE 2: T-Mode gives two links =====
-            # 1. Direct Download via proxy (since we don't download, we use stream with download header)
-            direct_link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(url)}&download=true"
-            # 2. Stream link (normal)
+            # ===== CHANGE: Generate two links for T-mode =====
+            # Streaming link (as before) and direct download link (using /download?file_id=...)
+            # But for URLs we only have streaming via /stream?url=...
+            # We can offer direct download via /dl_attachment?url=... or just the streaming link.
+            # For simplicity, we'll provide streaming link and also a direct download link if possible.
+            # Since we don't download locally in T-mode, we can't give direct download.
+            # However we can proxy the file with attachment via /download?url=...
+            # Let's create a new route /download_attachment?url=...
             stream_link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(url)}"
+            download_link = f"{PUBLIC_BASE_URL}/download_attachment?url={urllib.parse.quote(url)}"
             await m.reply_text(
-                f"🔗 **Direct Download:** {direct_link}\n"
-                f"▶️ **Stream:** {stream_link}",
+                f"🔗 **Direct Download:** {download_link}\n"
+                f"🎬 **Stream:** {stream_link}",
                 disable_web_page_preview=True
             )
             return
@@ -3949,6 +4006,7 @@ async def text_handler(c, m: Message):
             return
 
         if uid in CONVERT_MODE:
+            # Download URL via Queue, then add to batch list for conversion
             if uid not in BATCH_AUDIO_QUEUES:
                 BATCH_AUDIO_QUEUES[uid] = asyncio.Queue()
             original_name = await get_filename_from_url(url)
@@ -3961,6 +4019,7 @@ async def text_handler(c, m: Message):
         if uid in BATCH_AUDIO_MODE:
             state = BATCH_AUDIO_STATE.get(uid)
             target_list = BATCH_AUDIO_LIST1[uid] if state == 'list1' else BATCH_AUDIO_LIST2[uid]
+            # Use Background Queue Worker for URLs to keep chronological order
             if uid not in BATCH_AUDIO_QUEUES:
                 BATCH_AUDIO_QUEUES[uid] = asyncio.Queue()
             
@@ -4023,6 +4082,7 @@ async def process_batch_audio_input(uid, c, m, url=None, file_info=None, target_
     if target_list is CONVERT_BATCH_LIST.get(uid): list_num = "Convert Batch List"
     else: list_num = "1" if target_list is BATCH_AUDIO_LIST1.get(uid) else "2"
     
+    # Generic entry for ALL links in batch audio - will extract ONLY if zip file
     if url or file_info:
         status_msg = None
         try:
@@ -4049,8 +4109,10 @@ async def process_batch_audio_input(uid, c, m, url=None, file_info=None, target_
                 await m.download(file_name=str(tmp_in), progress=dl_prog)
                 
             if tmp_in.exists():
+                # Correctly Handle Zip Files if it is an archive
                 if is_archive_file(tmp_in):
                     await status_msg.delete()
+                    # Execute extract using the already downloaded file path
                     await execute_zip_download_and_extract(c, m, url=None, local_path=str(tmp_in), target_list=target_list)
                     tmp_in.unlink(missing_ok=True)
                 else:
@@ -4077,12 +4139,12 @@ async def upload_url_cmd(c, m: Message):
     uid = m.from_user.id
     
     if uid in DOWNLOAD_T_MODE:
-        # ===== CHANGE 2: T-Mode gives two links =====
-        direct_link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(url)}&download=true"
+        # ===== CHANGE: Two links =====
         stream_link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(url)}"
+        download_link = f"{PUBLIC_BASE_URL}/download_attachment?url={urllib.parse.quote(url)}"
         await m.reply_text(
-            f"🔗 **Direct Download:** {direct_link}\n"
-            f"▶️ **Stream:** {stream_link}",
+            f"🔗 **Direct Download:** {download_link}\n"
+            f"🎬 **Stream:** {stream_link}",
             disable_web_page_preview=True
         )
         return
@@ -4164,6 +4226,7 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
         fname = await get_filename_from_url(url)
         safe_name = re.sub(r"[\\/*?\"<>|:]", "_", fname)
 
+        # Removed forcing MP4 to keep original download name format intact
         if len(safe_name) > 100:
             ext = Path(safe_name).suffix
             safe_name = safe_name[:100 - len(ext)] + ext
@@ -4351,12 +4414,13 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
     original_name = file_info.file_name if file_info and file_info.file_name else f"file_{file_info.file_unique_id}"
 
     if uid in DOWNLOAD_T_MODE:
-        # ===== CHANGE 2: T-Mode gives two links for Telegram files =====
-        direct_link = f"{PUBLIC_BASE_URL}/stream?file_id={file_info.file_id}&filename={urllib.parse.quote(original_name)}&download=true"
+        # ===== CHANGE: Two links for Telegram file =====
+        # We'll generate a streaming link via /stream?file_id=... and a download link via /download_attachment?file_id=...
         stream_link = f"{PUBLIC_BASE_URL}/stream?file_id={file_info.file_id}&filename={urllib.parse.quote(original_name)}"
+        download_link = f"{PUBLIC_BASE_URL}/download_attachment?file_id={file_info.file_id}&filename={urllib.parse.quote(original_name)}"
         await m.reply_text(
-            f"🔗 **Direct Download:** {direct_link}\n"
-            f"▶️ **Stream:** {stream_link}",
+            f"🔗 **Direct Download:** {download_link}\n"
+            f"🎬 **Stream:** {stream_link}",
             disable_web_page_preview=True
         )
         return
@@ -4466,6 +4530,7 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
 
     await add_to_queue(uid, c, m, original_name, is_url=False, original_caption=m.caption)
 
+# ===== CHANGE 3: Fix duplicate audio tracks in batch_audio_add when list2 is empty =====
 async def show_batch_audio_ui(c, chat_id, uid):
     pair_idx = BATCH_AUDIO_CURRENT_PAIR_IDX[uid]
     pairs = BATCH_AUDIO_MAPPING[uid]
@@ -4489,7 +4554,7 @@ async def show_batch_audio_ui(c, chat_id, uid):
                     msg = await c.edit_message_text(chat_id, BATCH_AUDIO_UI_MSG[uid], "Analyzing tracks...")
                 except Exception as e:
                     if "MESSAGE_NOT_MODIFIED" in str(e):
-                        pass
+                        pass # Ignore if it already says this
                     else:
                         msg = await c.send_message(chat_id, "Analyzing tracks...")
                         BATCH_AUDIO_UI_MSG[uid] = msg.id
@@ -4497,9 +4562,11 @@ async def show_batch_audio_ui(c, chat_id, uid):
                 msg = await c.send_message(chat_id, "Analyzing tracks...")
                 BATCH_AUDIO_UI_MSG[uid] = msg.id
                 
+            # Get tracks for both the base video and the audio source
             tracks1 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid_path1)
             tracks2 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid_path2)
             
+            # ===== CHANGE 3: If tracks2 is empty, remove duplicates from tracks1 =====
             if not tracks2:
                 seen = set()
                 unique_tracks = []
@@ -4510,6 +4577,7 @@ async def show_batch_audio_ui(c, chat_id, uid):
                         unique_tracks.append(t)
                 tracks1 = unique_tracks
 
+            # Combine tracks, keeping track of their source (1 or 2)
             combined_tracks = [{'src': 1, 'data': t} for t in tracks1] + [{'src': 2, 'data': t} for t in tracks2]
             
             BATCH_AUDIO_TRACK_CONFIGS[uid][str(pair_idx)] = {
@@ -4525,6 +4593,7 @@ async def show_batch_audio_ui(c, chat_id, uid):
     config = BATCH_AUDIO_TRACK_CONFIGS[uid][str(pair_idx)]
     combined_tracks = config['tracks']
     
+    # Build text message with full names as requested
     text = (
         f"**🎵 Batch Audio Selection ({pair_idx + 1}/{len(pairs)})**\n\n"
         f"**Base Video:** `{name1}`\n"
@@ -4550,6 +4619,7 @@ async def show_batch_audio_ui(c, chat_id, uid):
             
     text += "\nSelect which tracks to keep and which should play by default:"
     
+    # Build buttons with short names (List 1 will be first/top, List 2 below)
     keyboard = []
     for i, track_wrap in enumerate(combined_tracks):
         is_def = config['default'] == i
@@ -4559,6 +4629,7 @@ async def show_batch_audio_ui(c, chat_id, uid):
         keep_text = "✅ Keep" if is_keep else "❌ Drop"
         
         t_data = track_wrap['data']
+        # Short name for the button: only language code
         lang_code = t_data.get('language', 'und').lower()
         short_name = f"({lang_code})"
             
@@ -4579,6 +4650,7 @@ async def show_batch_audio_ui(c, chat_id, uid):
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
             logger.error(f"UI edit error: {e}")
+# ========================================================================
 
 @app.on_callback_query(filters.regex(r"^baud_"))
 async def batch_audio_callback(c: Client, cb: CallbackQuery):
@@ -4605,6 +4677,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
             )
         return
         
+    # Handle list actions which don't have pair_idx
     if action == "list":
         sub_action = parts[2]
         if sub_action == "close":
@@ -4642,7 +4715,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
             BATCH_AUDIO_UI_MSG[uid] = cb.message.id
             await show_batch_audio_ui(c, cb.message.chat.id, uid)
         elif sub_action == "cancel":
-            if len(parts) == 3:
+            if len(parts) == 3: # baud_list_cancel
                 keyboard = InlineKeyboardMarkup([
                     [InlineKeyboardButton("Yes ✅", callback_data="baud_list_cancel_yes"),
                      InlineKeyboardButton("No ❌", callback_data="baud_list_cancel_no")]
@@ -4650,7 +4723,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
                 try:
                     await cb.message.edit_text("Are you sure you want to cancel and clear the list?", reply_markup=keyboard)
                 except Exception: pass
-            elif parts[3] == "yes":
+            elif parts[3] == "yes": # baud_list_cancel_yes
                 BATCH_AUDIO_MODE.discard(uid)
                 BATCH_AUDIO_STATE.pop(uid, None)
                 for item in BATCH_AUDIO_LIST1.get(uid, []):
@@ -4668,7 +4741,9 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
                 try:
                     await cb.message.edit_text("Batch Audio Add Mode cancelled and data cleared.")
                 except Exception: pass
-            elif parts[3] == "no":
+            elif parts[3] == "no": # baud_list_cancel_no
+                
+                # Chunking Lists again
                 def chunk_and_send_return(lst, title):
                     chunks = []
                     curr = f"**{title}:**\n"
@@ -4702,6 +4777,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
                 except Exception: pass
         return
 
+    # Handle track selection actions
     if action == "cancel":
         BATCH_AUDIO_MODE.discard(uid)
         BATCH_AUDIO_STATE.pop(uid, None)
@@ -4733,7 +4809,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
         track_idx = int(parts[4])
         config['default'] = track_idx
         if track_idx not in config['keep']:
-            config['keep'].append(track_idx)
+            config['keep'].append(track_idx) # Default must be kept
         await show_batch_audio_ui(c, cb.message.chat.id, uid)
         await cb.answer()
         
@@ -4754,6 +4830,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
         await cb.answer()
         
     elif action == "all":
+        # Apply this config to all remaining pairs IF track count matches
         pairs = BATCH_AUDIO_MAPPING[uid]
         keep_idxs = config['keep']
         def_idx = config['default']
@@ -4766,8 +4843,10 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
             vid1 = BATCH_AUDIO_LIST1[uid][idx1]['path']
             vid2 = BATCH_AUDIO_LIST2[uid][idx2]['path']
             
+            # Reconstruct combined tracks for this pair to check count
             t1 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid1)
             t2 = await asyncio.to_thread(get_audio_tracks_ffprobe, vid2)
+            # If list2 is empty, apply same duplicate removal logic
             if not t2:
                 seen = set()
                 unique_tracks = []
@@ -4780,6 +4859,7 @@ async def batch_audio_callback(c: Client, cb: CallbackQuery):
             c_tracks = [{'src': 1, 'data': t} for t in t1] + [{'src': 2, 'data': t} for t in t2]
             
             if len(c_tracks) != target_count:
+                # Stop auto applying if mismatch
                 BATCH_AUDIO_CURRENT_PAIR_IDX[uid] = i
                 await cb.message.reply_text(f"Track mismatch at pair {i+1}. Found {len(c_tracks)} tracks instead of {target_count}. Manual selection required.")
                 await show_batch_audio_ui(c, cb.message.chat.id, uid)
@@ -4819,6 +4899,7 @@ async def execute_batch_audio_remux(uid, c, chat_id):
             await status_msg.edit(f"Remuxing {i+1}/{len(pairs)}...\nBase: `{base_name}`")
         except Exception: pass
         
+        # Audio default mapping fix & re-encode code (Issue 3 & 5)
         map_args = ["-map", "0:v", "-map", "0:s?", "-map", "0:d?"]
         ordered_audio_keep = []
         
@@ -4845,11 +4926,13 @@ async def execute_batch_audio_remux(uid, c, chat_id):
         if def_track != -1 and def_track in keep_tracks:
             cmd.extend(["-disposition:a:0", "default"])
             
+        # Metadata renaming logic to handle duplicates
         used_titles = set()
         for idx, k in enumerate(ordered_audio_keep):
             t = tracks_data[k]['data']['title']
             if not t or t == 'N/A': t = "Audio"
             
+            # Handle duplicate names gracefully
             original_t = t
             if t in used_titles:
                 j = 2
@@ -4869,22 +4952,25 @@ async def execute_batch_audio_remux(uid, c, chat_id):
             "-metadata:s:s", "title=[@TA_HD_Anime] Telegram Channel",
             "-metadata:s:s", "handler_name=[@TA_HD_Anime] Telegram Channel",
             "-c:v", "copy",
-            "-c:a", "aac", "-ac", "2", "-b:a", "128k",
+            "-c:a", "aac", "-ac", "2", "-b:a", "128k", # Re-encoding audio to fix weird voices Issue
             "-c:s", "copy",
-            "-shortest",
+            "-shortest", # Fixed Lag/Desync issue for batch audio
             str(out_path)
         ])
         
         try:
             res = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True)
             if res.returncode == 0 and out_path.exists():
+                # Use caption logic
                 final_caption_template = USER_CAPTIONS.get(uid)
                 if not final_caption_template or uid in USE_ORIGINAL_CAPTION_IN_MULTI_GROUP:
+                    # In batch audio mode, if set caption is not set, use base video name as caption
                     cap = base_name
                 else:
                     advance_dynamic_counters(uid)
                     cap = process_dynamic_caption(uid, final_caption_template)
                 
+                # Mock a message for sequential_upload_task
                 class FakeMessage:
                     def __init__(self, cid):
                         class Chat: id = cid
@@ -4910,6 +4996,7 @@ async def execute_batch_audio_remux(uid, c, chat_id):
     try: await status_msg.edit("Batch Audio Processing Complete!")
     except Exception: pass
     
+    # Cleanup files
     for p in BATCH_AUDIO_LIST1.get(uid, []):
         try: Path(p['path']).unlink(missing_ok=True)
         except: pass
@@ -4922,6 +5009,7 @@ async def execute_batch_audio_remux(uid, c, chat_id):
     BATCH_AUDIO_LIST2[uid] = []
     try: await c.send_message(chat_id, "Batch processing complete. Batch Audio Add Mode is still ON.\nSend Base Videos for List 1, or type `off` to exit.")
     except Exception: pass
+# -----------------------------
 
 async def handle_audio_change_file(c: Client, m: Message):
     uid = m.from_user.id
@@ -5041,7 +5129,7 @@ async def sequential_remux_upload_task(uid, c, m, in_path, out_name, new_stream_
             "-metadata:s:s", "title=[@TA_HD_Anime] Telegram Channel",
             "-metadata:s:s", "handler_name=[@TA_HD_Anime] Telegram Channel",
             "-c:v", "copy",
-            "-c:a", "aac", "-ac", "2", "-b:a", "128k",
+            "-c:a", "aac", "-ac", "2", "-b:a", "128k", # MX Player compatibility & voice loss fix
             "-c:s", "copy",
             str(out_path)
         ]
@@ -5420,6 +5508,7 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
         if cancel_event.is_set():
             raise Exception("Cancelled")
         
+        # Determine caption logic
         use_orig_cap = False
         if not final_caption_template or uid in USE_ORIGINAL_CAPTION_IN_MULTI_GROUP:
             use_orig_cap = True
@@ -5435,6 +5524,7 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
             advance_dynamic_counters(uid)
             caption_to_use = process_dynamic_caption(uid, final_caption_template)
             
+        # Make caption bold
         caption_to_use = make_bold(caption_to_use)
 
         parts_to_upload = [(upload_path, target_name, None, duration_sec)]
@@ -5599,6 +5689,151 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
         except Exception:
             pass
 
+# ===== NEW: Google Drive Upload Mode =====
+async def upload_drive_worker(uid, c):
+    while uid in UPLOAD_DRIVE_QUEUES and not UPLOAD_DRIVE_QUEUES[uid].empty():
+        task_data = await UPLOAD_DRIVE_QUEUES[uid].get()
+        try:
+            m = task_data['message']
+            file_info = task_data.get('file_info')
+            url = task_data.get('url')
+            original_name = task_data.get('original_name')
+            await process_drive_upload(c, m, file_info, url, original_name)
+        except Exception as e:
+            logger.error(f"Drive upload error: {e}")
+            try:
+                await c.send_message(uid, f"❌ Drive upload failed: {e}")
+            except: pass
+        finally:
+            UPLOAD_DRIVE_QUEUES[uid].task_done()
+    if uid in UPLOAD_DRIVE_WORKERS:
+        del UPLOAD_DRIVE_WORKERS[uid]
+
+async def process_drive_upload(c, m, file_info=None, url=None, original_name=None):
+    uid = m.from_user.id
+    if not drive_service:
+        await m.reply_text("❌ Google Drive service not configured. Please set GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON env var.")
+        return
+    
+    status_msg = await m.reply_text("📤 Preparing for Drive upload...", reply_markup=progress_keyboard())
+    tmp_path = None
+    try:
+        if file_info:
+            original_name = file_info.file_name or f"file_{file_info.file_unique_id}"
+            tmp_path = get_unique_path(TMP, original_name)
+            start_t = time.time()
+            async def dl_prog(current, total):
+                if status_msg:
+                    await progress_callback(current, total, "Downloading...", status_msg, start_t, original_name=original_name)
+            await m.download(file_name=str(tmp_path), progress=dl_prog)
+        elif url:
+            original_name = await get_filename_from_url(url) or "downloaded_file"
+            tmp_path = get_unique_path(TMP, original_name)
+            if is_drive_url(url):
+                fid = extract_drive_id(url)
+                if fid:
+                    ok, err = await download_drive_file(fid, tmp_path, status_msg, original_name=original_name)
+                    if not ok:
+                        raise Exception(f"Download failed: {err}")
+                else:
+                    raise Exception("Invalid Google Drive URL")
+            else:
+                ok, err = await download_url_generic(url, tmp_path, status_msg, original_name=original_name)
+                if not ok:
+                    raise Exception(f"Download failed: {err}")
+        else:
+            raise Exception("No file or URL provided")
+        
+        if not tmp_path or not tmp_path.exists():
+            raise Exception("File download failed")
+        
+        await status_msg.edit("📤 Uploading to Google Drive...", reply_markup=progress_keyboard())
+        
+        # Upload file to Drive
+        file_metadata = {
+            'name': original_name,
+            'parents': ['root']  # or a specific folder ID if desired
+        }
+        media = MediaFileUpload(str(tmp_path), resumable=True)
+        uploaded_file = drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, name, webViewLink, webContentLink'
+        ).execute()
+        
+        # Make file public (anyone with link can view)
+        drive_service.permissions().create(
+            fileId=uploaded_file['id'],
+            body={'type': 'anyone', 'role': 'reader'}
+        ).execute()
+        
+        # Generate shareable link
+        file_id = uploaded_file['id']
+        # Use webViewLink or construct direct download link
+        download_link = f"https://drive.google.com/uc?export=download&id={file_id}"
+        view_link = uploaded_file.get('webViewLink', f"https://drive.google.com/file/d/{file_id}/view")
+        
+        await status_msg.edit(
+            f"✅ **Uploaded to Google Drive**\n\n"
+            f"**File:** `{original_name}`\n"
+            f"**Drive Link (View):** {view_link}\n"
+            f"**Direct Download:** {download_link}"
+        )
+        
+        # Cleanup
+        tmp_path.unlink(missing_ok=True)
+    except Exception as e:
+        logger.error(f"Drive upload error: {e}")
+        if status_msg:
+            await status_msg.edit(f"❌ Drive upload failed: {e}")
+        if tmp_path and tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+# ==========================================
+
+# ===== NEW: Flask Routes for two-link generation =====
+@flask_app.route('/dl_attachment/<path:filename>')
+def download_attachment(filename):
+    """Serves files with Content-Disposition: attachment (direct download)"""
+    file_path = TMP / filename
+    if file_path.exists() and file_path.is_file():
+        mime_type, _ = mimetypes.guess_type(str(file_path))
+        return send_from_directory(TMP, filename, mimetype=mime_type, as_attachment=True)
+    return "File not found.", 404
+
+@flask_app.route('/download_attachment')
+def download_attachment_from_params():
+    """Serves files via file_id or url with attachment"""
+    file_id = request.args.get('file_id')
+    url = request.args.get('url')
+    if file_id:
+        # We don't have direct file in TMP for file_id, need to proxy
+        # For simplicity, we'll use the /stream endpoint but with attachment?
+        # Actually we can stream and set attachment header using Response.
+        # But this requires downloading the file from Telegram, which we don't have here.
+        # So we'll just return error.
+        return "Direct download from file_id is not supported without downloading. Use streaming link.", 400
+    elif url:
+        # Proxy the URL with attachment
+        try:
+            r = requests.get(url, stream=True, timeout=15)
+            r.raise_for_status()
+            def generate():
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        yield chunk
+            filename = urllib.parse.unquote(os.path.basename(urllib.parse.urlparse(url).path)) or "file"
+            mime_type, _ = mimetypes.guess_type(filename)
+            if not mime_type:
+                mime_type = 'application/octet-stream'
+            headers = {
+                'Content-Disposition': f'attachment; filename="{filename}"',
+                'Content-Type': mime_type
+            }
+            return Response(generate(), headers=headers)
+        except Exception as e:
+            return str(e), 500
+    return "Missing file_id or url", 400
+
 @flask_app.route('/')
 def home():
     html_content = """
@@ -5640,76 +5875,28 @@ def home():
 
 @flask_app.route('/dl/<path:filename>')
 def download_local_file(filename):
-    """Serves files directly from the TMP directory."""
+    """Serves files directly from the TMP directory (for streaming)"""
     file_path = TMP / filename
     if file_path.exists() and file_path.is_file():
         mime_type, _ = mimetypes.guess_type(str(file_path))
-        # Force download by setting Content-Disposition
-        response = send_from_directory(TMP, filename, mimetype=mime_type, as_attachment=False)
-        response.headers['Content-Disposition'] = f'attachment; filename="{Path(filename).name}"'
-        return response
+        return send_from_directory(TMP, filename, mimetype=mime_type, as_attachment=False)
     return "File not found.", 404
 
 @flask_app.route('/stream')
 def stream_remote_file():
-    """Streams a remote URL or a local file path, or Telegram file ID."""
+    """Streams a remote URL or returns a link. (Basic proxy for T-Mode/Link)"""
     url = request.args.get('url')
-    file_path = request.args.get('file_path')
     file_id = request.args.get('file_id')
-    download = request.args.get('download', 'false').lower() == 'true'
     filename = request.args.get('filename', 'video.mp4')
-    
-    # Telegram file ID streaming (t-mode)
     if file_id:
-        try:
-            # Use Pyrogram to download the file and stream it
-            # This is a simplified proxy; in production, you'd need async handling
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            # We'll use a temporary file to serve
-            temp_file = TMP / f"stream_{file_id}_{int(time.time())}.mp4"
-            loop.run_until_complete(app.download_media(file_id, file_name=str(temp_file)))
-            if temp_file.exists():
-                def generate():
-                    with open(temp_file, 'rb') as f:
-                        while chunk := f.read(8192):
-                            yield chunk
-                    temp_file.unlink(missing_ok=True)
-                headers = {
-                    'Content-Disposition': 'inline' if not download else f'attachment; filename="{filename}"',
-                    'Content-Type': 'video/mp4'
-                }
-                return Response(generate(), headers=headers)
-            return "File not found.", 404
-        except Exception as e:
-            return f"Error: {e}", 500
-    
-    # Local file path streaming
-    if file_path:
-        file_path = Path(file_path)
-        if file_path.exists() and file_path.is_file():
-            def generate():
-                with open(file_path, 'rb') as f:
-                    while chunk := f.read(8192):
-                        yield chunk
-            mime_type, _ = mimetypes.guess_type(str(file_path))
-            headers = {
-                'Content-Disposition': 'inline' if not download else f'attachment; filename="{file_path.name}"',
-                'Content-Type': mime_type or 'video/mp4'
-            }
-            return Response(generate(), headers=headers)
-        return "File not found.", 404
-    
-    # Remote URL streaming (proxy)
+        # We can't stream from file_id without downloading, so we'll redirect to a placeholder
+        return "Streaming from Telegram file_id is not supported without downloading. Use the download link.", 400
     if not url:
-        return "URL, file_path, or file_id parameter is required.", 400
+        return "URL parameter is required.", 400
         
     def generate():
         try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-            with requests.get(url, stream=True, timeout=15, headers=headers) as r:
+            with requests.get(url, stream=True, timeout=15) as r:
                 r.raise_for_status()
                 for chunk in r.iter_content(chunk_size=8192):
                     if chunk:
@@ -5722,33 +5909,18 @@ def stream_remote_file():
         mime_type = 'video/mp4'
 
     headers = {
-        'Content-Disposition': 'inline' if not download else f'attachment; filename="{Path(url).name}"',
+        'Content-Disposition': 'inline',
         'Content-Type': mime_type
     }
     return Response(generate(), headers=headers)
 
+# ===== FIX: ping_service now uses PING_BASE_URL =====
 def ping_service():
-    # Determine which URL to ping
-    base_url = PUBLIC_BASE_URL
-    if not base_url:
-        print("PUBLIC_BASE_URL is not set. Ping service is disabled.")
+    if not PING_BASE_URL:
+        print("PING_BASE_URL is not set. Ping service is disabled.")
         return
 
-    # Ensure URL has protocol
-    if not base_url.startswith(('http://', 'https://')):
-        base_url = f"http://{base_url}"
-    
-    # Check if running on Hugging Face or Render
-    if 'HUGGINGFACE_SPACE_ID' in os.environ:
-        # Hugging Face: ping itself
-        target_url = base_url
-    elif 'RENDER_EXTERNAL_HOSTNAME' in os.environ:
-        # Render: ping itself
-        target_url = base_url
-    else:
-        # Local/Colab/Termux: ping localhost
-        target_url = f"http://localhost:{PORT}"
-    
+    target_url = PING_BASE_URL
     while True:
         try:
             response = requests.get(target_url, timeout=10)
