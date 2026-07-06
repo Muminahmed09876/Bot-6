@@ -89,8 +89,24 @@ else:
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-COOKIES_TXT = os.getenv("COOKIES_TXT") # Added for yt-dlp cookies
-GDRIVE_SERVICE_KEY = os.getenv("GDRIVE_SERVICE_KEY") # Added for GDrive API
+
+# GDRIVE AND COOKIES CONFIGURATION
+GDRIVE_SERVICE_KEY = os.getenv("GDRIVE_SERVICE_KEY")
+GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID")
+
+# --- Fix for COOKIES_TXT ---
+RAW_COOKIES = os.getenv("COOKIES_TXT")
+if RAW_COOKIES:
+    if os.path.exists(RAW_COOKIES):
+        COOKIES_TXT = RAW_COOKIES
+    else:
+        # If it's raw text from Env, save it to a file
+        with open("cookies.txt", "w") as f:
+            f.write(RAW_COOKIES)
+        COOKIES_TXT = "cookies.txt"
+else:
+    COOKIES_TXT = None
+# ---------------------------
 
 TMP = Path("tmp")
 TMP.mkdir(parents=True, exist_ok=True)
@@ -232,26 +248,29 @@ def get_gdrive_service():
 async def upload_to_gdrive(file_path: Path, file_name: str, message: Message):
     service = get_gdrive_service()
     if not service:
-        return False, "Google Drive API is not configured or Service Key is invalid."
+        return False, "Google Drive API is not configured."
     
     try:
         status_msg = await message.reply_text(f"Uploading `{file_name}` to Google Drive...", reply_markup=progress_keyboard())
         
         def gdrive_upload_thread():
             file_metadata = {'name': file_name}
+            # ফোল্ডার আইডি থাকলে সেট করবে
+            if GDRIVE_FOLDER_ID:
+                file_metadata['parents'] = [GDRIVE_FOLDER_ID]
+                
             media = MediaFileUpload(str(file_path), resumable=True)
             request = service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink')
             
             response = None
             while response is None:
                 status, response = request.next_chunk()
-                # Could implement progress callback here using status.resumable_progress
             return response
             
         response = await asyncio.to_thread(gdrive_upload_thread)
-        file_id = response.get('id')
         link = response.get('webViewLink')
-        await status_msg.edit(f"✅ **Successfully Uploaded to Google Drive:**\n**Name:** `{file_name}`\n🔗 **Link:** {link}")
+        
+        await status_msg.edit(f"✅ **Successfully Uploaded to Google Drive:**\n\n🔗 **Link:** {link}")
         return True, link
     except Exception as e:
         logger.error(f"GDrive Upload Error: {e}")
@@ -1229,13 +1248,17 @@ async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, s
         # (Issue 4) - Check if Drive Upload mode is ON
         if uid in UPLOAD_DRIVE_MODE:
             ok, link = await upload_to_gdrive(tmp_path, renamed_file, message)
-            if messages_to_delete and status_msg_id:
+            
+            # সাকসেসফুল হোক বা না হোক, স্ট্যাটাস মেসেজ ডিলিট করতে চাইলে:
+            if status_msg_id:
                 try: await client.delete_messages(message.chat.id, [status_msg_id])
                 except: pass
+                
             if tmp_path.exists():
                 tmp_path.unlink()
             return
 
+        # ড্রাইভ মোড না থাকলে নরমাল আপলোড:
         await process_file_and_upload(client, message, tmp_path, target_name=renamed_file, original_download_name=original_download_name, messages_to_delete=[status_msg_id] if status_msg_id else [], cancel_event_passed=cancel_event, passed_uid=uid, default_caption=default_caption, original_caption_passed=original_caption)
 
 # --- QUEUE WORKER WITH PAUSE LOGIC ---
@@ -5198,6 +5221,33 @@ async def sequential_remux_upload_task(uid, c, m, in_path, out_name, new_stream_
                 TASKS[uid].remove(cancel_event)
             except Exception:
                 pass
+
+
+# অন্যান্য কমান্ডের হ্যান্ডলারগুলোর পরে এখানে পেস্ট করুন:
+
+@app.on_message(filters.command("check_drive") & filters.private)
+async def check_drive_cmd(c, m: Message):
+    if not is_admin(m.from_user.id): return
+    
+    await m.reply_text("Checking Google Drive API connection...")
+    service = get_gdrive_service()
+    
+    if service:
+        try:
+            # API কল করে Service Account এর ইমেইল বের করা
+            about = await asyncio.to_thread(service.about().get(fields="user").execute)
+            email = about['user']['emailAddress']
+            
+            msg = (
+                f"✅ **Google Drive Connected Successfully!**\n\n"
+                f"📧 **Service Email:** `{email}`\n\n"
+                f"⚠️ **Note:** To see uploaded files in your personal drive, share a folder with this email as an 'Editor' and set the Folder ID in `GDRIVE_FOLDER_ID`."
+            )
+            await m.reply_text(msg)
+        except Exception as e:
+            await m.reply_text(f"❌ API Authenticated, but test failed. Error: {e}")
+    else:
+        await m.reply_text("❌ Google Drive Connection Failed! Check your `GDRIVE_SERVICE_KEY` JSON formatting.")
 
 
 @app.on_message(filters.command("rename") & filters.private)
