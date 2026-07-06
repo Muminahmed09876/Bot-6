@@ -274,6 +274,11 @@ async def upload_to_gdrive(file_path: Path, file_name: str, message: Message):
         return True, link
     except Exception as e:
         logger.error(f"GDrive Upload Error: {e}")
+        # Try to send error to user
+        try:
+            await status_msg.edit(f"❌ **Google Drive Upload Failed:**\n\n`{e}`")
+        except:
+            pass
         return False, str(e)
 # -----------------------
 
@@ -363,6 +368,81 @@ def extract_drive_id(url: str) -> str:
             return m.group(1)
     return None
 
+# ===== FIX: Revert process_dynamic_caption to the working logic from main18.py =====
+def process_dynamic_caption(uid, caption_template, is_first_setup=False):
+    if uid not in USER_COUNTERS:
+        USER_COUNTERS[uid] = {'uploads': 0, 'episode_numbers': {}, 'dynamic_counters': {}, 're_options_count': 0}
+
+    USER_COUNTERS[uid]['uploads'] += 1
+
+    quality_match = re.search(r"\[re\s*\((.*?)\)\]", caption_template)
+    if quality_match:
+        options_str = quality_match.group(1)
+        options = [opt.strip() for opt in options_str.split(',')]
+        
+        if not USER_COUNTERS[uid]['re_options_count']:
+            USER_COUNTERS[uid]['re_options_count'] = len(options)
+        
+        current_index = (USER_COUNTERS[uid]['uploads'] - 1) % len(options)
+        current_quality = options[current_index]
+        
+        caption_template = caption_template.replace(quality_match.group(0), current_quality)
+
+        if (USER_COUNTERS[uid]['uploads'] - 1) % USER_COUNTERS[uid]['re_options_count'] == 0 and USER_COUNTERS[uid]['uploads'] > 1:
+            for key in USER_COUNTERS[uid]['dynamic_counters']:
+                USER_COUNTERS[uid]['dynamic_counters'][key]['value'] += 1
+    elif USER_COUNTERS[uid]['uploads'] > 1: 
+        for key in USER_COUNTERS[uid].get('dynamic_counters', {}):
+             USER_COUNTERS[uid]['dynamic_counters'][key]['value'] += 1
+
+
+    counter_matches = re.findall(r"\[\s*(\(?\d+\)?)\s*\]", caption_template)
+    
+    if USER_COUNTERS[uid]['uploads'] == 1:
+        for match in counter_matches:
+            has_paren = match.startswith('(') and match.endswith(')')
+            clean_match = re.sub(r'[()]', '', match)
+            USER_COUNTERS[uid]['dynamic_counters'][match] = {'value': int(clean_match), 'has_paren': has_paren}
+    
+    for match, data in USER_COUNTERS[uid]['dynamic_counters'].items():
+        value = data['value']
+        has_paren = data['has_paren']
+        
+        original_num_len = len(re.sub(r'[()]', '', match))
+        formatted_value = f"{value:0{original_num_len}d}"
+
+        final_value = f"({formatted_value})" if has_paren else formatted_value
+        
+        caption_template = re.sub(re.escape(f"[{match}]"), final_value, caption_template)
+
+
+    current_episode_num = 0
+    if USER_COUNTERS[uid].get('dynamic_counters'):
+        current_episode_num = min(data['value'] for data in USER_COUNTERS[uid]['dynamic_counters'].values())
+
+    conditional_matches = re.findall(r"\[([a-zA-Z0-9\s]+)\s*\((.*?)\)\]", caption_template)
+
+    for match in conditional_matches:
+        text_to_add = match[0].strip() 
+        target_num_str = re.sub(r'[^0-9]', '', match[1]).strip() 
+
+        placeholder = re.escape(f"[{match[0].strip()} ({match[1].strip()})]")
+        
+        try:
+            target_num = int(target_num_str)
+        except ValueError:
+            caption_template = re.sub(placeholder, "", caption_template)
+            continue
+        
+        if current_episode_num == target_num:
+            caption_template = re.sub(placeholder, text_to_add, caption_template)
+        else:
+            caption_template = re.sub(placeholder, "", caption_template)
+
+    return caption_template
+# =============================================================================
+
+# Keep advance_dynamic_counters for compatibility (not used anymore)
 def advance_dynamic_counters(uid):
     if uid not in USER_COUNTERS:
         USER_COUNTERS[uid] = {'uploads': 0, 'episode_numbers': {}, 'dynamic_counters': {}, 're_options_count': 0}
@@ -377,61 +457,6 @@ def advance_dynamic_counters(uid):
         for key in USER_COUNTERS[uid].get('dynamic_counters', {}):
              USER_COUNTERS[uid]['dynamic_counters'][key]['value'] += 1
 
-def process_dynamic_caption(uid, caption_template, is_first_setup=False):
-    if uid not in USER_COUNTERS:
-        USER_COUNTERS[uid] = {'uploads': 0, 'episode_numbers': {}, 'dynamic_counters': {}, 're_options_count': 0}
-        
-    counter_matches = re.findall(r"\[\s*(\(?\d+\)?)\s*\]", caption_template)
-    if USER_COUNTERS[uid]['uploads'] <= 1 or is_first_setup:
-        for match in counter_matches:
-            if match not in USER_COUNTERS[uid]['dynamic_counters']:
-                has_paren = match.startswith('(') and match.endswith(')')
-                clean_match = re.sub(r'[()]', '', match)
-                USER_COUNTERS[uid]['dynamic_counters'][match] = {'value': int(clean_match), 'has_paren': has_paren}
-
-    quality_match = re.search(r"\[re\s*\((.*?)\)\]", caption_template)
-    if quality_match:
-        options_str = quality_match.group(1)
-        options = [opt.strip() for opt in options_str.split(',')]
-        
-        if not USER_COUNTERS[uid]['re_options_count']:
-            USER_COUNTERS[uid]['re_options_count'] = len(options)
-        
-        current_index = max(0, (USER_COUNTERS[uid]['uploads'] - 1)) % len(options)
-        current_quality = options[current_index]
-        caption_template = caption_template.replace(quality_match.group(0), current_quality)
-
-    for match, data in USER_COUNTERS[uid]['dynamic_counters'].items():
-        value = data['value']
-        has_paren = data['has_paren']
-        original_num_len = len(re.sub(r'[()]', '', match))
-        formatted_value = f"{value:0{original_num_len}d}"
-        final_value = f"({formatted_value})" if has_paren else formatted_value
-        caption_template = re.sub(re.escape(f"[{match}]"), final_value, caption_template)
-
-    current_episode_num = 0
-    if USER_COUNTERS[uid].get('dynamic_counters'):
-        current_episode_num = min(data['value'] for data in USER_COUNTERS[uid]['dynamic_counters'].values())
-
-    conditional_matches = re.findall(r"\[([a-zA-Z0-9\s]+)\s*\((.*?)\)\]", caption_template)
-    for match in conditional_matches:
-        text_to_add = match[0].strip() 
-        target_num_str = re.sub(r'[^0-9]', '', match[1]).strip() 
-        placeholder = re.escape(f"[{match[0].strip()} ({match[1].strip()})]")
-        try:
-            target_num = int(target_num_str)
-        except ValueError:
-            caption_template = re.sub(placeholder, "", caption_template)
-            continue
-        
-        if current_episode_num == target_num:
-            caption_template = re.sub(placeholder, text_to_add, caption_template)
-        else:
-            caption_template = re.sub(placeholder, "", caption_template)
-
-    return caption_template
-
-
 def generate_new_filename(original_name: str, uid: int = None) -> str:
     """Generates the new standardized filename while preserving the original extension."""
     file_path = Path(original_name)
@@ -443,7 +468,7 @@ def generate_new_filename(original_name: str, uid: int = None) -> str:
         file_ext = ".mp4"
         
     if uid and uid in USER_FILENAMES:
-        base_name = process_dynamic_caption(uid, USER_FILENAMES[uid], is_first_setup=True)
+        base_name = process_dynamic_text_no_increment(uid, USER_FILENAMES[uid])
     else:
         base_name = "[@TA_HD_Anime] Telegram Channel"
         
@@ -4057,7 +4082,6 @@ async def text_handler(c, m: Message):
     if text.startswith("http://") or text.startswith("https://"):
         url = text
         if uid in DOWNLOAD_T_MODE:
-            # Issue 2 Fix: Return two links for t-mode (Download Force & Stream view)
             dl_link = f"{PUBLIC_BASE_URL}/dl_stream?url={urllib.parse.quote(url)}"
             st_link = f"{PUBLIC_BASE_URL}/stream?url={urllib.parse.quote(url)}"
             await m.reply_text(f"🔗 **Download Link (Direct):**\n{dl_link}\n\n▶️ **Stream Link (Watch):**\n{st_link}", disable_web_page_preview=True)
@@ -5006,7 +5030,7 @@ async def execute_batch_audio_remux(uid, c, chat_id):
                     # In batch audio mode, if set caption is not set, use base video name as caption
                     cap = base_name
                 else:
-                    advance_dynamic_counters(uid)
+                    # process_dynamic_caption now increments automatically
                     cap = process_dynamic_caption(uid, final_caption_template)
                 
                 # Mock a message for sequential_upload_task
@@ -5587,7 +5611,7 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
             else:
                 caption_to_use = f"{display_name}"
         else:
-            advance_dynamic_counters(uid)
+            # No need to call advance_dynamic_counters; process_dynamic_caption does it
             caption_to_use = process_dynamic_caption(uid, final_caption_template)
             
         # Make caption bold
