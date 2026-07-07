@@ -5356,8 +5356,7 @@ async def rename_cmd(c, m: Message):
         await m.reply_text("Provide a new file name. Example: /rename new_video.mp4")
         return
     new_name = m.text.split(None, 1)[1].strip()
-    new_name = re.sub(r"[\\/*?\"<>|:]", "_", new_name")
-    
+    new_name = re.sub(r'[\\/*?\"<>|:]', '_', new_name)  # <-- FIXED
     await m.reply_text(f"Video will be renamed to: {new_name}\n(The replied file will be downloaded and re-uploaded for renaming)")
 
     cancel_event = asyncio.Event()
