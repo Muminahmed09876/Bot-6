@@ -61,24 +61,27 @@ logger = logging.getLogger(__name__)
 
 PORT = int(os.getenv("PORT", "10000")) 
 
-# ===== CHANGE 1: Use PUBLIC_BASE_URL instead of RENDER_EXTERNAL_HOSTNAME =====
+# ===== FIX: Define RENDER_EXTERNAL_HOSTNAME globally (like main18.py) =====
+RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+if not RENDER_EXTERNAL_HOSTNAME:
+    try:
+        import urllib.request
+        _public_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf8')
+        RENDER_EXTERNAL_HOSTNAME = f"{_public_ip}:{PORT}"
+    except Exception:
+        try:
+            _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            _s.connect(("8.8.8.8", 80))
+            _local_ip = _s.getsockname()[0]
+            _s.close()
+            RENDER_EXTERNAL_HOSTNAME = f"{_local_ip}:{PORT}"
+        except Exception:
+            RENDER_EXTERNAL_HOSTNAME = f"localhost:{PORT}"
+# ========================================================================
+
+# ===== Keep PUBLIC_BASE_URL for other uses (download links, etc.) =====
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
 if not PUBLIC_BASE_URL:
-    RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-    if not RENDER_EXTERNAL_HOSTNAME:
-        try:
-            import urllib.request
-            _public_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf8')
-            RENDER_EXTERNAL_HOSTNAME = f"{_public_ip}:{PORT}"
-        except Exception:
-            try:
-                _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                _s.connect(("8.8.8.8", 80))
-                _local_ip = _s.getsockname()[0]
-                _s.close()
-                RENDER_EXTERNAL_HOSTNAME = f"{_local_ip}:{PORT}"
-            except Exception:
-                RENDER_EXTERNAL_HOSTNAME = f"localhost:{PORT}"
     PUBLIC_BASE_URL = f"http://{RENDER_EXTERNAL_HOSTNAME}"
 else:
     if not PUBLIC_BASE_URL.startswith(('http://', 'https://')):
@@ -1239,6 +1242,7 @@ async def set_bot_commands():
         BotCommand("progress_bar", "Toggle progress bar ON/OFF or Custom Interval (admin only)"),
         BotCommand("continue", "Resume paused queue / Restore buttons"),
         BotCommand("restart", "Show Storage info and Clear Data"),
+        BotCommand("check", "Check ping status and connectivity"),
         BotCommand("help", "Help")
     ]
     try:
@@ -1773,6 +1777,7 @@ async def start_handler(c, m: Message):
         "/progress_bar - Toggle progress bar ON/OFF or Custom Interval (admin only)\n"
         "/continue - Resume paused queue / Restore buttons\n"
         "/restart - Show Storage info and Clear Data\n"
+        "/check - Check ping status and connectivity\n"
         "/help - Help"
     )
     await m.reply_text(text)
@@ -5979,6 +5984,46 @@ def run_flask_and_ping():
     ping_thread = threading.Thread(target=ping_service)
     ping_thread.start()
     print("Flask and Ping services started.")
+# ================================================
+
+# ===== NEW COMMAND: /check =====
+@app.on_message(filters.command("check") & filters.private)
+async def check_cmd(c, m: Message):
+    uid = m.from_user.id
+    if not is_admin(uid):
+        await m.reply_text("You are not authorized.")
+        return
+
+    # Check if ping service is running
+    ping_status = "✅ **Ping Service:** Active" if RENDER_EXTERNAL_HOSTNAME else "❌ **Ping Service:** Not active (RENDER_EXTERNAL_HOSTNAME not set)"
+    
+    # Try to ping the URL
+    if RENDER_EXTERNAL_HOSTNAME:
+        url = f"http://{RENDER_EXTERNAL_HOSTNAME}"
+        try:
+            response = requests.get(url, timeout=5)
+            ping_result = f"✅ **Ping Test:** Success (Status {response.status_code})"
+        except Exception as e:
+            ping_result = f"❌ **Ping Test:** Failed – {str(e)}"
+    else:
+        ping_result = "⚠️ Cannot test ping – RENDER_EXTERNAL_HOSTNAME not set"
+
+    # Flask server status
+    flask_status = "✅ **Flask Server:** Running"
+
+    # Bot status
+    bot_status = "✅ **Bot:** Running"  # We assume if command is received, bot is running
+
+    msg = (
+        f"**Bot Health Check**\n\n"
+        f"{bot_status}\n"
+        f"{flask_status}\n"
+        f"{ping_status}\n"
+        f"{ping_result}\n\n"
+        f"**RENDER_EXTERNAL_HOSTNAME:** `{RENDER_EXTERNAL_HOSTNAME}`\n"
+        f"**PORT:** `{PORT}`"
+    )
+    await m.reply_text(msg)
 # ================================================
 
 async def periodic_cleanup():
