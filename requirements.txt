@@ -34,4 +34,3 @@ rclone
 google-auth
 google-auth-oauthlib
 google-api-python-client
-gradio==4.20.0
