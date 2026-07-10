@@ -5965,30 +5965,9 @@ def force_download_remote_file():
     if not url and not file_id:
         return "URL or file_id parameter is required.", 400
     
-    # If file_id is provided, we proxy from Telegram (download via bot)
+    # If file_id is provided, we cannot proxy it directly. We'll return an error.
     if file_id:
-        from pyrogram.types import InputFile
-        # Use a simple streaming approach: we'll use the bot to download and stream
-        async def stream_from_telegram():
-            try:
-                # Download the file from Telegram and stream it
-                # We'll use a temporary file or in-memory? Since we can't easily stream from pyrogram without saving,
-                # we'll save to tmp and then stream.
-                # But for simplicity, we'll use the existing download functionality? Actually we'll just use the send method?
-                # Better: use the bot client to download the file and stream it.
-                # We'll create a temp file path.
-                temp_path = TMP / f"telegram_stream_{file_id}_{int(time.time())}"
-                async with app:  # we need to get the bot client
-                    # Download the file to temp_path
-                    # We need to get the message? Not possible here, so we'll use file_id and file_name.
-                    # Actually, we can't download file_id directly from a Message; we need a message object.
-                    # So this is a limitation. We'll skip file_id support for now.
-                    # Instead, we'll redirect to the original file_id download? Not possible.
-                return "File ID streaming not yet implemented.", 501
-            except Exception as e:
-                return str(e), 500
-        # We'll just return a placeholder
-        return "File ID streaming is not supported in this endpoint. Use /stream?file_id=... instead.", 501
+        return "File ID streaming is not supported in this endpoint. Please use /stream?file_id=... instead.", 501
 
     def generate():
         try:
@@ -6026,10 +6005,8 @@ def stream_remote_file():
     if not url and not file_id:
         return "URL or file_id parameter is required.", 400
 
-    # If file_id is provided, we need to stream from Telegram
+    # If file_id is provided, we cannot proxy it directly. We'll return an error.
     if file_id:
-        # We'll use the bot's download method to get the file and stream it.
-        # But we can't do that in a Flask route easily. We'll return a placeholder.
         return "Telegram file streaming via file_id is not implemented yet.", 501
 
     def generate():
