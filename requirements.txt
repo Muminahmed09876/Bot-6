@@ -26,7 +26,6 @@ flask
 gunicorn
 python-telegram-bot
 python-dotenv
-tor
 py7zr
 unzip
 gdown
