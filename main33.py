@@ -2707,6 +2707,10 @@ async def process_zip_uploads(c, message_or_chat_id, uid, final_order):
             try: await msg_obj.delete()
             except: pass
         asyncio.ensure_future(auto_delete(complete_msg))
+        # ===== NEW: Refresh drive list if in drive mode =====
+        if uid in DRIVE_NAV_MODE:
+            await show_drive_list(c, chat_id, uid)
+        # =================================================
         await check_and_show_next_zip(c, chat_id, uid)
 
 @app.on_callback_query(filters.regex("zip_upload_all"))
@@ -2729,6 +2733,10 @@ async def zip_cancel_cb(c, cb):
         except: pass
         ZIP_NAV_STATE.pop(uid, None)
     await cb.message.edit_text("ZIP session cleared. Files are kept and can be accessed via `path`.")
+    # ===== NEW: Refresh drive list if in drive mode =====
+    if uid in DRIVE_NAV_MODE:
+        await show_drive_list(c, cb.message.chat.id, uid)
+    # =================================================
     await check_and_show_next_zip(c, cb.message.chat.id, uid)
 
 def is_archive_file(filepath: Path) -> bool:
@@ -6219,7 +6227,6 @@ async def show_drive_list(c, chat_id, uid, page=0):
 
     full_text = "\n".join(text_lines)
 
-    # Send the message and store its ID for cleanup
     msg = await c.send_message(chat_id, full_text)
     state.setdefault('msg_ids', []).append(msg.id)
 
