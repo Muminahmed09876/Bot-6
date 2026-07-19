@@ -6258,6 +6258,8 @@ if __name__ == "__main__":
     try:
         loop = asyncio.get_event_loop()
         loop.create_task(periodic_cleanup())
+        # ★★★ বট স্টার্ট হওয়ার আগে কমান্ড সেট করুন ★★★
+        loop.run_until_complete(set_bot_commands())
+        app.run()
     except RuntimeError:
         pass
-    app.run()
