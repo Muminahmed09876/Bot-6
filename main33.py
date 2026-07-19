@@ -6258,8 +6258,14 @@ if __name__ == "__main__":
     try:
         loop = asyncio.get_event_loop()
         loop.create_task(periodic_cleanup())
-        # ★★★ বট স্টার্ট হওয়ার আগে কমান্ড সেট করুন ★★★
-        loop.run_until_complete(set_bot_commands())
-        app.run()
-    except RuntimeError:
+        
+        # ★★★ নতুন পরিবর্তন: ক্লায়েন্ট স্টার্ট করুন, কমান্ড সেট করুন, তারপর আইডল করুন ★★★
+        async def start_bot():
+            await app.start()               # ক্লায়েন্ট স্টার্ট (সংযোগ স্থাপন)
+            await set_bot_commands()        # কমান্ড সেট করুন (এখন কাজ করবে)
+            print("✅ Bot started and commands set.")
+            await app.idle()                # বট চলমান রাখুন
+        
+        loop.run_until_complete(start_bot())
+    except KeyboardInterrupt:
         pass
