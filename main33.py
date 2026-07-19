@@ -117,7 +117,7 @@ TMP.mkdir(parents=True, exist_ok=True)
 # state
 USER_THUMBS = {}
 TASKS = {}
-USER_TASK_EVENTS = {} # New: uid -> {msg_id: cancel_event} for specific task cancel
+USER_TASK_EVENTS = {} # New: uid -> {msg_id -> cancel_event} for specific task cancel
 SET_THUMB_REQUEST = set()
 SET_CAPTION_REQUEST = set()
 SET_FILENAME_REQUEST = set() # New for filename
@@ -222,10 +222,10 @@ UPLOAD_DRIVE_MODE = set()
 MISSING_EXT_QUEUE = {} # uid -> list of dicts waiting for extension selection
 # ---------------------------------------------
 
-# ===== NEW STATE FOR DRIVE NAVIGATION MODE =====
-DRIVE_NAV_MODE = set()               # Users in drive navigation mode
-DRIVE_NAV_STATE = {}                 # uid -> {current_path: str, items: list, page: int, msg_ids: list}
-# ===============================================
+# ===== NEW STATE FOR DRIVE MODE =====
+DRIVE_MODE = set()               # uid -> drive mode active
+DRIVE_SESSION = {}               # uid -> {'current_path': str, 'page': int, 'items': list, 'garbage_msgs': list}
+# ====================================
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", ""))
 MAX_SIZE = 1000 * 1024 * 1024 * 1024 # Increased to 1000GB
@@ -1248,7 +1248,8 @@ async def set_bot_commands():
         BotCommand("continue", "Resume paused queue / Restore buttons"),
         BotCommand("restart", "Show Storage info and Clear Data"),
         BotCommand("check", "Check ping status and connectivity"),
-        BotCommand("help", "Help")
+        BotCommand("help", "Help"),
+        BotCommand("drive", "Browse and upload files from Google Drive (admin only)")
     ]
     try:
         await app.set_bot_commands(cmds)
@@ -1783,7 +1784,8 @@ async def start_handler(c, m: Message):
         "/continue - Resume paused queue / Restore buttons\n"
         "/restart - Show Storage info and Clear Data\n"
         "/check - Check ping status and connectivity\n"
-        "/help - Help"
+        "/help - Help\n"
+        "/drive - Browse and upload files from Google Drive (admin only)"
     )
     await m.reply_text(text)
 
@@ -1878,6 +1880,8 @@ async def full_reset_bot_cb(c, cb):
     DOWNLOAD_T_MODE.clear()
     UPLOAD_DRIVE_MODE.clear()
     MISSING_EXT_QUEUE.clear()
+    DRIVE_MODE.clear()
+    DRIVE_SESSION.clear()
     
     if uid in USER_QUEUES:
         while not USER_QUEUES[uid].empty():
@@ -2598,7 +2602,8 @@ async def check_and_show_next_zip(c, chat_id, uid):
             'root_dir': next_zip['root_dir'],
             'files_to_upload': next_zip['files_to_upload'],
             'state': 'awaiting_selection',
-            'garbage_msgs': []
+            'garbage_msgs': [],
+            'source': next_zip.get('source')
         }
         
         if uid in AUTO_UPLOAD_ALL:
@@ -2707,11 +2712,12 @@ async def process_zip_uploads(c, message_or_chat_id, uid, final_order):
             try: await msg_obj.delete()
             except: pass
         asyncio.ensure_future(auto_delete(complete_msg))
-        # ===== NEW: Refresh drive list if in drive mode =====
-        if uid in DRIVE_NAV_MODE:
-            await show_drive_list(c, chat_id, uid)
-        # =================================================
-        await check_and_show_next_zip(c, chat_id, uid)
+        
+        # ===== DRIVE MODE REFRESH: if drive mode active and no more zip sessions, show drive UI =====
+        if uid in DRIVE_MODE and uid in DRIVE_SESSION:
+            if uid not in ZIP_NAV_STATE and not ZIP_READY_LIST.get(uid):
+                await send_drive_ui(c, chat_id, uid)
+        # =========================================================================================
 
 @app.on_callback_query(filters.regex("zip_upload_all"))
 async def zip_upload_all_cb(c, cb):
@@ -2733,10 +2739,6 @@ async def zip_cancel_cb(c, cb):
         except: pass
         ZIP_NAV_STATE.pop(uid, None)
     await cb.message.edit_text("ZIP session cleared. Files are kept and can be accessed via `path`.")
-    # ===== NEW: Refresh drive list if in drive mode =====
-    if uid in DRIVE_NAV_MODE:
-        await show_drive_list(c, cb.message.chat.id, uid)
-    # =================================================
     await check_and_show_next_zip(c, cb.message.chat.id, uid)
 
 def is_archive_file(filepath: Path) -> bool:
@@ -2751,7 +2753,8 @@ def is_archive_file(filepath: Path) -> bool:
     except: pass
     return False
 
-async def execute_zip_download_and_extract(c, m, url=None, local_path=None, target_list=None, is_dl_only=False):
+# === MODIFIED: execute_zip_download_and_extract now accepts 'source' parameter ===
+async def execute_zip_download_and_extract(c, m, url=None, local_path=None, target_list=None, is_dl_only=False, source=None):
     uid = m.from_user.id
     status_msg = await c.send_message(m.chat.id, "Downloading Queue Item..." if url else "Processing Local Archive...", reply_markup=progress_keyboard())
     
@@ -2810,7 +2813,8 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                 return
             ZIP_READY_LIST.setdefault(uid, []).append({
                 'root_dir': None,
-                'files_to_upload': [tmp_in]
+                'files_to_upload': [tmp_in],
+                'source': source
             })
             await check_and_show_next_zip(c, m.chat.id, uid)
             return
@@ -2873,7 +2877,8 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                 return
             ZIP_READY_LIST.setdefault(uid, []).append({
                 'root_dir': None,
-                'files_to_upload': [tmp_in]
+                'files_to_upload': [tmp_in],
+                'source': source
             })
             await check_and_show_next_zip(c, m.chat.id, uid)
             return
@@ -2954,7 +2959,8 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
 
         ZIP_READY_LIST.setdefault(uid, []).append({
             'root_dir': ext_dir,
-            'files_to_upload': all_files
+            'files_to_upload': all_files,
+            'source': source
         })
         await check_and_show_next_zip(c, m.chat.id, uid)
         
@@ -3457,111 +3463,15 @@ async def text_handler(c, m: Message):
     uid = m.from_user.id
     if not is_admin(uid):
         return
-    text = m.text.strip()
-
-    # ===== NEW: Drive Navigation Mode =====
-    if uid in DRIVE_NAV_MODE:
-        # Handle drive navigation commands
-        text_lower = text.lower()
-
-        if text_lower == "close":
-            # Exit drive mode and clean up
-            DRIVE_NAV_MODE.discard(uid)
-            if uid in DRIVE_NAV_STATE:
-                msg_ids = DRIVE_NAV_STATE[uid].get('msg_ids', [])
-                try:
-                    await c.delete_messages(m.chat.id, msg_ids)
-                except:
-                    pass
-                DRIVE_NAV_STATE.pop(uid, None)
-            await m.reply_text("Drive navigation mode closed.")
-            return
-
-        if text_lower == "b":
-            # Go back one level
-            state = DRIVE_NAV_STATE.get(uid)
-            if state:
-                current = state['current_path']
-                parent = os.path.dirname(current)
-                if parent != current:
-                    state['current_path'] = parent
-                    await show_drive_list(c, m.chat.id, uid, page=0)
-                else:
-                    await m.reply_text("Already at root.")
-            return
-
-        if text_lower == "np":
-            # Next page
-            state = DRIVE_NAV_STATE.get(uid)
-            if state:
-                await show_drive_list(c, m.chat.id, uid, page=state.get('page', 0) + 1)
-            return
-
-        if text_lower == "pp":
-            # Previous page
-            state = DRIVE_NAV_STATE.get(uid)
-            if state:
-                await show_drive_list(c, m.chat.id, uid, page=max(0, state.get('page', 0) - 1))
-            return
-
-        # Check for number input (selection)
-        if re.match(r'^[\d,\-]+$', text):
-            # Parse indices
-            indices = []
-            parts = text.split(',')
-            for part in parts:
-                part = part.strip()
-                if '-' in part:
-                    s, e = map(int, part.split('-'))
-                    indices.extend(range(s-1, e))
-                else:
-                    indices.append(int(part)-1)
-
-            # Get current items
-            state = DRIVE_NAV_STATE.get(uid)
-            if not state:
-                await m.reply_text("No active drive session.")
-                return
-            items = state.get('items', [])
-            if not items:
-                await m.reply_text("No items in current directory.")
-                return
-
-            # Process each selected index
-            selected = []
-            for idx in indices:
-                if 0 <= idx < len(items):
-                    selected.append(items[idx])
-
-            if not selected:
-                await m.reply_text("Invalid selection.")
-                return
-
-            # Process selected items
-            for item_path in selected:
-                if os.path.isdir(item_path):
-                    # Enter directory
-                    state['current_path'] = item_path
-                    await show_drive_list(c, m.chat.id, uid)
-                    return
-                else:
-                    # It's a file
-                    file_ext = os.path.splitext(item_path)[1].lower()
-                    if file_ext in ['.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz']:
-                        # Archive: extract using zip mode
-                        await handle_drive_archive(c, m, uid, item_path)
-                    else:
-                        # Normal file: upload
-                        await handle_drive_file_upload(c, m, uid, item_path)
-            # After processing, refresh the list (if not already)
-            await show_drive_list(c, m.chat.id, uid)
-            return
-
-        # If input doesn't match, maybe it's a command for other modes; but we are in drive mode, so ignore and inform
-        await m.reply_text("Invalid command. Use numbers, ranges, 'b', 'np', 'pp', or 'close'.")
+    
+    # ===== DRIVE MODE HANDLING (highest priority) =====
+    if uid in DRIVE_MODE:
+        await handle_drive_text(c, m, uid)
         return
-    # =======================================
+    # =================================================
 
+    text = m.text.strip()
+    
     if uid in SET_FILENAME_REQUEST:
         SET_FILENAME_REQUEST.discard(uid)
         USER_FILENAMES[uid] = text
@@ -6142,196 +6052,189 @@ async def check_cmd(c, m: Message):
     await m.reply_text(msg)
 # ================================================
 
-# ===== NEW COMMAND: /drive =====
+# ===== NEW: /drive command and drive mode functions =====
 @app.on_message(filters.command("drive") & filters.private)
-async def toggle_drive_nav_mode(c, m: Message):
+async def drive_cmd(c, m: Message):
     uid = m.from_user.id
     if not is_admin(uid):
-        await m.reply_text("You are not authorized to use this command.")
+        await m.reply_text("You are not authorized.")
         return
+    if uid in DRIVE_MODE:
+        await turn_off_drive_mode(c, m.chat.id, uid)
+    else:
+        DRIVE_MODE.add(uid)
+        DRIVE_SESSION[uid] = {
+            'current_path': "/content/drive/MyDrive",
+            'page': 0,
+            'garbage_msgs': [m.id]
+        }
+        await send_drive_ui(c, m.chat.id, uid)
 
-    if uid in DRIVE_NAV_MODE:
-        # Turn off drive mode and clean up
-        DRIVE_NAV_MODE.discard(uid)
-        if uid in DRIVE_NAV_STATE:
-            msg_ids = DRIVE_NAV_STATE[uid].get('msg_ids', [])
+async def turn_off_drive_mode(c, chat_id, uid):
+    if uid in DRIVE_SESSION:
+        session = DRIVE_SESSION.pop(uid)
+        if session.get('garbage_msgs'):
             try:
-                await c.delete_messages(m.chat.id, msg_ids)
+                await c.delete_messages(chat_id, session['garbage_msgs'])
             except:
                 pass
-            DRIVE_NAV_STATE.pop(uid, None)
-        await m.reply_text("Drive navigation mode OFF. All messages cleaned.")
-    else:
-        # Turn on drive mode
-        DRIVE_NAV_MODE.add(uid)
-        DRIVE_NAV_STATE[uid] = {
-            'current_path': '/content/drive/MyDrive',
-            'items': [],
-            'page': 0,
-            'msg_ids': []
-        }
-        await m.reply_text("Drive navigation mode ON. Showing root directory:")
-        await show_drive_list(c, m.chat.id, uid)
-# ================================================
+    DRIVE_MODE.discard(uid)
+    # Clean drive-originated ZIP items from ZIP_READY_LIST
+    if uid in ZIP_READY_LIST:
+        new_list = []
+        for item in ZIP_READY_LIST[uid]:
+            if item.get('source') != 'drive':
+                new_list.append(item)
+            else:
+                if item.get('root_dir') and Path(item['root_dir']).exists():
+                    shutil.rmtree(item['root_dir'], ignore_errors=True)
+        if new_list:
+            ZIP_READY_LIST[uid] = new_list
+        else:
+            ZIP_READY_LIST.pop(uid, None)
+    if uid in ZIP_NAV_STATE and ZIP_NAV_STATE[uid].get('source') == 'drive':
+        ZIP_NAV_STATE.pop(uid, None)
+    await c.send_message(chat_id, "Drive Mode OFF.")
 
-# ===== DRIVE NAVIGATION HELPER FUNCTIONS =====
-async def show_drive_list(c, chat_id, uid, page=0):
-    state = DRIVE_NAV_STATE.get(uid)
-    if not state:
+async def send_drive_ui(c, chat_id, uid, msg_id=None, page=None):
+    if uid not in DRIVE_SESSION:
         return
-
-    current_path = state['current_path']
+    session = DRIVE_SESSION[uid]
+    current_path = Path(session['current_path'])
+    if page is None:
+        page = session.get('page', 0)
     try:
-        items = sorted(os.listdir(current_path))
-        items_full = [os.path.join(current_path, item) for item in items]
-        # Sort: directories first, then files
-        items_full.sort(key=lambda p: (not os.path.isdir(p), os.path.basename(p).lower()))
-    except Exception as e:
-        await c.send_message(chat_id, f"Error reading directory: {e}")
-        return
-
-    state['items'] = items_full
-    state['page'] = page
+        items = list(current_path.iterdir())
+        items.sort(key=lambda x: (not x.is_dir(), x.name.lower()))
+    except:
+        items = []
+    session['items'] = items
+    session['page'] = page
 
     per_page = 20
-    total_items = len(items_full)
+    total_items = len(items)
     total_pages = max(1, math.ceil(total_items / per_page))
     if page >= total_pages:
         page = total_pages - 1
     if page < 0:
         page = 0
+    session['page'] = page
 
     start_idx = page * per_page
     end_idx = min(start_idx + per_page, total_items)
 
-    text_lines = [
-        f"**📂 Drive Navigator (Page {page+1}/{total_pages})**\n",
-        f"**Current Path:** `{current_path}`\n"
-    ]
+    text_lines = [f"**Drive File Manager (Page {page+1}/{total_pages})**\n**Current Path:** `{current_path}`\n"]
     text_lines.append("**b.** ⬆️ Go Back (Up)")
-
+    text_lines.append("**close.** Exit Drive Mode")
     for i in range(start_idx, end_idx):
-        item_path = items_full[i]
-        name = os.path.basename(item_path)
-        if os.path.isdir(item_path):
+        item = items[i]
+        name = item.name
+        if item.is_dir():
             text_lines.append(f"**{i+1}.** 📁 `{name}`")
         else:
             text_lines.append(f"**{i+1}.** 📄 `{name}`")
-
     text_lines.append("\n**Options:**")
-    text_lines.append("‣ Send number to open folder / select file (e.g., `1`).")
-    text_lines.append("‣ Send `1-3,5` to select multiple items.")
-    text_lines.append("‣ Send `b` to go back.")
-    text_lines.append("‣ Send `np` / `pp` for next/previous page.")
+    text_lines.append("‣ Send `b` to go back up.")
+    text_lines.append("‣ Send a number to open folder/select file (e.g., `1`).")
+    text_lines.append("‣ Send `1-3,5` to upload multiple files serially.")
     text_lines.append("‣ Send `close` to exit drive mode.")
+    text_lines.append("‣ Send `np` or `pp` for Next/Prev Page.")
 
     full_text = "\n".join(text_lines)
+    chunks = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
 
-    msg = await c.send_message(chat_id, full_text)
-    state.setdefault('msg_ids', []).append(msg.id)
+    # Delete previous garbage messages
+    if session.get('garbage_msgs'):
+        try:
+            await c.delete_messages(chat_id, session['garbage_msgs'])
+        except:
+            pass
+    session['garbage_msgs'] = []
 
-# ===== DRIVE SELECTION HANDLER =====
-async def handle_drive_file_upload(c, m: Message, uid, file_path):
-    # Upload a normal file (video, audio, document) using bot's existing upload logic
-    # We'll create a temporary copy in TMP because process_file_and_upload expects a Path in TMP?
-    # Actually process_file_and_upload can handle any path, it will process and delete.
-    # But we need to pass a Message object. We can use m (the original message) but the file is not from Telegram.
-    # We'll create a dummy message object with the necessary attributes.
-    # Or we can use add_to_queue? Better to directly use process_file_and_upload.
-    # However, process_file_and_upload expects a Message with .chat.id and .id.
-    # We can pass m as is, but the file is local.
-    # We'll copy the file to TMP to avoid modifying the original, then call process_file_and_upload.
-    # But process_file_and_upload will delete the file after upload, so we need a copy.
-    # We'll copy to TMP with a unique name.
-    import shutil
-    original_name = os.path.basename(file_path)
-    tmp_path = TMP / f"drive_upload_{uid}_{int(time.time())}_{original_name}"
-    shutil.copy2(file_path, tmp_path)
+    for idx, chunk in enumerate(chunks):
+        if msg_id and idx == 0:
+            try:
+                await c.edit_message_text(chat_id, msg_id, chunk)
+                session['garbage_msgs'].append(msg_id)
+            except:
+                new_msg = await c.send_message(chat_id, chunk)
+                session['garbage_msgs'].append(new_msg.id)
+        else:
+            new_msg = await c.send_message(chat_id, chunk)
+            session['garbage_msgs'].append(new_msg.id)
 
-    # Create a fake message object (simplified)
-    class FakeMessage:
-        def __init__(self, chat_id, msg_id, caption=None):
-            self.chat = type('Chat', (), {'id': chat_id})()
-            self.id = msg_id
-            self.caption = caption
-            self.from_user = type('User', (), {'id': uid})()
-            self.video = None
-            self.document = None
-    fake_msg = FakeMessage(m.chat.id, m.id)
+async def handle_drive_text(c, m: Message, uid: int):
+    text = m.text.strip().lower()
+    session = DRIVE_SESSION.get(uid)
+    if not session:
+        await m.reply_text("Drive session not found.")
+        return
+    session.setdefault('garbage_msgs', []).append(m.id)
 
-    # Use process_file_and_upload with cancel_event and other params
-    cancel_event = asyncio.Event()
-    TASKS.setdefault(uid, []).append(cancel_event)
-    try:
-        status_msg = await c.send_message(m.chat.id, f"Preparing upload for `{original_name}`...", reply_markup=progress_keyboard())
-        USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
-        await process_file_and_upload(
-            c,
-            fake_msg,
-            tmp_path,
-            target_name=original_name,
-            messages_to_delete=[status_msg.id],
-            cancel_event_passed=cancel_event,
-            passed_uid=uid,
-            default_caption=original_name,
-            original_caption_passed=original_name,
-            original_download_name=original_name
-        )
-    except Exception as e:
-        logger.error(f"Drive upload error: {e}")
-        await c.send_message(m.chat.id, f"Upload failed: {e}")
-    finally:
-        if cancel_event in TASKS.get(uid, []):
-            TASKS[uid].remove(cancel_event)
+    if text == 'close':
+        await turn_off_drive_mode(c, m.chat.id, uid)
+        return
+    if text == 'b':
+        current = Path(session['current_path'])
+        if current != Path("/content/drive/MyDrive"):
+            session['current_path'] = str(current.parent)
+        await send_drive_ui(c, m.chat.id, uid)
+        return
+    if text == 'np':
+        page = session.get('page', 0) + 1
+        await send_drive_ui(c, m.chat.id, uid, page=page)
+        return
+    if text == 'pp':
+        page = max(0, session.get('page', 0) - 1)
+        await send_drive_ui(c, m.chat.id, uid, page=page)
+        return
 
-async def handle_drive_archive(c, m: Message, uid, archive_path):
-    # Extract archive using execute_zip_download_and_extract with local_path
-    # This function expects a Message object and will show the extracted files list via ZIP mode.
-    # We can pass a dummy message with the necessary attributes.
-    class FakeMessage:
-        def __init__(self, chat_id):
-            self.chat = type('Chat', (), {'id': chat_id})()
-            self.id = 0
-            self.from_user = type('User', (), {'id': uid})()
-    fake_msg = FakeMessage(m.chat.id)
+    # Parse numbers / ranges
+    if text.replace(',', '').replace('-', '').isdigit():
+        indices = []
+        for part in text.split(','):
+            part = part.strip()
+            if '-' in part:
+                s, e = map(int, part.split('-'))
+                indices.extend(range(s-1, e))
+            else:
+                indices.append(int(part)-1)
+        items = session.get('items', [])
+        for idx in indices:
+            if 0 <= idx < len(items):
+                item = items[idx]
+                if item.is_dir():
+                    if len(indices) == 1:
+                        session['current_path'] = str(item)
+                        await send_drive_ui(c, m.chat.id, uid)
+                        return
+                    else:
+                        continue  # skip folders if multiple selection
+                else:
+                    await process_drive_file(c, m, uid, item)
+        # After processing, refresh the UI if still in drive mode
+        if uid in DRIVE_MODE:
+            await send_drive_ui(c, m.chat.id, uid)
+        return
 
-    # Use execute_zip_download_and_extract
-    # It will add to ZIP_READY_LIST and show the file list.
-    await execute_zip_download_and_extract(c, fake_msg, url=None, local_path=archive_path)
+    await m.reply_text("Invalid command.")
 
-# After handling archive extraction, we might want to refresh the drive list after all ZIP uploads are done.
-# We can modify process_zip_uploads to check if uid in DRIVE_NAV_MODE and then show_drive_list.
-# But we don't want to modify existing code. Instead, we can add a callback after ZIP_NAV_STATE is cleared.
-# We'll add a check in zip_cancel_cb and when process_zip_uploads finishes.
-# Since we are not allowed to modify existing code, we can add a new callback or monitor.
-# Alternatively, we can override process_zip_uploads by monkey-patching, but that's not advisable.
-# Simpler: after calling execute_zip_download_and_extract, we can wait for the ZIP session to finish.
-# However, that is asynchronous and we don't know when it ends.
-# We can send a message to user to notify when done, and they can type 'close' or 'refresh' to see drive list again.
-# But the user expects auto-refresh. We'll need to modify existing code slightly.
-# Since the instruction says "অকারণে কোনো পরিবর্তন করবে না" - don't make unnecessary changes, but we need to add this functionality.
-# I think it's acceptable to add a small check in process_zip_uploads and zip_cancel_cb to call show_drive_list if in DRIVE_NAV_MODE.
-# I'll add a few lines in those functions (they are in the existing code). I'll mark them with comments.
-
-# However, to keep the code simple, I'll add a new async task that waits for ZIP_NAV_STATE to clear, then shows drive list.
-# But that would be complicated. Let's modify process_zip_uploads slightly:
-# In the final part of process_zip_uploads, after removing ZIP_NAV_STATE, if uid in DRIVE_NAV_MODE, call show_drive_list.
-# Similarly in zip_cancel_cb.
-# I'll add those lines in the code.
-
-# For the purpose of this response, I'll add the modified parts.
-
-# ===== MODIFICATIONS TO EXISTING FUNCTIONS (additions only) =====
-# In process_zip_uploads, near the end:
-# if uid in DRIVE_NAV_MODE:
-#     await show_drive_list(c, chat_id, uid)
-
-# In zip_cancel_cb, after clearing, if uid in DRIVE_NAV_MODE:
-#     await show_drive_list(c, cb.message.chat.id, uid)
-
-# I'll include these modifications in the final code.
-
-# ================================================
+async def process_drive_file(c, m: Message, uid: int, file_path: Path):
+    if is_archive_file(file_path):
+        tmp_copy = TMP / f"drive_archive_{uid}_{int(time.time())}_{file_path.name}"
+        shutil.copy(file_path, tmp_copy)
+        await execute_zip_download_and_extract(c, m, local_path=str(tmp_copy), source='drive')
+    else:
+        tmp_copy = TMP / f"drive_file_{uid}_{int(time.time())}_{file_path.name}"
+        shutil.copy(file_path, tmp_copy)
+        original_name = file_path.name
+        renamed_file = get_dynamic_filename(uid, original_name)
+        cancel_event = asyncio.Event()
+        TASKS.setdefault(uid, []).append(cancel_event)
+        await sequential_upload_task(uid, c, m, tmp_copy, renamed_file, None, cancel_event,
+                                     default_caption=original_name, original_caption=original_name,
+                                     original_download_name=original_name)
+# ==========================================================================
 
 async def periodic_cleanup():
     while True:
