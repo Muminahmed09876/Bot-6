@@ -117,7 +117,7 @@ TMP.mkdir(parents=True, exist_ok=True)
 # state
 USER_THUMBS = {}
 TASKS = {}
-USER_TASK_EVENTS = {} # New: uid -> {msg_id -> cancel_event} for specific task cancel
+USER_TASK_EVENTS = {} # New: uid -> {msg_id: cancel_event} for specific task cancel
 SET_THUMB_REQUEST = set()
 SET_CAPTION_REQUEST = set()
 SET_FILENAME_REQUEST = set() # New for filename
@@ -1249,7 +1249,7 @@ async def set_bot_commands():
         BotCommand("restart", "Show Storage info and Clear Data"),
         BotCommand("check", "Check ping status and connectivity"),
         BotCommand("help", "Help"),
-        BotCommand("drive", "Browse and upload files from Google Drive (admin only)")
+        BotCommand("drive", "Browse and upload files from Google Drive (admin only)")  # Added
     ]
     try:
         await app.set_bot_commands(cmds)
