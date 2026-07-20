@@ -185,7 +185,7 @@ ZIP_DL_WORKERS = {} # New: worker for serial zip downloading
 # ------------------------------------------------
 
 # --- NEW STATE FOR PATH NAVIGATOR ---
-NAV_PATHS = {} # uid -> {"current": Path, "items": list, "selected_file": Path, "page": int}
+NAV_PATHS = {} # uid -> {"current": Path, "items": list, "selected_file": Path, "page": int, "msg_id": int}
 # ------------------------------------------------
 
 # --- YT-DLP STATE & MODES ---
@@ -3099,21 +3099,36 @@ async def send_path_ui(c, chat_id, uid, msg_id=None, page=0):
         InlineKeyboardButton(f"{'✅ ' if mode_zip else ''}ZIP Upload", callback_data=f"path_mode_{uid}_zip")
     ])
     
+    # Next List button for batch_audio and zip
+    if mode_batch_audio and PATH_BATCH_AUDIO_STAGE.get(uid) == 1:
+        keyboard.append([InlineKeyboardButton("Next List ➡️", callback_data=f"path_nextlist_{uid}")])
+    elif mode_zip:
+        keyboard.append([InlineKeyboardButton("Next List ➕", callback_data=f"path_nextlist_{uid}")])
+    
     # All Select and Done
     keyboard.append([
         InlineKeyboardButton("All Select", callback_data=f"path_all_{uid}"),
         InlineKeyboardButton("Done", callback_data=f"path_done_{uid}")
     ])
     
+    # Close button
+    keyboard.append([InlineKeyboardButton("Close ❌", callback_data=f"path_close_{uid}")])
+    
     markup = InlineKeyboardMarkup(keyboard)
     
     chunks = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
     for idx, chunk in enumerate(chunks):
         if msg_id and idx == 0:
-            try: await c.edit_message_text(chat_id, msg_id, chunk, reply_markup=markup)
-            except: await c.send_message(chat_id, chunk, reply_markup=markup if idx==0 else None)
+            try:
+                await c.edit_message_text(chat_id, msg_id, chunk, reply_markup=markup)
+                NAV_PATHS[uid]['msg_id'] = msg_id
+            except:
+                new_msg = await c.send_message(chat_id, chunk, reply_markup=markup if idx==0 else None)
+                NAV_PATHS[uid]['msg_id'] = new_msg.id
         else:
-            await c.send_message(chat_id, chunk, reply_markup=markup if idx==0 else None)
+            new_msg = await c.send_message(chat_id, chunk, reply_markup=markup if idx==0 else None)
+            if idx == 0:
+                NAV_PATHS[uid]['msg_id'] = new_msg.id
 
 async def process_path_uploads(uid, c, m, files_to_upload):
     for fpath in files_to_upload:
@@ -3198,6 +3213,30 @@ async def path_mode_cb(c, cb):
     # Refresh UI
     await send_path_ui(c, cb.message.chat.id, uid, msg_id=cb.message.id, page=NAV_PATHS[uid]['page'])
 
+@app.on_callback_query(filters.regex(r"^path_nextlist_"))
+async def path_nextlist_cb(c, cb):
+    uid = int(cb.data.split('_')[2])
+    if uid != cb.from_user.id:
+        await cb.answer("Not your session.", show_alert=True)
+        return
+    mode = PATH_MODE_SELECTION.get(uid)
+    if mode == 'batch_audio':
+        # Switch to List 2
+        PATH_BATCH_AUDIO_STAGE[uid] = 2
+        await cb.answer("Switched to List 2. Now add audio source files.", show_alert=False)
+    elif mode == 'zip':
+        # Create a new empty list
+        if uid not in PATH_ZIP_LISTS:
+            PATH_ZIP_LISTS[uid] = [[]]
+        PATH_ZIP_LISTS[uid].append([])
+        PATH_ZIP_CURRENT_LIST[uid] = len(PATH_ZIP_LISTS[uid]) - 1
+        await cb.answer(f"Created new list {PATH_ZIP_CURRENT_LIST[uid]+1}.", show_alert=False)
+    else:
+        await cb.answer("No active mode for Next List.", show_alert=True)
+        return
+    # Refresh UI
+    await send_path_ui(c, cb.message.chat.id, uid, msg_id=cb.message.id, page=NAV_PATHS[uid]['page'])
+
 @app.on_callback_query(filters.regex(r"^path_all_"))
 async def path_all_cb(c, cb):
     uid = int(cb.data.split('_')[2])
@@ -3249,8 +3288,16 @@ async def path_all_cb(c, cb):
         # No mode: directly upload all files
         await process_path_uploads(uid, c, cb.message, all_files)
         await cb.answer("Uploading all files...", show_alert=False)
-    # Refresh UI
-    await send_path_ui(c, cb.message.chat.id, uid, msg_id=cb.message.id, page=NAV_PATHS[uid]['page'])
+        # Delete the path UI message after starting upload
+        if uid in NAV_PATHS and 'msg_id' in NAV_PATHS[uid]:
+            try:
+                await c.delete_messages(cb.message.chat.id, NAV_PATHS[uid]['msg_id'])
+            except:
+                pass
+            NAV_PATHS.pop(uid, None)
+    # Refresh UI (if mode selected)
+    if mode:
+        await send_path_ui(c, cb.message.chat.id, uid, msg_id=cb.message.id, page=NAV_PATHS[uid]['page'])
 
 @app.on_callback_query(filters.regex(r"^path_done_"))
 async def path_done_cb(c, cb):
@@ -3267,21 +3314,19 @@ async def path_done_cb(c, cb):
             await cb.answer("Convert list is empty.", show_alert=True)
             return
         # Start convert tool with the list
-        # We'll reuse the existing convert logic but with a batch list
-        # We need to create a session and trigger the UI
-        # For simplicity, we'll take the first file and pass the list as batch
         first_file = PATH_CONVERT_LIST[uid][0]
         batch_files = [{'path': str(f), 'name': f.name} for f in PATH_CONVERT_LIST[uid]]
-        # We'll create a fake message to pass
-        # Use the callback message as source
         await handle_convert_input(c, cb.message, override_path=str(first_file), batch_list=batch_files)
         await cb.answer("Convert started.", show_alert=False)
-        # Clear the list and unselect mode? Actually, we'll let the convert process auto-off after completion, but we can clear now
         PATH_MODE_SELECTION.pop(uid, None)
         PATH_CONVERT_LIST.pop(uid, None)
-        # Refresh path UI
-        if uid in NAV_PATHS:
-            await send_path_ui(c, cb.message.chat.id, uid, msg_id=cb.message.id, page=NAV_PATHS[uid]['page'])
+        # Delete path UI
+        if uid in NAV_PATHS and 'msg_id' in NAV_PATHS[uid]:
+            try:
+                await c.delete_messages(cb.message.chat.id, NAV_PATHS[uid]['msg_id'])
+            except:
+                pass
+            NAV_PATHS.pop(uid, None)
     elif mode == 'batch_audio':
         if uid not in PATH_BATCH_AUDIO_LIST1 or not PATH_BATCH_AUDIO_LIST1[uid]:
             await cb.answer("List 1 is empty.", show_alert=True)
@@ -3290,18 +3335,11 @@ async def path_done_cb(c, cb):
             await cb.answer("List 2 is empty. Use 'Next List' to switch to List 2 and add files.", show_alert=True)
             return
         # Start batch audio
-        # We need to create the necessary state structures as in batch_audio mode
-        # We'll use the existing BATCH_AUDIO_LIST1/2 but we need to populate them with paths
-        # But we already have PATH_BATCH_AUDIO_LIST1/2 which are lists of Path objects
-        # We'll convert them to dicts with path and name
         list1_dicts = [{'path': str(f), 'name': f.name} for f in PATH_BATCH_AUDIO_LIST1[uid]]
         list2_dicts = [{'path': str(f), 'name': f.name} for f in PATH_BATCH_AUDIO_LIST2[uid]]
-        # Store in the global batch audio state
         BATCH_AUDIO_LIST1[uid] = list1_dicts
         BATCH_AUDIO_LIST2[uid] = list2_dicts
-        # Set state to mapping and trigger UI
         BATCH_AUDIO_STATE[uid] = 'mapping'
-        # Show mapping UI as in text_handler
         def chunk_and_send(lst, title):
             chunks = []
             curr = f"**{title}:**\n"
@@ -3328,15 +3366,18 @@ async def path_done_cb(c, cb):
             "‣ Click Upload All or send custom string.",
             reply_markup=keyboard
         )
-        # Clear path mode and lists
         PATH_MODE_SELECTION.pop(uid, None)
         PATH_BATCH_AUDIO_LIST1.pop(uid, None)
         PATH_BATCH_AUDIO_LIST2.pop(uid, None)
         PATH_BATCH_AUDIO_STAGE.pop(uid, None)
+        # Delete path UI
+        if uid in NAV_PATHS and 'msg_id' in NAV_PATHS[uid]:
+            try:
+                await c.delete_messages(cb.message.chat.id, NAV_PATHS[uid]['msg_id'])
+            except:
+                pass
+            NAV_PATHS.pop(uid, None)
         await cb.answer("Batch audio started.", show_alert=False)
-        # Refresh path UI
-        if uid in NAV_PATHS:
-            await send_path_ui(c, cb.message.chat.id, uid, msg_id=cb.message.id, page=NAV_PATHS[uid]['page'])
     elif mode == 'zip':
         if uid not in PATH_ZIP_LISTS or not any(PATH_ZIP_LISTS[uid]):
             await cb.answer("ZIP lists are empty.", show_alert=True)
@@ -3344,30 +3385,39 @@ async def path_done_cb(c, cb):
         # Start sequential upload of all lists
         all_lists = PATH_ZIP_LISTS[uid]
         total_files = sum(len(lst) for lst in all_lists)
-        await cb.message.reply_text(f"Starting upload of {total_files} files across {len(all_lists)} lists...")
+        status_msg = await cb.message.reply_text(f"Starting upload of {total_files} files across {len(all_lists)} lists...")
+        # Auto-delete status after 5 seconds? User wants some messages to stay, but this one is okay to delete? They said "Starting upload of 6 files across 1 lists... এই ধরনের মেসেজ থাকবে এগুলো কে delete করবে না" – they want to keep this message. So we won't delete it.
         for list_idx, file_list in enumerate(all_lists):
             if not file_list:
                 continue
             await cb.message.reply_text(f"Uploading list {list_idx+1}/{len(all_lists)} ({len(file_list)} files)...")
             await process_path_uploads(uid, c, cb.message, file_list)
-        # Clear mode and lists
         PATH_MODE_SELECTION.pop(uid, None)
         PATH_ZIP_LISTS.pop(uid, None)
         PATH_ZIP_CURRENT_LIST.pop(uid, None)
         await cb.message.reply_text("All ZIP lists uploaded.")
-        # Refresh path UI
-        if uid in NAV_PATHS:
-            await send_path_ui(c, cb.message.chat.id, uid, msg_id=cb.message.id, page=NAV_PATHS[uid]['page'])
-        await cb.answer()
+        # Delete path UI
+        if uid in NAV_PATHS and 'msg_id' in NAV_PATHS[uid]:
+            try:
+                await c.delete_messages(cb.message.chat.id, NAV_PATHS[uid]['msg_id'])
+            except:
+                pass
+            NAV_PATHS.pop(uid, None)
+        await cb.answer("ZIP upload completed.", show_alert=False)
 
-# Updated text_handler path section (modified)
-# We'll modify the part inside text_handler where uid in NAV_PATHS
-# We'll also handle 'path' and 'p' commands to initialize NAV_PATHS
-# Also handle folder selection to open in same message
-# And delete user selection messages
-# We'll add the 'next list' command for batch_audio (since it's needed)
-# And handle 'close' etc.
-# We'll insert the updated code in the text_handler function
+@app.on_callback_query(filters.regex(r"^path_close_"))
+async def path_close_cb(c, cb):
+    uid = int(cb.data.split('_')[2])
+    if uid != cb.from_user.id:
+        await cb.answer("Not your session.", show_alert=True)
+        return
+    if uid in NAV_PATHS:
+        try:
+            await c.delete_messages(cb.message.chat.id, NAV_PATHS[uid]['msg_id'])
+        except:
+            pass
+        NAV_PATHS.pop(uid, None)
+    await cb.answer("File Manager closed.", show_alert=False)
 
 # --- CONVERT MODE LOGIC (UPDATED) ---
 async def process_convert_queue_worker(uid, client):
@@ -3881,22 +3931,28 @@ async def text_handler(c, m: Message):
             pass
         
         if text_lower == 'close':
-            NAV_PATHS.pop(uid)
+            # Close via callback already exists, but we also support text command
+            if uid in NAV_PATHS:
+                try:
+                    await c.delete_messages(m.chat.id, NAV_PATHS[uid]['msg_id'])
+                except:
+                    pass
+                NAV_PATHS.pop(uid, None)
             await m.reply_text("File Manager closed.")
             return
         if text_lower == 'np':
             page = NAV_PATHS[uid].get('page', 0) + 1
-            await send_path_ui(c, m.chat.id, uid, msg_id=None, page=page)
+            await send_path_ui(c, m.chat.id, uid, msg_id=NAV_PATHS[uid].get('msg_id'), page=page)
             return
         if text_lower == 'pp':
             page = max(0, NAV_PATHS[uid].get('page', 0) - 1)
-            await send_path_ui(c, m.chat.id, uid, msg_id=None, page=page)
+            await send_path_ui(c, m.chat.id, uid, msg_id=NAV_PATHS[uid].get('msg_id'), page=page)
             return
         if text_lower == 'b':
             current = NAV_PATHS[uid]['current']
             if current != TMP:
                 NAV_PATHS[uid]['current'] = current.parent
-            await send_path_ui(c, m.chat.id, uid, msg_id=None, page=0)
+            await send_path_ui(c, m.chat.id, uid, msg_id=NAV_PATHS[uid].get('msg_id'), page=0)
             return
             
         is_delete = text_lower.startswith('d ')
@@ -3946,7 +4002,7 @@ async def text_handler(c, m: Message):
                 selected_item = items[idx]
                 if selected_item.is_dir():
                     NAV_PATHS[uid]['current'] = selected_item
-                    await send_path_ui(c, m.chat.id, uid, msg_id=None, page=0)
+                    await send_path_ui(c, m.chat.id, uid, msg_id=NAV_PATHS[uid].get('msg_id'), page=0)
                     return
                     
             files_to_process = []
@@ -3962,7 +4018,7 @@ async def text_handler(c, m: Message):
                             else: f.unlink(missing_ok=True)
                         except: pass
                     await m.reply_text(f"Deleted {len(files_to_process)} items.")
-                    await send_path_ui(c, m.chat.id, uid, msg_id=None, page=NAV_PATHS[uid].get('page', 0))
+                    await send_path_ui(c, m.chat.id, uid, msg_id=NAV_PATHS[uid].get('msg_id'), page=NAV_PATHS[uid].get('page', 0))
                 elif is_link:
                     link_text = "**Direct Download Links:**\n"
                     for f in files_to_process:
@@ -3984,7 +4040,7 @@ async def text_handler(c, m: Message):
                                 renamed_count += 1
                             except: pass
                     await m.reply_text(f"Renamed {renamed_count} files based on saved format.")
-                    await send_path_ui(c, m.chat.id, uid, msg_id=None, page=NAV_PATHS[uid].get('page', 0))
+                    await send_path_ui(c, m.chat.id, uid, msg_id=NAV_PATHS[uid].get('msg_id'), page=NAV_PATHS[uid].get('page', 0))
                 elif is_extract:
                     for f in files_to_process:
                         if is_archive_file(f):
@@ -4031,12 +4087,19 @@ async def text_handler(c, m: Message):
                                     PATH_ZIP_LISTS[uid][current_list_idx].append(f)
                             await m.reply_text(f"Added {len([f for f in files_to_process if f.is_file()])} files to current ZIP list.")
                         # Refresh UI
-                        await send_path_ui(c, m.chat.id, uid, msg_id=None, page=NAV_PATHS[uid]['page'])
+                        await send_path_ui(c, m.chat.id, uid, msg_id=NAV_PATHS[uid].get('msg_id'), page=NAV_PATHS[uid]['page'])
                     else:
                         # No mode: upload directly
                         file_uploads = [f for f in files_to_process if f.is_file()]
                         await m.reply_text(f"Starting upload for {len(file_uploads)} selected files from path...")
                         asyncio.create_task(process_path_uploads(uid, c, m, file_uploads))
+                        # Delete path UI after starting upload
+                        if uid in NAV_PATHS and 'msg_id' in NAV_PATHS[uid]:
+                            try:
+                                await c.delete_messages(m.chat.id, NAV_PATHS[uid]['msg_id'])
+                            except:
+                                pass
+                            NAV_PATHS.pop(uid, None)
                 return
 
     if uid in DOWNLOAD_ONLY_MODE:
