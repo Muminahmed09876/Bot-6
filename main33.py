@@ -117,7 +117,7 @@ TMP.mkdir(parents=True, exist_ok=True)
 # state
 USER_THUMBS = {}
 TASKS = {}
-USER_TASK_EVENTS = {} # New: uid -> {msg_id: cancel_event} for specific task cancel
+USER_TASK_EVENTS = {} # New: uid -> {msg_id -> cancel_event} for specific task cancel
 SET_THUMB_REQUEST = set()
 SET_CAPTION_REQUEST = set()
 SET_FILENAME_REQUEST = set() # New for filename
@@ -222,10 +222,15 @@ UPLOAD_DRIVE_MODE = set()
 MISSING_EXT_QUEUE = {} # uid -> list of dicts waiting for extension selection
 # ---------------------------------------------
 
-# ===== NEW STATE FOR DRIVE MODE =====
-DRIVE_MODE = set()               # uid -> drive mode active
-DRIVE_SESSION = {}               # uid -> {'current_path': str, 'page': int, 'items': list, 'garbage_msgs': list}
-# ====================================
+# --- NEW STATE FOR PATH MODE SELECTION ---
+PATH_MODE_SELECTION = {}          # uid -> 'convert', 'batch_audio', 'zip' or None
+PATH_CONVERT_LIST = {}            # uid -> list of file paths (convert batch)
+PATH_BATCH_AUDIO_LIST1 = {}       # uid -> list of file paths (list 1)
+PATH_BATCH_AUDIO_LIST2 = {}       # uid -> list of file paths (list 2)
+PATH_BATCH_AUDIO_STAGE = {}       # uid -> 1 or 2
+PATH_ZIP_LISTS = {}               # uid -> list of lists (each list is files to upload)
+PATH_ZIP_CURRENT_LIST = {}        # uid -> index of current list being filled
+# ---------------------------------------------
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", ""))
 MAX_SIZE = 1000 * 1024 * 1024 * 1024 # Increased to 1000GB
@@ -326,7 +331,7 @@ async def send_mode_tutorial(c, chat_id, mode_name):
             "**কীভাবে ব্যবহার করবেন:**\n"
             "‣ `link` পাঠালে ডাউনলোডের পর ডাইরেক্ট ডাউনলোড লিঙ্ক দেবে।\n"
             "‣ `t` পাঠালে ডাউনলোড না করেই সরাসরি Stream/Direct Link দেবে (দুটি লিঙ্ক থাকবে: ডাউনলোড এবং প্লে করার জন্য)।\n"
-            "‣ `off` লিখে নরমাল ডাউনलोড মোডে ফিরে যান।"
+            "‣ `off` লিখে নরমাল ডাউনলোড মোডে ফিরে যান।"
         ),
         "batch_audio_add": (
             "🎵 **Batch Audio Add Mode - Tutorial**\n\n"
@@ -1248,8 +1253,7 @@ async def set_bot_commands():
         BotCommand("continue", "Resume paused queue / Restore buttons"),
         BotCommand("restart", "Show Storage info and Clear Data"),
         BotCommand("check", "Check ping status and connectivity"),
-        BotCommand("help", "Help"),
-        BotCommand("drive", "Browse and upload files from Google Drive (admin only)")  # Added
+        BotCommand("help", "Help")
     ]
     try:
         await app.set_bot_commands(cmds)
@@ -1784,8 +1788,7 @@ async def start_handler(c, m: Message):
         "/continue - Resume paused queue / Restore buttons\n"
         "/restart - Show Storage info and Clear Data\n"
         "/check - Check ping status and connectivity\n"
-        "/help - Help\n"
-        "/drive - Browse and upload files from Google Drive (admin only)"
+        "/help - Help"
     )
     await m.reply_text(text)
 
@@ -1880,8 +1883,6 @@ async def full_reset_bot_cb(c, cb):
     DOWNLOAD_T_MODE.clear()
     UPLOAD_DRIVE_MODE.clear()
     MISSING_EXT_QUEUE.clear()
-    DRIVE_MODE.clear()
-    DRIVE_SESSION.clear()
     
     if uid in USER_QUEUES:
         while not USER_QUEUES[uid].empty():
@@ -1923,6 +1924,13 @@ async def full_reset_bot_cb(c, cb):
     YT_SESSIONS.clear()
     YT_DLP_MODE.clear()
     SAVED_YT_QUALITIES.clear()
+    PATH_MODE_SELECTION.clear()
+    PATH_CONVERT_LIST.clear()
+    PATH_BATCH_AUDIO_LIST1.clear()
+    PATH_BATCH_AUDIO_LIST2.clear()
+    PATH_BATCH_AUDIO_STAGE.clear()
+    PATH_ZIP_LISTS.clear()
+    PATH_ZIP_CURRENT_LIST.clear()
     
     # Clear Files
     shutil.rmtree(TMP, ignore_errors=True)
@@ -2344,7 +2352,7 @@ async def toggle_create_post_mode(c, m: Message):
         await m.reply_text("You are not authorized to use this command.")
         return
 
-    if uid in CREATE_POST_MODE:
+    if uid in CREATE_POST_MODE):
         CREATE_POST_MODE.discard(uid)
         if uid in POST_CREATION_STATE:
             state_data = POST_CREATION_STATE.pop(uid)
@@ -2602,8 +2610,7 @@ async def check_and_show_next_zip(c, chat_id, uid):
             'root_dir': next_zip['root_dir'],
             'files_to_upload': next_zip['files_to_upload'],
             'state': 'awaiting_selection',
-            'garbage_msgs': [],
-            'source': next_zip.get('source')
+            'garbage_msgs': []
         }
         
         if uid in AUTO_UPLOAD_ALL:
@@ -2712,12 +2719,7 @@ async def process_zip_uploads(c, message_or_chat_id, uid, final_order):
             try: await msg_obj.delete()
             except: pass
         asyncio.ensure_future(auto_delete(complete_msg))
-        
-        # ===== DRIVE MODE REFRESH: if drive mode active and no more zip sessions, show drive UI =====
-        if uid in DRIVE_MODE and uid in DRIVE_SESSION:
-            if uid not in ZIP_NAV_STATE and not ZIP_READY_LIST.get(uid):
-                await send_drive_ui(c, chat_id, uid)
-        # =========================================================================================
+        await check_and_show_next_zip(c, chat_id, uid)
 
 @app.on_callback_query(filters.regex("zip_upload_all"))
 async def zip_upload_all_cb(c, cb):
@@ -2753,8 +2755,7 @@ def is_archive_file(filepath: Path) -> bool:
     except: pass
     return False
 
-# === MODIFIED: execute_zip_download_and_extract now accepts 'source' parameter ===
-async def execute_zip_download_and_extract(c, m, url=None, local_path=None, target_list=None, is_dl_only=False, source=None):
+async def execute_zip_download_and_extract(c, m, url=None, local_path=None, target_list=None, is_dl_only=False):
     uid = m.from_user.id
     status_msg = await c.send_message(m.chat.id, "Downloading Queue Item..." if url else "Processing Local Archive...", reply_markup=progress_keyboard())
     
@@ -2813,8 +2814,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                 return
             ZIP_READY_LIST.setdefault(uid, []).append({
                 'root_dir': None,
-                'files_to_upload': [tmp_in],
-                'source': source
+                'files_to_upload': [tmp_in]
             })
             await check_and_show_next_zip(c, m.chat.id, uid)
             return
@@ -2877,8 +2877,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
                 return
             ZIP_READY_LIST.setdefault(uid, []).append({
                 'root_dir': None,
-                'files_to_upload': [tmp_in],
-                'source': source
+                'files_to_upload': [tmp_in]
             })
             await check_and_show_next_zip(c, m.chat.id, uid)
             return
@@ -2959,8 +2958,7 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
 
         ZIP_READY_LIST.setdefault(uid, []).append({
             'root_dir': ext_dir,
-            'files_to_upload': all_files,
-            'source': source
+            'files_to_upload': all_files
         })
         await check_and_show_next_zip(c, m.chat.id, uid)
         
@@ -3031,7 +3029,7 @@ async def send_batch_audio_list_page(c, chat_id, uid, list_id, page=0, msg_id=No
 # ----------------------------------------
 
 
-# --- PATH NAVIGATOR FUNCTIONS ---
+# --- PATH NAVIGATOR FUNCTIONS (UPDATED) ---
 async def send_path_ui(c, chat_id, uid, msg_id=None, page=0):
     current = NAV_PATHS[uid]['current']
     try:
@@ -3076,13 +3074,46 @@ async def send_path_ui(c, chat_id, uid, msg_id=None, page=0):
     
     full_text = "\n".join(text_lines)
     
+    # Build keyboard with page nav and mode buttons
+    keyboard = []
+    # Page nav row
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"path_page_{uid}_{page-1}"))
+    nav_row.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="ignore"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("Next ➡️", callback_data=f"path_page_{uid}_{page+1}"))
+    keyboard.append(nav_row)
+    
+    # Back button
+    keyboard.append([InlineKeyboardButton("⬆️ Back", callback_data=f"path_back_{uid}")])
+    
+    # Mode selection buttons (exclusive)
+    mode_convert = PATH_MODE_SELECTION.get(uid) == 'convert'
+    mode_batch_audio = PATH_MODE_SELECTION.get(uid) == 'batch_audio'
+    mode_zip = PATH_MODE_SELECTION.get(uid) == 'zip'
+    
+    keyboard.append([
+        InlineKeyboardButton(f"{'✅ ' if mode_convert else ''}Convert", callback_data=f"path_mode_{uid}_convert"),
+        InlineKeyboardButton(f"{'✅ ' if mode_batch_audio else ''}BatchAudio", callback_data=f"path_mode_{uid}_batch_audio"),
+        InlineKeyboardButton(f"{'✅ ' if mode_zip else ''}ZIP Upload", callback_data=f"path_mode_{uid}_zip")
+    ])
+    
+    # All Select and Done
+    keyboard.append([
+        InlineKeyboardButton("All Select", callback_data=f"path_all_{uid}"),
+        InlineKeyboardButton("Done", callback_data=f"path_done_{uid}")
+    ])
+    
+    markup = InlineKeyboardMarkup(keyboard)
+    
     chunks = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
     for idx, chunk in enumerate(chunks):
         if msg_id and idx == 0:
-            try: await c.edit_message_text(chat_id, msg_id, chunk)
-            except: await c.send_message(chat_id, chunk)
+            try: await c.edit_message_text(chat_id, msg_id, chunk, reply_markup=markup)
+            except: await c.send_message(chat_id, chunk, reply_markup=markup if idx==0 else None)
         else:
-            await c.send_message(chat_id, chunk)
+            await c.send_message(chat_id, chunk, reply_markup=markup if idx==0 else None)
 
 async def process_path_uploads(uid, c, m, files_to_upload):
     for fpath in files_to_upload:
@@ -3106,7 +3137,237 @@ async def process_path_uploads(uid, c, m, files_to_upload):
             await c.send_message(m.chat.id, f"Upload Failed: {e}\nQueue Paused.", reply_markup=markup)
     await c.send_message(m.chat.id, "Path selected files queued/uploaded successfully.")
 
-# ----------------------------------------
+# --- New callbacks for path UI ---
+@app.on_callback_query(filters.regex(r"^path_page_"))
+async def path_page_cb(c, cb):
+    uid = int(cb.data.split('_')[2])
+    page = int(cb.data.split('_')[3])
+    if uid != cb.from_user.id:
+        await cb.answer("Not your session.", show_alert=True)
+        return
+    if uid in NAV_PATHS:
+        await send_path_ui(c, cb.message.chat.id, uid, msg_id=cb.message.id, page=page)
+        await cb.answer()
+
+@app.on_callback_query(filters.regex(r"^path_back_"))
+async def path_back_cb(c, cb):
+    uid = int(cb.data.split('_')[2])
+    if uid != cb.from_user.id:
+        await cb.answer("Not your session.", show_alert=True)
+        return
+    if uid in NAV_PATHS:
+        current = NAV_PATHS[uid]['current']
+        if current != TMP:
+            NAV_PATHS[uid]['current'] = current.parent
+        await send_path_ui(c, cb.message.chat.id, uid, msg_id=cb.message.id, page=0)
+        await cb.answer()
+
+@app.on_callback_query(filters.regex(r"^path_mode_"))
+async def path_mode_cb(c, cb):
+    uid = int(cb.data.split('_')[2])
+    mode = cb.data.split('_')[3]
+    if uid != cb.from_user.id:
+        await cb.answer("Not your session.", show_alert=True)
+        return
+    # Toggle exclusive mode
+    current = PATH_MODE_SELECTION.get(uid)
+    if current == mode:
+        # Unselect
+        PATH_MODE_SELECTION.pop(uid, None)
+        # Clear associated lists
+        PATH_CONVERT_LIST.pop(uid, None)
+        PATH_BATCH_AUDIO_LIST1.pop(uid, None)
+        PATH_BATCH_AUDIO_LIST2.pop(uid, None)
+        PATH_BATCH_AUDIO_STAGE.pop(uid, None)
+        PATH_ZIP_LISTS.pop(uid, None)
+        PATH_ZIP_CURRENT_LIST.pop(uid, None)
+        await cb.answer(f"{mode} unselected.", show_alert=False)
+    else:
+        # Select new mode, clear previous
+        PATH_MODE_SELECTION[uid] = mode
+        if mode == 'convert':
+            PATH_CONVERT_LIST[uid] = []
+        elif mode == 'batch_audio':
+            PATH_BATCH_AUDIO_LIST1[uid] = []
+            PATH_BATCH_AUDIO_LIST2[uid] = []
+            PATH_BATCH_AUDIO_STAGE[uid] = 1
+        elif mode == 'zip':
+            PATH_ZIP_LISTS[uid] = [[]]
+            PATH_ZIP_CURRENT_LIST[uid] = 0
+        await cb.answer(f"{mode} selected.", show_alert=False)
+    # Refresh UI
+    await send_path_ui(c, cb.message.chat.id, uid, msg_id=cb.message.id, page=NAV_PATHS[uid]['page'])
+
+@app.on_callback_query(filters.regex(r"^path_all_"))
+async def path_all_cb(c, cb):
+    uid = int(cb.data.split('_')[2])
+    if uid != cb.from_user.id:
+        await cb.answer("Not your session.", show_alert=True)
+        return
+    if uid not in NAV_PATHS:
+        await cb.answer("No active path.", show_alert=True)
+        return
+    # Get all files in current directory (all pages)
+    current = NAV_PATHS[uid]['current']
+    all_files = [f for f in current.iterdir() if f.is_file()]
+    if not all_files:
+        await cb.answer("No files in this directory.", show_alert=True)
+        return
+    
+    mode = PATH_MODE_SELECTION.get(uid)
+    if mode == 'convert':
+        # Add all files to convert list
+        if uid not in PATH_CONVERT_LIST:
+            PATH_CONVERT_LIST[uid] = []
+        for f in all_files:
+            PATH_CONVERT_LIST[uid].append(f)
+        await cb.answer(f"Added {len(all_files)} files to Convert list.", show_alert=False)
+    elif mode == 'batch_audio':
+        stage = PATH_BATCH_AUDIO_STAGE.get(uid, 1)
+        if stage == 1:
+            if uid not in PATH_BATCH_AUDIO_LIST1:
+                PATH_BATCH_AUDIO_LIST1[uid] = []
+            for f in all_files:
+                PATH_BATCH_AUDIO_LIST1[uid].append(f)
+            await cb.answer(f"Added {len(all_files)} files to List 1.", show_alert=False)
+        else:
+            if uid not in PATH_BATCH_AUDIO_LIST2:
+                PATH_BATCH_AUDIO_LIST2[uid] = []
+            for f in all_files:
+                PATH_BATCH_AUDIO_LIST2[uid].append(f)
+            await cb.answer(f"Added {len(all_files)} files to List 2.", show_alert=False)
+    elif mode == 'zip':
+        # Add to current zip list
+        if uid not in PATH_ZIP_LISTS or not PATH_ZIP_LISTS[uid]:
+            PATH_ZIP_LISTS[uid] = [[]]
+            PATH_ZIP_CURRENT_LIST[uid] = 0
+        current_list_idx = PATH_ZIP_CURRENT_LIST[uid]
+        for f in all_files:
+            PATH_ZIP_LISTS[uid][current_list_idx].append(f)
+        await cb.answer(f"Added {len(all_files)} files to current ZIP list.", show_alert=False)
+    else:
+        # No mode: directly upload all files
+        await process_path_uploads(uid, c, cb.message, all_files)
+        await cb.answer("Uploading all files...", show_alert=False)
+    # Refresh UI
+    await send_path_ui(c, cb.message.chat.id, uid, msg_id=cb.message.id, page=NAV_PATHS[uid]['page'])
+
+@app.on_callback_query(filters.regex(r"^path_done_"))
+async def path_done_cb(c, cb):
+    uid = int(cb.data.split('_')[2])
+    if uid != cb.from_user.id:
+        await cb.answer("Not your session.", show_alert=True)
+        return
+    mode = PATH_MODE_SELECTION.get(uid)
+    if not mode:
+        await cb.answer("No mode selected. Please select a mode first.", show_alert=True)
+        return
+    if mode == 'convert':
+        if uid not in PATH_CONVERT_LIST or not PATH_CONVERT_LIST[uid]:
+            await cb.answer("Convert list is empty.", show_alert=True)
+            return
+        # Start convert tool with the list
+        # We'll reuse the existing convert logic but with a batch list
+        # We need to create a session and trigger the UI
+        # For simplicity, we'll take the first file and pass the list as batch
+        first_file = PATH_CONVERT_LIST[uid][0]
+        batch_files = [{'path': str(f), 'name': f.name} for f in PATH_CONVERT_LIST[uid]]
+        # We'll create a fake message to pass
+        # Use the callback message as source
+        await handle_convert_input(c, cb.message, override_path=str(first_file), batch_list=batch_files)
+        await cb.answer("Convert started.", show_alert=False)
+        # Clear the list and unselect mode? Actually, we'll let the convert process auto-off after completion, but we can clear now
+        PATH_MODE_SELECTION.pop(uid, None)
+        PATH_CONVERT_LIST.pop(uid, None)
+        # Refresh path UI
+        if uid in NAV_PATHS:
+            await send_path_ui(c, cb.message.chat.id, uid, msg_id=cb.message.id, page=NAV_PATHS[uid]['page'])
+    elif mode == 'batch_audio':
+        if uid not in PATH_BATCH_AUDIO_LIST1 or not PATH_BATCH_AUDIO_LIST1[uid]:
+            await cb.answer("List 1 is empty.", show_alert=True)
+            return
+        if uid not in PATH_BATCH_AUDIO_LIST2 or not PATH_BATCH_AUDIO_LIST2[uid]:
+            await cb.answer("List 2 is empty. Use 'Next List' to switch to List 2 and add files.", show_alert=True)
+            return
+        # Start batch audio
+        # We need to create the necessary state structures as in batch_audio mode
+        # We'll use the existing BATCH_AUDIO_LIST1/2 but we need to populate them with paths
+        # But we already have PATH_BATCH_AUDIO_LIST1/2 which are lists of Path objects
+        # We'll convert them to dicts with path and name
+        list1_dicts = [{'path': str(f), 'name': f.name} for f in PATH_BATCH_AUDIO_LIST1[uid]]
+        list2_dicts = [{'path': str(f), 'name': f.name} for f in PATH_BATCH_AUDIO_LIST2[uid]]
+        # Store in the global batch audio state
+        BATCH_AUDIO_LIST1[uid] = list1_dicts
+        BATCH_AUDIO_LIST2[uid] = list2_dicts
+        # Set state to mapping and trigger UI
+        BATCH_AUDIO_STATE[uid] = 'mapping'
+        # Show mapping UI as in text_handler
+        def chunk_and_send(lst, title):
+            chunks = []
+            curr = f"**{title}:**\n"
+            for i, p in enumerate(lst):
+                line = f"{i+1}. {p['name']}\n"
+                if len(curr) + len(line) > 3500:
+                    chunks.append(curr)
+                    curr = f"**{title} (Cont):**\n"
+                curr += line
+            if curr: chunks.append(curr)
+            return chunks
+        list1_chunks = chunk_and_send(list1_dicts, "List 1 (Base Videos)")
+        list2_chunks = chunk_and_send(list2_dicts, "List 2 (Audio Sources)")
+        for c_msg in list1_chunks: await cb.message.reply_text(c_msg)
+        for c_msg in list2_chunks: await cb.message.reply_text(c_msg)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Upload All 🚀", callback_data="baud_list_ok")],
+            [InlineKeyboardButton("Cancel ❌", callback_data="baud_list_cancel")]
+        ])
+        await cb.message.reply_text(
+            "**Mapping Rules:**\n"
+            "‣ Default matches 1 to 1, 2 to 2.\n"
+            "‣ Custom mapping: send `1-13=1-13, 14=16, 15=14`\n"
+            "‣ Click Upload All or send custom string.",
+            reply_markup=keyboard
+        )
+        # Clear path mode and lists
+        PATH_MODE_SELECTION.pop(uid, None)
+        PATH_BATCH_AUDIO_LIST1.pop(uid, None)
+        PATH_BATCH_AUDIO_LIST2.pop(uid, None)
+        PATH_BATCH_AUDIO_STAGE.pop(uid, None)
+        await cb.answer("Batch audio started.", show_alert=False)
+        # Refresh path UI
+        if uid in NAV_PATHS:
+            await send_path_ui(c, cb.message.chat.id, uid, msg_id=cb.message.id, page=NAV_PATHS[uid]['page'])
+    elif mode == 'zip':
+        if uid not in PATH_ZIP_LISTS or not any(PATH_ZIP_LISTS[uid]):
+            await cb.answer("ZIP lists are empty.", show_alert=True)
+            return
+        # Start sequential upload of all lists
+        all_lists = PATH_ZIP_LISTS[uid]
+        total_files = sum(len(lst) for lst in all_lists)
+        await cb.message.reply_text(f"Starting upload of {total_files} files across {len(all_lists)} lists...")
+        for list_idx, file_list in enumerate(all_lists):
+            if not file_list:
+                continue
+            await cb.message.reply_text(f"Uploading list {list_idx+1}/{len(all_lists)} ({len(file_list)} files)...")
+            await process_path_uploads(uid, c, cb.message, file_list)
+        # Clear mode and lists
+        PATH_MODE_SELECTION.pop(uid, None)
+        PATH_ZIP_LISTS.pop(uid, None)
+        PATH_ZIP_CURRENT_LIST.pop(uid, None)
+        await cb.message.reply_text("All ZIP lists uploaded.")
+        # Refresh path UI
+        if uid in NAV_PATHS:
+            await send_path_ui(c, cb.message.chat.id, uid, msg_id=cb.message.id, page=NAV_PATHS[uid]['page'])
+        await cb.answer()
+
+# Updated text_handler path section (modified)
+# We'll modify the part inside text_handler where uid in NAV_PATHS
+# We'll also handle 'path' and 'p' commands to initialize NAV_PATHS
+# Also handle folder selection to open in same message
+# And delete user selection messages
+# We'll add the 'next list' command for batch_audio (since it's needed)
+# And handle 'close' etc.
+# We'll insert the updated code in the text_handler function
 
 # --- CONVERT MODE LOGIC (UPDATED) ---
 async def process_convert_queue_worker(uid, client):
@@ -3463,13 +3724,6 @@ async def text_handler(c, m: Message):
     uid = m.from_user.id
     if not is_admin(uid):
         return
-    
-    # ===== DRIVE MODE HANDLING (highest priority) =====
-    if uid in DRIVE_MODE:
-        await handle_drive_text(c, m, uid)
-        return
-    # =================================================
-
     text = m.text.strip()
     
     if uid in SET_FILENAME_REQUEST:
@@ -3507,7 +3761,7 @@ async def text_handler(c, m: Message):
             await send_batch_audio_list_page(c, m.chat.id, uid, 'convert', 0)
             return
 
-    if text_lower == "path":
+    if text_lower in ["path", "p"]:
         NAV_PATHS[uid] = {"current": TMP, "items": [], "page": 0}
         await send_path_ui(c, m.chat.id, uid, page=0)
         return
@@ -3620,23 +3874,29 @@ async def text_handler(c, m: Message):
             return
     
     if uid in NAV_PATHS:
+        # Delete user's selection message to keep chat clean
+        try:
+            await m.delete()
+        except:
+            pass
+        
         if text_lower == 'close':
             NAV_PATHS.pop(uid)
             await m.reply_text("File Manager closed.")
             return
         if text_lower == 'np':
             page = NAV_PATHS[uid].get('page', 0) + 1
-            await send_path_ui(c, m.chat.id, uid, page=page)
+            await send_path_ui(c, m.chat.id, uid, msg_id=None, page=page)
             return
         if text_lower == 'pp':
             page = max(0, NAV_PATHS[uid].get('page', 0) - 1)
-            await send_path_ui(c, m.chat.id, uid, page=page)
+            await send_path_ui(c, m.chat.id, uid, msg_id=None, page=page)
             return
         if text_lower == 'b':
             current = NAV_PATHS[uid]['current']
             if current != TMP:
                 NAV_PATHS[uid]['current'] = current.parent
-            await send_path_ui(c, m.chat.id, uid, page=0)
+            await send_path_ui(c, m.chat.id, uid, msg_id=None, page=0)
             return
             
         is_delete = text_lower.startswith('d ')
@@ -3686,7 +3946,7 @@ async def text_handler(c, m: Message):
                 selected_item = items[idx]
                 if selected_item.is_dir():
                     NAV_PATHS[uid]['current'] = selected_item
-                    await send_path_ui(c, m.chat.id, uid, page=0)
+                    await send_path_ui(c, m.chat.id, uid, msg_id=None, page=0)
                     return
                     
             files_to_process = []
@@ -3702,7 +3962,7 @@ async def text_handler(c, m: Message):
                             else: f.unlink(missing_ok=True)
                         except: pass
                     await m.reply_text(f"Deleted {len(files_to_process)} items.")
-                    await send_path_ui(c, m.chat.id, uid, page=NAV_PATHS[uid].get('page', 0))
+                    await send_path_ui(c, m.chat.id, uid, msg_id=None, page=NAV_PATHS[uid].get('page', 0))
                 elif is_link:
                     link_text = "**Direct Download Links:**\n"
                     for f in files_to_process:
@@ -3724,7 +3984,7 @@ async def text_handler(c, m: Message):
                                 renamed_count += 1
                             except: pass
                     await m.reply_text(f"Renamed {renamed_count} files based on saved format.")
-                    await send_path_ui(c, m.chat.id, uid, page=NAV_PATHS[uid].get('page', 0))
+                    await send_path_ui(c, m.chat.id, uid, msg_id=None, page=NAV_PATHS[uid].get('page', 0))
                 elif is_extract:
                     for f in files_to_process:
                         if is_archive_file(f):
@@ -3734,9 +3994,49 @@ async def text_handler(c, m: Message):
                     if uid not in ZIP_DL_WORKERS or ZIP_DL_WORKERS[uid].done():
                         ZIP_DL_WORKERS[uid] = asyncio.create_task(zip_download_worker(uid, c))
                 else:
-                    file_uploads = [f for f in files_to_process if f.is_file()]
-                    await m.reply_text(f"Starting upload for {len(file_uploads)} selected files from path...")
-                    asyncio.create_task(process_path_uploads(uid, c, m, file_uploads))
+                    # Check if a mode is selected
+                    mode = PATH_MODE_SELECTION.get(uid)
+                    if mode:
+                        # Add files to the appropriate list
+                        if mode == 'convert':
+                            if uid not in PATH_CONVERT_LIST:
+                                PATH_CONVERT_LIST[uid] = []
+                            for f in files_to_process:
+                                if f.is_file():
+                                    PATH_CONVERT_LIST[uid].append(f)
+                            await m.reply_text(f"Added {len([f for f in files_to_process if f.is_file()])} files to Convert list.")
+                        elif mode == 'batch_audio':
+                            stage = PATH_BATCH_AUDIO_STAGE.get(uid, 1)
+                            if stage == 1:
+                                if uid not in PATH_BATCH_AUDIO_LIST1:
+                                    PATH_BATCH_AUDIO_LIST1[uid] = []
+                                for f in files_to_process:
+                                    if f.is_file():
+                                        PATH_BATCH_AUDIO_LIST1[uid].append(f)
+                                await m.reply_text(f"Added {len([f for f in files_to_process if f.is_file()])} files to List 1.")
+                            else:
+                                if uid not in PATH_BATCH_AUDIO_LIST2:
+                                    PATH_BATCH_AUDIO_LIST2[uid] = []
+                                for f in files_to_process:
+                                    if f.is_file():
+                                        PATH_BATCH_AUDIO_LIST2[uid].append(f)
+                                await m.reply_text(f"Added {len([f for f in files_to_process if f.is_file()])} files to List 2.")
+                        elif mode == 'zip':
+                            if uid not in PATH_ZIP_LISTS or not PATH_ZIP_LISTS[uid]:
+                                PATH_ZIP_LISTS[uid] = [[]]
+                                PATH_ZIP_CURRENT_LIST[uid] = 0
+                            current_list_idx = PATH_ZIP_CURRENT_LIST[uid]
+                            for f in files_to_process:
+                                if f.is_file():
+                                    PATH_ZIP_LISTS[uid][current_list_idx].append(f)
+                            await m.reply_text(f"Added {len([f for f in files_to_process if f.is_file()])} files to current ZIP list.")
+                        # Refresh UI
+                        await send_path_ui(c, m.chat.id, uid, msg_id=None, page=NAV_PATHS[uid]['page'])
+                    else:
+                        # No mode: upload directly
+                        file_uploads = [f for f in files_to_process if f.is_file()]
+                        await m.reply_text(f"Starting upload for {len(file_uploads)} selected files from path...")
+                        asyncio.create_task(process_path_uploads(uid, c, m, file_uploads))
                 return
 
     if uid in DOWNLOAD_ONLY_MODE:
@@ -6052,191 +6352,6 @@ async def check_cmd(c, m: Message):
     await m.reply_text(msg)
 # ================================================
 
-# ===== NEW: /drive command and drive mode functions =====
-@app.on_message(filters.command("drive") & filters.private)
-async def drive_cmd(c, m: Message):
-    logger.info("🚀 Drive command received from user %s", m.from_user.id)  # debug
-    uid = m.from_user.id
-    if not is_admin(uid):
-        await m.reply_text("You are not authorized.")
-        return
-    if uid in DRIVE_MODE:
-        await turn_off_drive_mode(c, m.chat.id, uid)
-    else:
-        DRIVE_MODE.add(uid)
-        DRIVE_SESSION[uid] = {
-            'current_path': "/content/drive/MyDrive",
-            'page': 0,
-            'garbage_msgs': [m.id]
-        }
-        await send_drive_ui(c, m.chat.id, uid)
-
-async def turn_off_drive_mode(c, chat_id, uid):
-    if uid in DRIVE_SESSION:
-        session = DRIVE_SESSION.pop(uid)
-        if session.get('garbage_msgs'):
-            try:
-                await c.delete_messages(chat_id, session['garbage_msgs'])
-            except:
-                pass
-    DRIVE_MODE.discard(uid)
-    # Clean drive-originated ZIP items from ZIP_READY_LIST
-    if uid in ZIP_READY_LIST:
-        new_list = []
-        for item in ZIP_READY_LIST[uid]:
-            if item.get('source') != 'drive':
-                new_list.append(item)
-            else:
-                if item.get('root_dir') and Path(item['root_dir']).exists():
-                    shutil.rmtree(item['root_dir'], ignore_errors=True)
-        if new_list:
-            ZIP_READY_LIST[uid] = new_list
-        else:
-            ZIP_READY_LIST.pop(uid, None)
-    if uid in ZIP_NAV_STATE and ZIP_NAV_STATE[uid].get('source') == 'drive':
-        ZIP_NAV_STATE.pop(uid, None)
-    await c.send_message(chat_id, "Drive Mode OFF.")
-
-async def send_drive_ui(c, chat_id, uid, msg_id=None, page=None):
-    if uid not in DRIVE_SESSION:
-        return
-    session = DRIVE_SESSION[uid]
-    current_path = Path(session['current_path'])
-    if page is None:
-        page = session.get('page', 0)
-    try:
-        items = list(current_path.iterdir())
-        items.sort(key=lambda x: (not x.is_dir(), x.name.lower()))
-    except:
-        items = []
-    session['items'] = items
-    session['page'] = page
-
-    per_page = 20
-    total_items = len(items)
-    total_pages = max(1, math.ceil(total_items / per_page))
-    if page >= total_pages:
-        page = total_pages - 1
-    if page < 0:
-        page = 0
-    session['page'] = page
-
-    start_idx = page * per_page
-    end_idx = min(start_idx + per_page, total_items)
-
-    text_lines = [f"**Drive File Manager (Page {page+1}/{total_pages})**\n**Current Path:** `{current_path}`\n"]
-    text_lines.append("**b.** ⬆️ Go Back (Up)")
-    text_lines.append("**close.** Exit Drive Mode")
-    for i in range(start_idx, end_idx):
-        item = items[i]
-        name = item.name
-        if item.is_dir():
-            text_lines.append(f"**{i+1}.** 📁 `{name}`")
-        else:
-            text_lines.append(f"**{i+1}.** 📄 `{name}`")
-    text_lines.append("\n**Options:**")
-    text_lines.append("‣ Send `b` to go back up.")
-    text_lines.append("‣ Send a number to open folder/select file (e.g., `1`).")
-    text_lines.append("‣ Send `1-3,5` to upload multiple files serially.")
-    text_lines.append("‣ Send `close` to exit drive mode.")
-    text_lines.append("‣ Send `np` or `pp` for Next/Prev Page.")
-
-    full_text = "\n".join(text_lines)
-    chunks = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
-
-    # Delete previous garbage messages
-    if session.get('garbage_msgs'):
-        try:
-            await c.delete_messages(chat_id, session['garbage_msgs'])
-        except:
-            pass
-    session['garbage_msgs'] = []
-
-    for idx, chunk in enumerate(chunks):
-        if msg_id and idx == 0:
-            try:
-                await c.edit_message_text(chat_id, msg_id, chunk)
-                session['garbage_msgs'].append(msg_id)
-            except:
-                new_msg = await c.send_message(chat_id, chunk)
-                session['garbage_msgs'].append(new_msg.id)
-        else:
-            new_msg = await c.send_message(chat_id, chunk)
-            session['garbage_msgs'].append(new_msg.id)
-
-async def handle_drive_text(c, m: Message, uid: int):
-    text = m.text.strip().lower()
-    session = DRIVE_SESSION.get(uid)
-    if not session:
-        await m.reply_text("Drive session not found.")
-        return
-    session.setdefault('garbage_msgs', []).append(m.id)
-
-    if text == 'close':
-        await turn_off_drive_mode(c, m.chat.id, uid)
-        return
-    if text == 'b':
-        current = Path(session['current_path'])
-        if current != Path("/content/drive/MyDrive"):
-            session['current_path'] = str(current.parent)
-        await send_drive_ui(c, m.chat.id, uid)
-        return
-    if text == 'np':
-        page = session.get('page', 0) + 1
-        await send_drive_ui(c, m.chat.id, uid, page=page)
-        return
-    if text == 'pp':
-        page = max(0, session.get('page', 0) - 1)
-        await send_drive_ui(c, m.chat.id, uid, page=page)
-        return
-
-    # Parse numbers / ranges
-    if text.replace(',', '').replace('-', '').isdigit():
-        indices = []
-        for part in text.split(','):
-            part = part.strip()
-            if '-' in part:
-                s, e = map(int, part.split('-'))
-                indices.extend(range(s-1, e))
-            else:
-                indices.append(int(part)-1)
-        items = session.get('items', [])
-        for idx in indices:
-            if 0 <= idx < len(items):
-                item = items[idx]
-                if item.is_dir():
-                    if len(indices) == 1:
-                        session['current_path'] = str(item)
-                        await send_drive_ui(c, m.chat.id, uid)
-                        return
-                    else:
-                        continue  # skip folders if multiple selection
-                else:
-                    await process_drive_file(c, m, uid, item)
-        # After processing, refresh the UI if still in drive mode
-        if uid in DRIVE_MODE:
-            await send_drive_ui(c, m.chat.id, uid)
-        return
-
-    await m.reply_text("Invalid command.")
-
-async def process_drive_file(c, m: Message, uid: int, file_path: Path):
-    if is_archive_file(file_path):
-        tmp_copy = TMP / f"drive_archive_{uid}_{int(time.time())}_{file_path.name}"
-        shutil.copy(file_path, tmp_copy)
-        await execute_zip_download_and_extract(c, m, local_path=str(tmp_copy), source='drive')
-    else:
-        tmp_copy = TMP / f"drive_file_{uid}_{int(time.time())}_{file_path.name}"
-        shutil.copy(file_path, tmp_copy)
-        original_name = file_path.name
-        renamed_file = get_dynamic_filename(uid, original_name)
-        cancel_event = asyncio.Event()
-        TASKS.setdefault(uid, []).append(cancel_event)
-        await sequential_upload_task(uid, c, m, tmp_copy, renamed_file, None, cancel_event,
-                                     default_caption=original_name, original_caption=original_name,
-                                     original_download_name=original_name)
-# ==========================================================================
-
 async def periodic_cleanup():
     while True:
         try:
@@ -6259,14 +6374,6 @@ if __name__ == "__main__":
     try:
         loop = asyncio.get_event_loop()
         loop.create_task(periodic_cleanup())
-        
-        # ★★★ নতুন স্টার্টআপ: app.start() + set_bot_commands() + asyncio.Event().wait() ★★★
-        async def start_bot():
-            await app.start()
-            await set_bot_commands()
-            print("✅ Bot started and commands set.")
-            await asyncio.Event().wait()
-        
-        loop.run_until_complete(start_bot())
-    except KeyboardInterrupt:
+    except RuntimeError:
         pass
+    app.run()
