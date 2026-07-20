@@ -2352,7 +2352,7 @@ async def toggle_create_post_mode(c, m: Message):
         await m.reply_text("You are not authorized to use this command.")
         return
 
-    if uid in CREATE_POST_MODE):
+    if uid in CREATE_POST_MODE:
         CREATE_POST_MODE.discard(uid)
         if uid in POST_CREATION_STATE:
             state_data = POST_CREATION_STATE.pop(uid)
