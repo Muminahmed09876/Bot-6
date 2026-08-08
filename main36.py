@@ -1,5 +1,3 @@
-[file name]: main35.py
-[file content begin]
 import os
 import re
 import aiohttp
