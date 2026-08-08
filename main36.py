@@ -1,3 +1,5 @@
+[file name]: main35.py
+[file content begin]
 import os
 import re
 import aiohttp
@@ -742,7 +744,7 @@ async def update_batch_status(c, m, uid, status_text, reply_markup=None):
 
 # ===== ORDERED OUTPUT HELPER FUNCTIONS =====
 
-async def add_to_output_queue(uid, output_data, queue_type='upload'):
+async def add_to_output_queue(uid, output_data):
     """Add an output item to the user's ordered output queue."""
     if uid not in USER_OUTPUT_QUEUES:
         USER_OUTPUT_QUEUES[uid] = asyncio.Queue()
@@ -826,17 +828,23 @@ async def process_convert_output_queue(uid):
                 logger.error(f"Convert output queue processing error: {e}")
                 await asyncio.sleep(1)
 
+# ===== QUEUE SYSTEM WITH CONCURRENCY =====
+
 async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_dlp=False, fmt=None, title=None, res=None, original_caption=None, task_type='upload'):
+    """Add item to the appropriate queue (download or upload) with concurrency support."""
     if task_type == 'download':
         if uid not in USER_DOWNLOAD_QUEUES:
             USER_DOWNLOAD_QUEUES[uid] = asyncio.Queue()
         queue = USER_DOWNLOAD_QUEUES[uid]
-        worker = DOWNLOAD_WORKERS
-    else:  
+        worker_dict = DOWNLOAD_WORKERS
+        status_prefix = "Download"
+    else:
         if uid not in USER_UPLOAD_QUEUES:
             USER_UPLOAD_QUEUES[uid] = asyncio.Queue()
         queue = USER_UPLOAD_QUEUES[uid]
-        worker = UPLOAD_WORKERS
+        worker_dict = UPLOAD_WORKERS
+        status_prefix = "Upload"
+    
     try:
         if is_yt_dlp:
             status_msg = await m.reply_text(f"Queue item added for `{title}` ({res}p)...")
@@ -844,6 +852,7 @@ async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_d
             status_msg = await m.reply_text(f"Queue item added for `{original_name}`...", reply_markup=progress_keyboard(task_type=task_type))
     except:
         status_msg = None
+    
     await queue.put({
         'message': m,
         'original_name': original_name,
@@ -855,1310 +864,314 @@ async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_d
         'title': title,
         'res': res,
         'original_caption': original_caption,
-        'task_type': task_type
+        'task_type': task_type,
+        'order': USER_OUTPUT_ORDER.get(uid, 0)  # Capture order when added
     })
-    if uid not in worker or worker[uid].done():
+    
+    # Start worker if not already running
+    if uid not in worker_dict or worker_dict[uid].done():
         if task_type == 'download':
-            worker[uid] = asyncio.create_task(process_download_queue_handler(uid, c))
+            worker_dict[uid] = asyncio.create_task(process_download_queue_handler(uid, c))
         else:
-            worker[uid] = asyncio.create_task(process_upload_queue_handler(uid, c))
-
-def generate_post_caption(data: dict) -> str:
-    image_name = data.get('image_name', DEFAULT_POST_DATA['image_name'])
-    genres = data.get('genres', DEFAULT_POST_DATA['genres'])
-    season_list_raw = data.get('season_list_raw', DEFAULT_POST_DATA['season_list_raw'])
-    season_entries = []
-    parts = re.split(r'[,\s]+', season_list_raw.strip())
-    parts = [p.strip() for p in parts if p.strip()]
-    for part in parts:
-        if '-' in part:
-            try:
-                start, end = map(int, part.split('-'))
-                if start > end:
-                    start, end = end, start
-                for i in range(start, end + 1):
-                    season_entries.append(f"**{image_name} Season {i:02d}**")
-            except ValueError:
-                continue
-        else:
-            try:
-                num = int(part)
-                season_entries.append(f"**{image_name} Season {num:02d}**")
-            except ValueError:
-                continue
-    unique_season_entries = list(dict.fromkeys(season_entries))
-    if not unique_season_entries:
-        unique_season_entries.append("**Coming Soon...**")
-    elif unique_season_entries[-1] != "**Coming Soon...**" and unique_season_entries[0] != "**Coming Soon...**":
-        unique_season_entries.append("**Coming Soon...**")
-    season_text = "\n".join(unique_season_entries)
-    base_caption = (
-        f"**{image_name}**\n"
-        f"**────────────────────**\n"
-        f"**‣ Audio - Hindi Official**\n"
-        f"**‣ Quality - 480p, 720p, 1080p**\n"
-        f"**‣ Genres - {genres}**\n"
-        f"**────────────────────**"
-    )
-    collapsible_text_parts = [
-        f"> **{image_name} All Season List :-**",
-        "> "
-    ]
-    for line in season_text.split('\n'):
-        collapsible_text_parts.append(f"> {line}")
-        collapsible_text_parts.append("> ")
-    if collapsible_text_parts and collapsible_text_parts[-1] == "> ":
-        collapsible_text_parts.pop()
-    collapsible_text = "\n".join(collapsible_text_parts)
-    final_caption = f"{base_caption}\n\n{collapsible_text}"
-    return final_caption
-
-async def get_filename_from_url(url):
-    try:
-        connector = aiohttp.TCPConnector(limit=0, family=socket.AF_INET, use_dns_cache=True, ttl_dns_cache=300)
-        async with aiohttp.ClientSession(connector=connector) as sess:
-            async with sess.head(url, allow_redirects=True, timeout=10) as resp:
-                cd = resp.headers.get('Content-Disposition')
-                if cd:
-                    fname_match = re.findall(r'filename\*?=(?:UTF-8\'\')?["\']?([^"\';\n]+)', cd, re.IGNORECASE)
-                    if fname_match:
-                        extracted_name = urllib.parse.unquote(fname_match[0])
-                        if len(extracted_name) > 200:
-                            ext = Path(extracted_name).suffix
-                            extracted_name = extracted_name[:200 - len(ext)] + ext
-                        return extracted_name
-    except Exception:
-        pass
-    fname = url.split("/")[-1].split("?")[0]
-    fname = urllib.parse.unquote(fname)
-    if len(fname) > 200:
-        ext = Path(fname).suffix
-        if not ext or len(ext) > 20:
-            ext = ".mp4"
-        fname = fname[:200 - len(ext)] + ext
-    return fname
-
-async def download_stream(resp, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
-    total = 0
-    if out_path.exists():
-        total = out_path.stat().st_size
-    try:
-        size = int(resp.headers.get("Content-Length", 0)) + total
-    except:
-        size = 0
-    chunk_size = 1024 * 1024
-    start_t = time.time()
-    try:
-        mode = "ab" if total > 0 else "wb"
-        with out_path.open(mode) as f:
-            async for chunk in resp.content.iter_chunked(chunk_size):
-                if cancel_event and cancel_event.is_set():
-                    return False, "Operation cancelled by user."
-                if not chunk:
-                    break
-                if total > MAX_SIZE:
-                    return False, "File size cannot exceed limit."
-                total += len(chunk)
-                f.write(chunk)
-                if message and size > 0:
-                    await progress_callback(total, size, "Downloading...", message, start_t, original_name=original_name)
-    except Exception as e:
-        return False, str(e)
-    return True, None
-
-async def download_url_generic(url: str, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
-    for attempt in range(1, 6):
-        timeout = aiohttp.ClientTimeout(total=7200, sock_connect=120)
-        headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"}
-        if out_path.exists():
-            downloaded = out_path.stat().st_size
-            headers["Range"] = f"bytes={downloaded}-"
-        connector = aiohttp.TCPConnector(limit=0, family=socket.AF_INET, use_dns_cache=True, ttl_dns_cache=300)
-        try:
-            async with aiohttp.ClientSession(timeout=timeout, headers=headers, connector=connector) as sess:
-                async with sess.get(url, allow_redirects=True) as resp:
-                    if resp.status in (404, 403) or resp.status >= 500:
-                        if attempt < 5:
-                            await asyncio.sleep(2)
-                            continue
-                        return False, f"HTTP {resp.status}"
-                    if resp.status in (200, 206):
-                        ok, err = await download_stream(resp, out_path, message, cancel_event=cancel_event, original_name=original_name)
-                        if ok: return True, None
-                        else:
-                            if attempt < 5: await asyncio.sleep(2); continue
-                            return False, err
-        except (aiohttp.ClientError, asyncio.TimeoutError, ssl.SSLError) as e:
-            logger.warning(f"aiohttp attempt {attempt} failed: {e}")
-            if attempt < 5:
-                await asyncio.sleep(2)
-                continue
-            logger.info("Falling back to wget for download")
-            return await download_with_wget(url, out_path, message, cancel_event, original_name)
-        except Exception as e:
-            logger.error(f"aiohttp unexpected error: {e}")
-            if attempt < 5:
-                await asyncio.sleep(2)
-                continue
-            return False, str(e)
-    return await download_with_wget(url, out_path, message, cancel_event, original_name)
-
-async def download_with_wget(url: str, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
-    cmd = ["wget", "-O", str(out_path), "--no-check-certificate", "--timeout=30", "--tries=3", url]
-    if cancel_event:
-        pass
-    try:
-        process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        if message:
-            await message.edit_text("Downloading using wget (fallback)...", reply_markup=progress_keyboard(task_type='download'))
-        await process.wait()
-        if process.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
-            return True, None
-        else:
-            stderr = (await process.stderr.read()).decode()
-            return False, f"wget failed: {stderr}"
-    except Exception as e:
-        return False, str(e)
-
-async def download_drive_file(file_id: str, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
-    service = get_gdrive_service()
-    if service:
-        try:
-            request = service.files().get_media(fileId=file_id)
-            total = 0
-            if out_path.exists():
-                total = out_path.stat().st_size
-            mode = "ab" if total > 0 else "wb"
-            start_t = time.time()
-            from googleapiclient.http import MediaIoBaseDownload
-            import io
-            def gdrive_download():
-                with out_path.open(mode) as fh:
-                    downloader = MediaIoBaseDownload(fh, request)
-                    done = False
-                    while done is False:
-                        if cancel_event and cancel_event.is_set():
-                            raise Exception("Cancelled")
-                        status, done = downloader.next_chunk()
-                        if status and message:
-                            asyncio.run_coroutine_threadsafe(
-                                progress_callback(status.resumable_progress, status.total_size, "Downloading from GDrive (API)...", message, start_t, original_name=original_name),
-                                asyncio.get_event_loop()
-                            )
-            await asyncio.to_thread(gdrive_download)
-            return True, None
-        except Exception as e:
-            logger.warning(f"GDrive API Download failed, falling back to public link: {e}")
-    base = f"https://drive.google.com/uc?export=download&id={file_id}"
-    for attempt in range(1, 11):
-        timeout = aiohttp.ClientTimeout(total=7200, sock_connect=120)
-        headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"}
-        if out_path.exists():
-            downloaded = out_path.stat().st_size
-            headers["Range"] = f"bytes={downloaded}-"
-        connector = aiohttp.TCPConnector(limit=0, family=socket.AF_INET, use_dns_cache=True, ttl_dns_cache=300)
-        try:
-            async with aiohttp.ClientSession(timeout=timeout, headers=headers, connector=connector) as sess:
-                async with sess.get(base, allow_redirects=True) as resp:
-                    if resp.status in (200, 206) and "content-disposition" in (k.lower() for k in resp.headers.keys()):
-                        ok, err = await download_stream(resp, out_path, message, cancel_event=cancel_event, original_name=original_name)
-                        if ok: return True, None
-                        if attempt < 10: await asyncio.sleep(2); continue
-                    if resp.status == 404 or resp.status >= 500:
-                        if attempt < 10:
-                            await asyncio.sleep(2)
-                            continue
-                    text = await resp.text(errors="ignore")
-                    m = re.search(r"confirm=([0-9A-Za-z-_]+)", text)
-                    if m:
-                        token = m.group(1)
-                        download_url = f"https://drive.google.com/uc?export=download&confirm={token}&id={file_id}"
-                        async with sess.get(download_url, allow_redirects=True) as resp2:
-                            if resp2.status == 404 or resp2.status >= 500:
-                                if attempt < 10:
-                                    await asyncio.sleep(2)
-                                    continue
-                            if resp2.status not in (200, 206):
-                                return False, f"HTTP {resp2.status}"
-                            ok, err = await download_stream(resp2, out_path, message, cancel_event=cancel_event, original_name=original_name)
-                            if ok: return True, None
-                            if attempt < 10: await asyncio.sleep(2); continue
-                    for k, v in resp.cookies.items():
-                        if k.startswith("download_warning"):
-                            token = v.value
-                            download_url = f"https://drive.google.com/uc?export=download&confirm={token}&id={file_id}"
-                            async with sess.get(download_url, allow_redirects=True) as resp2:
-                                if resp2.status == 404 or resp2.status >= 500:
-                                    if attempt < 10:
-                                        await asyncio.sleep(2)
-                                        continue
-                                if resp2.status not in (200, 206):
-                                    return False, f"HTTP {resp2.status}"
-                                ok, err = await download_stream(resp2, out_path, message, cancel_event=cancel_event, original_name=original_name)
-                                if ok: return True, None
-                                if attempt < 10: await asyncio.sleep(2); continue
-                    if attempt < 10 and resp.status not in (200, 206):
-                        await asyncio.sleep(2)
-                        continue
-                    return False, "Google Drive requires permission or the link is not public."
-        except Exception as e:
-            if attempt < 10:
-                await asyncio.sleep(2)
-                continue
-            return False, str(e)
-    return False, "Failed after 10 attempts"
-
-def process_dynamic_text_no_increment(uid, caption_template):
-    if uid not in USER_COUNTERS:
-        USER_COUNTERS[uid] = {'uploads': 0, 'episode_numbers': {}, 'dynamic_counters': {}, 're_options_count': 0}
-    counter_matches = re.findall(r"\[\s*(\(?\d+\)?)\s*\]", caption_template)
-    for match in counter_matches:
-        if match not in USER_COUNTERS[uid].get('dynamic_counters', {}):
-            has_paren = match.startswith('(') and match.endswith(')')
-            clean_match = re.sub(r'[()]', '', match)
-            if 'dynamic_counters' not in USER_COUNTERS[uid]:
-                USER_COUNTERS[uid]['dynamic_counters'] = {}
-            USER_COUNTERS[uid]['dynamic_counters'][match] = {'value': int(clean_match), 'has_paren': has_paren}
-    uploads = USER_COUNTERS[uid].get('uploads', 1)
-    quality_match = re.search(r"\[re\s*\((.*?)\)\]", caption_template)
-    if quality_match:
-        options_str = quality_match.group(1)
-        options = [opt.strip() for opt in options_str.split(',')]
-        current_index = (uploads - 1) % len(options) if uploads > 0 else 0
-        current_quality = options[current_index]
-        caption_template = caption_template.replace(quality_match.group(0), current_quality)
-    for match, data in USER_COUNTERS[uid].get('dynamic_counters', {}).items():
-        value = data['value']
-        has_paren = data['has_paren']
-        original_num_len = len(re.sub(r'[()]', '', match))
-        formatted_value = f"{value:0{original_num_len}d}"
-        final_value = f"({formatted_value})" if has_paren else formatted_value
-        caption_template = re.sub(re.escape(f"[{match}]"), final_value, caption_template)
-    current_episode_num = 0
-    if USER_COUNTERS[uid].get('dynamic_counters'):
-        current_episode_num = min(data['value'] for data in USER_COUNTERS[uid]['dynamic_counters'].values())
-    conditional_matches = re.findall(r"\[([a-zA-Z0-9\s]+)\s*\((.*?)\)\]", caption_template)
-    for match in conditional_matches:
-        text_to_add = match[0].strip()
-        target_num_str = re.sub(r'[^0-9]', '', match[1]).strip()
-        placeholder = re.escape(f"[{match[0].strip()} ({match[1].strip()})]")
-        try:
-            target_num = int(target_num_str)
-        except ValueError:
-            caption_template = re.sub(placeholder, "", caption_template)
-            continue
-        if current_episode_num == target_num:
-            caption_template = re.sub(placeholder, text_to_add, caption_template)
-        else:
-            caption_template = re.sub(placeholder, "", caption_template)
-    return caption_template
-
-def get_dynamic_filename(uid, original_name):
-    file_path = Path(original_name)
-    file_ext = file_path.suffix.lower()
-    file_ext = "." + file_ext.lstrip('.') if file_ext and file_ext != '.' else ".mp4"
-    if uid in USER_FILENAMES:
-        base_name = process_dynamic_text_no_increment(uid, USER_FILENAMES[uid])
-    else:
-        base_name = "[@TA_HD_Anime] Telegram Channel"
-    return base_name + file_ext
-
-async def set_bot_commands():
-    cmds = [
-        BotCommand("start", "Start bot / Help"),
-        BotCommand("upload_url", "Download & Upload file from URL (admin only)"),
-        BotCommand("upload_drive", "Toggle Google Drive Upload Mode (admin only)"),
-        BotCommand("download_only", "Download files to storage only (admin only)"),
-        BotCommand("zip_file_download", "Toggle ZIP Download Mode (admin only)"),
-        BotCommand("setthumb", "Set custom thumbnail (admin only)"),
-        BotCommand("view_thumb", "View your thumbnail (admin only)"),
-        BotCommand("del_thumb", "Delete your thumbnail (admin only)"),
-        BotCommand("set_caption", "Set custom caption (admin only)"),
-        BotCommand("view_caption", "View your caption (admin only)"),
-        BotCommand("edit_caption_mode", "Toggle edit caption mode (admin only)"),
-        BotCommand("file_name_save", "Save dynamic file name (admin only)"),
-        BotCommand("view_filename", "View saved file name format (admin only)"),
-        BotCommand("del_filename", "Delete saved file name format (admin only)"),
-        BotCommand("rename", "Rename replied video (admin only)"),
-        BotCommand("batch_audio_add", "Batch MKV audio change mode (admin only)"),
-        BotCommand("mkv_video_audio_change", "Single MKV audio track change mode (admin only)"),
-        BotCommand("yt_dlp", "Toggle YT-DLP mode for all URLs (admin only)"),
-        BotCommand("convert", "Convert Video/Audio quality, bitrate & format (admin only)"),
-        BotCommand("create_post", "Create new post (admin only)"),
-        BotCommand("mode_check", "Check current mode status (admin only)"),
-        BotCommand("progress_bar", "Toggle progress bar ON/OFF or Custom Interval (admin only)"),
-        BotCommand("continue", "Resume paused queue / Restore buttons"),
-        BotCommand("restart", "Show Storage info and Clear Data"),
-        BotCommand("check", "Check ping status and connectivity"),
-        BotCommand("help", "Help")
-    ]
-    try:
-        await app.set_bot_commands(cmds)
-    except Exception as e:
-        logger.warning("Set commands error: %s", e)
-
-async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, status_msg_id, cancel_event, default_caption=None, original_caption=None, original_download_name=None):
-    if uid not in USER_UPLOAD_LOCKS:
-        USER_UPLOAD_LOCKS[uid] = asyncio.Lock()
-    async with USER_UPLOAD_LOCKS[uid]:
-        if cancel_event.is_set():
-            if tmp_path.exists(): tmp_path.unlink()
-            return
-        if uid in UPLOAD_DRIVE_MODE:
-            ok, link = await upload_to_gdrive(tmp_path, renamed_file, message)
-            if status_msg_id:
-                try: await client.delete_messages(message.chat.id, [status_msg_id])
-                except: pass
-            if tmp_path.exists():
-                tmp_path.unlink()
-            return
-        await process_file_and_upload(client, message, tmp_path, target_name=renamed_file, original_download_name=original_download_name, messages_to_delete=[status_msg_id] if status_msg_id else [], cancel_event_passed=cancel_event, passed_uid=uid, default_caption=default_caption, original_caption_passed=original_caption)
+            worker_dict[uid] = asyncio.create_task(process_upload_queue_handler(uid, c))
 
 async def process_download_queue_handler(uid, client):
+    """Process download queue with concurrent downloads (max 5)."""
     queue = USER_DOWNLOAD_QUEUES.get(uid)
     if not queue:
         return
+    
+    # Process items concurrently using semaphore
+    tasks = []
+    while not queue.empty():
+        while uid in USER_QUEUE_PAUSED:
+            await asyncio.sleep(1)
+        while uid in MISSING_EXT_QUEUE and len(MISSING_EXT_QUEUE[uid]) > 0:
+            await asyncio.sleep(1)
+        
+        task_data = await queue.get()
+        # Start a download task with semaphore
+        task = asyncio.create_task(
+            process_single_download_with_semaphore(uid, client, task_data)
+        )
+        tasks.append(task)
+        queue.task_done()
+    
+    # Wait for all download tasks to complete
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    
+    if uid in DOWNLOAD_WORKERS:
+        del DOWNLOAD_WORKERS[uid]
+    if uid in USER_DOWNLOAD_QUEUES:
+        del USER_DOWNLOAD_QUEUES[uid]
+
+async def process_single_download_with_semaphore(uid, client, task_data):
+    """Process a single download with semaphore for concurrency control."""
     async with DOWNLOAD_SEMAPHORE:
-        while not queue.empty():
-            while uid in USER_QUEUE_PAUSED:
-                await asyncio.sleep(1)
-            while uid in MISSING_EXT_QUEUE and len(MISSING_EXT_QUEUE[uid]) > 0:
-                await asyncio.sleep(1)
-            task_data = await queue.get()
-            try:
-                m = task_data.get('message')
-                original_name = task_data.get('original_name')
-                status_msg = task_data.get('status_msg')
-                is_url = task_data.get('is_url', False)
-                is_yt_dlp = task_data.get('is_yt_dlp', False)
-                original_caption = task_data.get('original_caption')
-                cancel_event = asyncio.Event()
-                TASKS.setdefault(uid, []).append(cancel_event)
-                DOWNLOAD_TASKS.setdefault(uid, []).append(cancel_event)
-                if status_msg:
-                    USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
-                if is_yt_dlp:
-                    url = task_data.get('url')
-                    fmt = task_data.get('fmt')
-                    title = task_data.get('title')
-                    res = task_data.get('res', 'Unknown')
-                    safe_title = re.sub(r"[\\/*?\"<>|:]", "_", title)
-                    if len(safe_title) > 100: safe_title = safe_title[:100]
-                    out_tmpl = str(TMP / f"{safe_title}.%(ext)s")
-                    ydl_opts = {
-                        'format': fmt,
-                        'outtmpl': out_tmpl,
-                        'quiet': True,
-                        'no_warnings': True,
-                        'merge_output_format': 'mkv',
-                    }
-                    if COOKIES_TXT and os.path.exists(COOKIES_TXT):
-                        ydl_opts['cookiefile'] = COOKIES_TXT
-                    last_edit = 0
-                    loop = asyncio.get_running_loop()
-                    start_t = time.time()
-                    def my_hook(d):
-                        nonlocal last_edit
-                        if d['status'] == 'downloading':
-                            if cancel_event.is_set():
-                                raise Exception("Operation cancelled by user.")
-                            now = time.time()
-                            interval = USER_PROGRESS_INTERVAL.get(uid, 5)
-                            if now - last_edit >= interval:
-                                last_edit = now
-                                downloaded = d.get('downloaded_bytes', 0)
-                                total = d.get('total_bytes', 0) or d.get('total_bytes_estimate', 0)
-                                if total > 0:
-                                    asyncio.run_coroutine_threadsafe(
-                                        progress_callback(downloaded, total, f"Downloading YT-DLP ({res}p)...", status_msg, start_t, original_name=title),
-                                        loop
-                                    )
-                    ydl_opts['progress_hooks'] = [my_hook]
-                    try:
-                        def run_dl():
-                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                                info = ydl.extract_info(url, download=True)
-                                if 'requested_downloads' in info:
-                                    return info['requested_downloads'][0]['filepath']
-                                return ydl.prepare_filename(info)
-                        if status_msg:
-                            await status_msg.edit(f"Starting YT-DLP Download for {res}p...", reply_markup=progress_keyboard(task_type='download'))
-                        downloaded_file = await asyncio.to_thread(run_dl)
-                        actual_path = Path(downloaded_file)
-                        if cancel_event.is_set() or not actual_path.exists():
-                             raise Exception("Cancelled or download failed.")
-                        if status_msg:
-                            await status_msg.edit_text(f"Download complete ({res}p), uploading...", reply_markup=None)
-                        original_name = actual_path.name
-                        renamed_file = get_dynamic_filename(uid, original_name)
-                        yt_caption = f"{title} - {res}p" if title else original_name
-                        await add_to_queue(uid, client, m, original_name, is_url=False, original_caption=yt_caption, task_type='upload')
-                    except Exception as e:
-                        logger.error(f"YT-DLP Queue DL Error: {e}")
-                        raise e
-                elif is_url:
-                    url = task_data.get('url')
-                    ext = Path(original_name).suffix
-                    if not ext:
-                        keyboard = InlineKeyboardMarkup([
-                            [InlineKeyboardButton(".zip", callback_data=f"extsel_{uid}_.zip"),
-                             InlineKeyboardButton(".mkv", callback_data=f"extsel_{uid}_.mkv")],
-                            [InlineKeyboardButton(".mp4", callback_data=f"extsel_{uid}_.mp4"),
-                             InlineKeyboardButton(".rar", callback_data=f"extsel_{uid}_.rar")]
-                        ])
-                        if uid not in MISSING_EXT_QUEUE:
-                            MISSING_EXT_QUEUE[uid] = []
-                        if status_msg:
-                            await status_msg.edit("No format found in URL. Please select format:", reply_markup=keyboard)
-                        else:
-                            status_msg = await m.reply_text("No format found in URL. Please select format:", reply_markup=keyboard)
-                        task_data['status_msg'] = status_msg
-                        MISSING_EXT_QUEUE[uid].append(task_data)
-                        continue
-                    else:
-                        await download_and_process_generic(client, m, url, status_msg, cancel_event)
-                else:
-                    file_info = m.video or m.document
-                    tmp_path = get_unique_path(TMP, original_name)
-                    try:
-                        if status_msg:
-                            try:
-                                await status_msg.edit("Downloading...", reply_markup=progress_keyboard(task_type='download'))
-                            except: pass
-                        start_t = time.time()
-                        async def dl_prog(current, total):
-                            if cancel_event.is_set():
-                                client.stop_transmission()
-                            if status_msg:
-                                await progress_callback(current, total, "Downloading...", status_msg, start_t, original_name=original_name)
-                        await m.download(file_name=str(tmp_path), progress=dl_prog)
+        try:
+            m = task_data.get('message')
+            original_name = task_data.get('original_name')
+            status_msg = task_data.get('status_msg')
+            is_url = task_data.get('is_url', False)
+            is_yt_dlp = task_data.get('is_yt_dlp', False)
+            original_caption = task_data.get('original_caption')
+            order = task_data.get('order', 0)
+            
+            cancel_event = asyncio.Event()
+            TASKS.setdefault(uid, []).append(cancel_event)
+            DOWNLOAD_TASKS.setdefault(uid, []).append(cancel_event)
+            if status_msg:
+                USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
+            
+            if is_yt_dlp:
+                url = task_data.get('url')
+                fmt = task_data.get('fmt')
+                title = task_data.get('title')
+                res = task_data.get('res', 'Unknown')
+                safe_title = re.sub(r"[\\/*?\"<>|:]", "_", title)
+                if len(safe_title) > 100: safe_title = safe_title[:100]
+                out_tmpl = str(TMP / f"{safe_title}.%(ext)s")
+                ydl_opts = {
+                    'format': fmt,
+                    'outtmpl': out_tmpl,
+                    'quiet': True,
+                    'no_warnings': True,
+                    'merge_output_format': 'mkv',
+                }
+                if COOKIES_TXT and os.path.exists(COOKIES_TXT):
+                    ydl_opts['cookiefile'] = COOKIES_TXT
+                last_edit = 0
+                loop = asyncio.get_running_loop()
+                start_t = time.time()
+                def my_hook(d):
+                    nonlocal last_edit
+                    if d['status'] == 'downloading':
                         if cancel_event.is_set():
-                             if tmp_path.exists(): tmp_path.unlink()
-                             if cancel_event in TASKS.get(uid, []):
-                                 TASKS[uid].remove(cancel_event)
-                             continue
+                            raise Exception("Operation cancelled by user.")
+                        now = time.time()
+                        interval = USER_PROGRESS_INTERVAL.get(uid, 5)
+                        if now - last_edit >= interval:
+                            last_edit = now
+                            downloaded = d.get('downloaded_bytes', 0)
+                            total = d.get('total_bytes', 0) or d.get('total_bytes_estimate', 0)
+                            if total > 0:
+                                asyncio.run_coroutine_threadsafe(
+                                    progress_callback(downloaded, total, f"Downloading YT-DLP ({res}p)...", status_msg, start_t, original_name=title),
+                                    loop
+                                )
+                ydl_opts['progress_hooks'] = [my_hook]
+                try:
+                    def run_dl():
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            info = ydl.extract_info(url, download=True)
+                            if 'requested_downloads' in info:
+                                return info['requested_downloads'][0]['filepath']
+                            return ydl.prepare_filename(info)
+                    if status_msg:
+                        await status_msg.edit(f"Starting YT-DLP Download for {res}p...", reply_markup=progress_keyboard(task_type='download'))
+                    downloaded_file = await asyncio.to_thread(run_dl)
+                    actual_path = Path(downloaded_file)
+                    if cancel_event.is_set() or not actual_path.exists():
+                        raise Exception("Cancelled or download failed.")
+                    if status_msg:
+                        await status_msg.edit_text(f"Download complete ({res}p), adding to upload queue...", reply_markup=None)
+                    original_name = actual_path.name
+                    renamed_file = get_dynamic_filename(uid, original_name)
+                    yt_caption = f"{title} - {res}p" if title else original_name
+                    # Add to upload queue
+                    await add_to_queue(uid, client, m, original_name, is_url=False, original_caption=yt_caption, task_type='upload')
+                except Exception as e:
+                    logger.error(f"YT-DLP Download Error: {e}")
+                    raise e
+            elif is_url:
+                url = task_data.get('url')
+                ext = Path(original_name).suffix
+                if not ext:
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton(".zip", callback_data=f"extsel_{uid}_.zip"),
+                         InlineKeyboardButton(".mkv", callback_data=f"extsel_{uid}_.mkv")],
+                        [InlineKeyboardButton(".mp4", callback_data=f"extsel_{uid}_.mp4"),
+                         InlineKeyboardButton(".rar", callback_data=f"extsel_{uid}_.rar")]
+                    ])
+                    if uid not in MISSING_EXT_QUEUE:
+                        MISSING_EXT_QUEUE[uid] = []
+                    if status_msg:
+                        await status_msg.edit("No format found in URL. Please select format:", reply_markup=keyboard)
+                    else:
+                        status_msg = await m.reply_text("No format found in URL. Please select format:", reply_markup=keyboard)
+                    task_data['status_msg'] = status_msg
+                    MISSING_EXT_QUEUE[uid].append(task_data)
+                    return
+                else:
+                    await download_and_process_generic(client, m, url, status_msg, cancel_event)
+            else:
+                # Telegram file download
+                file_info = m.video or m.document
+                tmp_path = get_unique_path(TMP, original_name)
+                try:
+                    if status_msg:
                         try:
-                            if status_msg:
-                                await status_msg.edit("Download complete, uploading...", reply_markup=None)
-                        except Exception:
-                            pass
-                        renamed_file = get_dynamic_filename(uid, tmp_path.name)
-                        await add_to_queue(uid, client, m, original_name, is_url=False, original_caption=original_caption, task_type='upload')
-                    except Exception as e:
-                        if tmp_path.exists():
-                            tmp_path.unlink()
-                        raise e
-            except Exception as e:
-                logger.error(f"Download Queue Loop Error: {e}")
-                USER_QUEUE_PAUSED.add(uid)
-                markup = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("Continue ▶️", callback_data="queue_continue"),
-                     InlineKeyboardButton("Delete 🗑️", callback_data="queue_delete")]
-                ])
-                err_msg = f"Download Task Failed for `{original_name}`: {e}\n\n⚠️ **Queue is Paused.** Please select an option to resume or cancel remaining queue."
+                            await status_msg.edit("Downloading...", reply_markup=progress_keyboard(task_type='download'))
+                        except: pass
+                    start_t = time.time()
+                    async def dl_prog(current, total):
+                        if cancel_event.is_set():
+                            client.stop_transmission()
+                        if status_msg:
+                            await progress_callback(current, total, "Downloading...", status_msg, start_t, original_name=original_name)
+                    await m.download(file_name=str(tmp_path), progress=dl_prog)
+                    if cancel_event.is_set():
+                        if tmp_path.exists(): tmp_path.unlink()
+                        if cancel_event in TASKS.get(uid, []):
+                            TASKS[uid].remove(cancel_event)
+                        return
+                    try:
+                        if status_msg:
+                            await status_msg.edit("Download complete, adding to upload queue...", reply_markup=None)
+                    except Exception:
+                        pass
+                    renamed_file = get_dynamic_filename(uid, tmp_path.name)
+                    await add_to_queue(uid, client, m, original_name, is_url=False, original_caption=original_caption, task_type='upload')
+                except Exception as e:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                    raise e
+        except Exception as e:
+            logger.error(f"Download Error: {e}")
+            USER_QUEUE_PAUSED.add(uid)
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Continue ▶️", callback_data="queue_continue"),
+                 InlineKeyboardButton("Delete 🗑️", callback_data="queue_delete")]
+            ])
+            err_msg = f"Download Task Failed for `{original_name}`: {e}\n\n⚠️ **Queue is Paused.** Please select an option to resume or cancel remaining queue."
+            try:
                 if status_msg:
-                    try: await status_msg.reply_text(err_msg, reply_markup=markup, quote=True)
-                    except: pass
-                elif m:
-                    try: await m.reply_text(err_msg, reply_markup=markup, quote=True)
-                    except: pass
-            finally:
-                queue.task_done()
-    if uid in DOWNLOAD_WORKERS: del DOWNLOAD_WORKERS[uid]
-    if uid in USER_DOWNLOAD_QUEUES: del USER_DOWNLOAD_QUEUES[uid]
+                    await status_msg.reply_text(err_msg, reply_markup=markup, quote=True)
+                else:
+                    await m.reply_text(err_msg, reply_markup=markup, quote=True)
+            except:
+                pass
 
 async def process_upload_queue_handler(uid, client):
+    """Process upload queue with concurrent uploads (max 5)."""
     queue = USER_UPLOAD_QUEUES.get(uid)
     if not queue:
         return
+    
+    # Process items concurrently using semaphore
+    tasks = []
+    while not queue.empty():
+        while uid in USER_QUEUE_PAUSED:
+            await asyncio.sleep(1)
+        while uid in MISSING_EXT_QUEUE and len(MISSING_EXT_QUEUE[uid]) > 0:
+            await asyncio.sleep(1)
+        
+        task_data = await queue.get()
+        # Start an upload task with semaphore
+        task = asyncio.create_task(
+            process_single_upload_with_semaphore(uid, client, task_data)
+        )
+        tasks.append(task)
+        queue.task_done()
+    
+    # Wait for all upload tasks to complete
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    
+    if uid in UPLOAD_WORKERS:
+        del UPLOAD_WORKERS[uid]
+    if uid in USER_UPLOAD_QUEUES:
+        del USER_UPLOAD_QUEUES[uid]
+
+async def process_single_upload_with_semaphore(uid, client, task_data):
+    """Process a single upload with semaphore for concurrency control."""
     async with UPLOAD_SEMAPHORE:
-        while not queue.empty():
-            while uid in USER_QUEUE_PAUSED:
-                await asyncio.sleep(1)
-            while uid in MISSING_EXT_QUEUE and len(MISSING_EXT_QUEUE[uid]) > 0:
-                await asyncio.sleep(1)
-            task_data = await queue.get()
-            try:
-                m = task_data.get('message')
-                original_name = task_data.get('original_name')
-                status_msg = task_data.get('status_msg')
-                is_url = task_data.get('is_url', False)
-                is_yt_dlp = task_data.get('is_yt_dlp', False)
-                original_caption = task_data.get('original_caption')
-                cancel_event = asyncio.Event()
-                TASKS.setdefault(uid, []).append(cancel_event)
-                UPLOAD_TASKS.setdefault(uid, []).append(cancel_event)
+        try:
+            m = task_data.get('message')
+            original_name = task_data.get('original_name')
+            status_msg = task_data.get('status_msg')
+            original_caption = task_data.get('original_caption')
+            order = task_data.get('order', 0)
+            
+            cancel_event = asyncio.Event()
+            TASKS.setdefault(uid, []).append(cancel_event)
+            UPLOAD_TASKS.setdefault(uid, []).append(cancel_event)
+            if status_msg:
+                USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
+            
+            # Find the downloaded file in tmp directory
+            downloaded_files = list(TMP.glob(f"*{original_name}*")) if original_name else []
+            if not downloaded_files:
+                # Try to find by name pattern
+                name_pattern = re.sub(r'[^\w\s.-]', '_', original_name)
+                downloaded_files = list(TMP.glob(f"*{name_pattern}*"))
+            
+            if not downloaded_files:
+                # If file not found, maybe it's already processed or direct upload
+                logger.warning(f"No downloaded file found for: {original_name}")
+                return
+            
+            tmp_path = downloaded_files[0]
+            renamed_file = get_dynamic_filename(uid, original_name)
+            
+            # Upload the file
+            if uid in UPLOAD_DRIVE_MODE:
+                ok, link = await upload_to_gdrive(tmp_path, renamed_file, m)
                 if status_msg:
-                    USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
-                if is_yt_dlp:
-                    url = task_data.get('url')
-                    fmt = task_data.get('fmt')
-                    title = task_data.get('title')
-                    res = task_data.get('res', 'Unknown')
-                    safe_title = re.sub(r"[\\/*?\"<>|:]", "_", title)
-                    if len(safe_title) > 100: safe_title = safe_title[:100]
-                    out_tmpl = str(TMP / f"{safe_title}.%(ext)s")
-                    pass
-            except Exception as e:
-                logger.error(f"Upload Queue Loop Error: {e}")
-                USER_QUEUE_PAUSED.add(uid)
-                markup = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("Continue ▶️", callback_data="queue_continue"),
-                     InlineKeyboardButton("Delete 🗑️", callback_data="queue_delete")]
-                ])
-                err_msg = f"Upload Task Failed for `{original_name}`: {e}\n\n⚠️ **Queue is Paused.** Please select an option to resume or cancel remaining queue."
+                    try: await client.delete_messages(m.chat.id, [status_msg.id])
+                    except: pass
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            else:
+                # Add to ordered output queue instead of direct upload
+                output_data = {
+                    'message': m,
+                    'file_path': tmp_path,
+                    'file_name': renamed_file,
+                    'send_func': send_uploaded_file
+                }
+                await add_to_output_queue(uid, output_data)
+                
+                # Notify status
                 if status_msg:
-                    try: await status_msg.reply_text(err_msg, reply_markup=markup, quote=True)
-                    except: pass
-                elif m:
-                    try: await m.reply_text(err_msg, reply_markup=markup, quote=True)
-                    except: pass
-            finally:
-                queue.task_done()
-    if uid in UPLOAD_WORKERS: del UPLOAD_WORKERS[uid]
-    if uid in USER_UPLOAD_QUEUES: del USER_UPLOAD_QUEUES[uid]
-
-import os
-import re
-import aiohttp
-import asyncio
-import threading
-from pathlib import Path
-from datetime import datetime, timedelta
-from pyrogram import Client, filters
-from pyrogram.types import Message, BotCommand, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.enums import ParseMode
-from pyrogram.errors import FloodWait
-from PIL import Image
-from hachoir.parser import createParser
-from hachoir.metadata import extractMetadata
-import subprocess
-import traceback
-import json
-from flask import Flask, render_template_string, send_from_directory, Response, request, redirect
-import requests
-import time
-import math
-import logging
-import yt_dlp
-import urllib.parse
-import zipfile
-import shutil
-import socket
-import tarfile
-import email.message
-import mimetypes
-try:
-    from google.oauth2 import service_account
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaFileUpload
-except ImportError:
-    pass
-try:
-    import rarfile
-except ImportError:
-    pass
-try:
-    import py7zr
-except ImportError:
-    pass
-try:
-    from pyunpack import Archive
-except ImportError:
-    pass
-try:
-    import patoolib
-except ImportError:
-    pass
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-PORT = int(os.getenv("PORT", "10000"))
-RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-if not RENDER_EXTERNAL_HOSTNAME:
-    try:
-        import urllib.request
-        _public_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf8')
-        RENDER_EXTERNAL_HOSTNAME = f"{_public_ip}:{PORT}"
-    except Exception:
-        try:
-            _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            _s.connect(("8.8.8.8", 80))
-            _local_ip = _s.getsockname()[0]
-            _s.close()
-            RENDER_EXTERNAL_HOSTNAME = f"{_local_ip}:{PORT}"
-        except Exception:
-            RENDER_EXTERNAL_HOSTNAME = f"localhost:{PORT}"
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
-if not PUBLIC_BASE_URL:
-    PUBLIC_BASE_URL = f"http://{RENDER_EXTERNAL_HOSTNAME}"
-else:
-    if not PUBLIC_BASE_URL.startswith(('http://', 'https://')):
-        PUBLIC_BASE_URL = f"http://{PUBLIC_BASE_URL}"
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-GDRIVE_SERVICE_KEY = os.getenv("GDRIVE_SERVICE_KEY")
-GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID")
-RAW_COOKIES = os.getenv("COOKIES_TXT")
-if RAW_COOKIES:
-    if os.path.exists(RAW_COOKIES):
-        COOKIES_TXT = RAW_COOKIES
-    else:
-        with open("cookies.txt", "w") as f:
-            f.write(RAW_COOKIES)
-        COOKIES_TXT = "cookies.txt"
-else:
-    COOKIES_TXT = None
-TMP = Path("tmp")
-TMP.mkdir(parents=True, exist_ok=True)
-USER_THUMBS = {}
-TASKS = {}
-USER_TASK_EVENTS = {} 
-DOWNLOAD_TASKS = {}   
-UPLOAD_TASKS = {}     
-SET_THUMB_REQUEST = set()
-SET_CAPTION_REQUEST = set()
-SET_FILENAME_REQUEST = set() 
-USER_CAPTIONS = {}
-USER_FILENAMES = {} 
-USER_COUNTERS = {}
-EDIT_CAPTION_MODE = set()
-USER_THUMB_TIME = {}
-HIDE_PROGRESS_BAR = set()
-USER_PROGRESS_INTERVAL = {} 
-USER_QUEUE_PAUSED = set()
-AUTO_UPLOAD_ALL = set()
-MKV_AUDIO_CHANGE_MODE = set()
-PENDING_AUDIO_ORDERS = {}
-CONVERT_MODE = set()
-CONVERT_SESSIONS = {}
-ACTIVE_CONVERT_SESSION = {} 
-CONVERT_LOCKS = {} 
-CONVERT_ZIP_MODE = set()
-CONVERT_BATCH_LIST = {} 
-CONVERT_BATCH_UI_MSG = {}
-CREATE_POST_MODE = set()
-POST_CREATION_STATE = {}
-DEFAULT_POST_DATA = {
-    'image_name': "Image Name",
-    'genres': "",
-    'season_list_raw': "1, 2"
-}
-BATCH_CAPTION_MODE = set()
-BATCH_UPLOAD_MODE = set()
-BATCH_DATA = {}
-BATCH_STATUS_MSG = {}
-USER_QUEUES = {}
-USER_WORKERS = {}
-USER_UPLOAD_LOCKS = {}
-MULTI_GROUP_BATCH_MODE = set()
-MULTI_GROUP_DATA = {}
-USE_ORIGINAL_CAPTION_IN_MULTI_GROUP = set()
-MULTI_GROUP_DONE_MSG = {}
-ZIP_DOWNLOAD_MODE = set()
-ZIP_NAV_STATE = {}
-ZIP_READY_LIST = {} 
-ZIP_DL_QUEUES = {}  
-ZIP_DL_WORKERS = {} 
-NAV_PATHS = {} 
-YT_SESSIONS = {}
-YT_DLP_MODE = set()
-SAVED_YT_QUALITIES = {}
-BATCH_AUDIO_MODE = set()
-BATCH_AUDIO_STATE = {} 
-BATCH_AUDIO_LIST1 = {} 
-BATCH_AUDIO_LIST2 = {} 
-BATCH_AUDIO_MAPPING = {} 
-BATCH_AUDIO_CURRENT_PAIR_IDX = {}
-BATCH_AUDIO_TRACK_CONFIGS = {}
-BATCH_AUDIO_UI_MSG = {}
-BATCH_AUDIO_DOWNLOAD_TASKS = {}
-BATCH_AUDIO_QUEUES = {}
-BATCH_AUDIO_WORKERS = {}
-DOWNLOAD_ONLY_MODE = set()
-DOWNLOAD_LINK_MODE = set()
-DOWNLOAD_T_MODE = set()
-UPLOAD_DRIVE_MODE = set()
-MISSING_EXT_QUEUE = {} 
-PATH_MODE_SELECTION = {}          
-PATH_CONVERT_LIST = {}            
-PATH_BATCH_AUDIO_LIST1 = {}       
-PATH_BATCH_AUDIO_LIST2 = {}       
-PATH_BATCH_AUDIO_STAGE = {}       
-PATH_ZIP_LISTS = {}               
-PATH_ZIP_CURRENT_LIST = {}        
-EXTENSION_WAIT = {}  
-ADMIN_ID = int(os.getenv("ADMIN_ID", ""))
-MAX_SIZE = 1000 * 1024 * 1024 * 1024 
-app = Client("mybot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=1000, sleep_threshold=86400)
-flask_app = Flask(__name__)
-MAIN_LOOP = None 
-
-def get_gdrive_service():
-    if not GDRIVE_SERVICE_KEY:
-        return None
-    try:
-        creds_dict = json.loads(GDRIVE_SERVICE_KEY)
-        creds = service_account.Credentials.from_service_account_info(
-            creds_dict, scopes=['https://www.googleapis.com/auth/drive']
-        )
-        service = build('drive', 'v3', credentials=creds)
-        return service
-    except Exception as e:
-        logger.error(f"GDrive Auth Error: {e}")
-        return None
-
-async def upload_to_gdrive(file_path: Path, file_name: str, message: Message):
-    service = get_gdrive_service()
-    if not service:
-        return False, "Google Drive API is not configured."
-    try:
-        status_msg = await message.reply_text(f"Uploading `{file_name}` to Google Drive...", reply_markup=progress_keyboard(task_type='upload'))
-        def gdrive_upload_thread():
-            file_metadata = {'name': file_name}
-            if GDRIVE_FOLDER_ID:
-                file_metadata['parents'] = [GDRIVE_FOLDER_ID]
-            media = MediaFileUpload(str(file_path), resumable=True)
-            request = service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink')
-            response = None
-            while response is None:
-                status, response = request.next_chunk()
-            return response
-        response = await asyncio.to_thread(gdrive_upload_thread)
-        link = response.get('webViewLink')
-        await status_msg.edit(f"✅ **Successfully Uploaded to Google Drive:**\n\n🔗 **Link:** {link}")
-        return True, link
-    except Exception as e:
-        logger.error(f"GDrive Upload Error: {e}")
-        try:
-            await status_msg.edit(f"❌ **Google Drive Upload Failed:**\n\n`{e}`")
-        except:
-            pass
-        return False, str(e)
-
-async def send_mode_tutorial(c, chat_id, mode_name):
-    tutorials = {
-        "upload_drive": (
-            "🚀 **Google Drive Upload Mode - Tutorial**\n\n"
-            "এই মোডটি চালু থাকলে আপনি টেলিগ্রামে যেই ভিডিও/ফাইল দিবেন বা লিঙ্কের মাধ্যমে ডাউনলোড করবেন, তা সরাসরি আপনার Google Drive এ আপলোড হবে।\n\n"
-            "**কীভাবে ব্যবহার করবেন:**\n"
-            "‣ যেকোনো ফাইল/ভিডিও ফরোয়ার্ড করুন বা সরাসরি পাঠান।\n"
-            "‣ /upload_url দিয়ে লিঙ্ক দিলে সেটিও ড্রাইভে আপলোড হবে।\n"
-            "‣ Google Drive এর লিঙ্ক দিলে Service Account ব্যবহার করে ডাউনলোড হবে (Private File-ও কাজ করবে)।\n"
-            "‣ ব্যাচ মোড (`on`/`off`) দিয়ে অনেকগুলো ফাইল একসাথে Queue তে দিতে পারবেন।"
-        ),
-        "zip_file_download": (
-            "📦 **ZIP File Download Mode - Tutorial**\n\n"
-            "যেকোনো ZIP/RAR/7Z আর্কাইভ এক্সট্রাক্ট এবং আপলোড করার জন্য এটি ব্যবহৃত হয়।\n\n"
-            "**কীভাবে ব্যবহার করবেন:**\n"
-            "‣ আর্কাইভ লিঙ্ক বা টেলিগ্রাম ফাইল পাঠান।\n"
-            "‣ ডাউনলোড ও এক্সট্রাক্ট হওয়ার পর ফাইলের তালিকা আসবে।\n"
-            "‣ সিরিয়াল অনুযায়ী আপলোড করতে `1,3,5` বা `1-5` লিখুন।\n"
-            "‣ অটোমেটিক সব আপলোড করতে `all` লিখুন।\n"
-            "‣ ক্লিয়ার করতে `clear` লিখুন।"
-        ),
-        "convert": (
-            "⚙️ **Convert Mode - Tutorial**\n\n"
-            "ভিডিও/অডিও এর কোয়ালিটি, রেজুলেশন এবং বিটরেট পরিবর্তন করার জন্য।\n\n"
-            "**কীভাবে ব্যবহার করবেন:**\n"
-            "‣ যেকোনো ভিডিও বা লিঙ্ক পাঠান।\n"
-            "‣ `list` লিখে জমা করা ফাইলগুলো দেখুন।\n"
-            "‣ `next` লিখে পরবর্তী ফাইলের কাজ শুরু করুন।\n"
-            "‣ সরাসরি বিটরেট কাস্টমাইজ করতে সংখ্যা (যেমন: `200`) লিখে রিপ্লাই দিন।"
-        ),
-        "download_only": (
-            "📥 **Download Only Mode - Tutorial**\n\n"
-            "ফাইল শুধু সার্ভারে ডাউনলোড হবে, টেলিগ্রামে আপলোড হবে না।\n\n"
-            "**কীভাবে ব্যবহার করবেন:**\n"
-            "‣ `link` পাঠালে ডাউনলোডের পর ডাইরেক্ট ডাউনলোড লিঙ্ক দেবে।\n"
-            "‣ `t` পাঠালে ডাউনলোড না করেই সরাসরি Stream/Direct Link দেবে (দুটি লিঙ্ক থাকবে: ডাউনলোড এবং প্লে করার জন্য)।\n"
-            "‣ `off` লিখে নরমাল ডাউনলোড মোডে ফিরে যান।"
-        ),
-        "batch_audio_add": (
-            "🎵 **Batch Audio Add Mode - Tutorial**\n\n"
-            "অনেকগুলো ভিডিওর সাথে একসাথে অডিও ট্র্যাক যোগ করার জন্য।\n\n"
-            "**কীভাবে ব্যবহার করবেন:**\n"
-            "‣ প্রথমে ভিডিওগুলো (List 1) পাঠান। তারপর `next` লিখুন।\n"
-            "‣ এরপর অডিও সোর্স (List 2) পাঠান। আবার `next` লিখুন।\n"
-            "‣ কাস্টম ম্যাপিংয়ের জন্য `1-5=1-5, 6=8` ফরম্যাটে লিখুন বা ডিফল্ট সিলেক্ট করুন।"
-        )
-    }
-    if mode_name in tutorials:
-        await c.send_message(chat_id, tutorials[mode_name])
-
-def get_unique_path(base_dir: Path, filename: str) -> Path:
-    target = base_dir / filename
-    if not target.exists():
-        return target
-    stem = target.stem
-    ext = target.suffix
-    counter = 2
-    while target.exists():
-        target = base_dir / f"{stem} {counter:02d}{ext}"
-        counter += 1
-    return target
-
-def is_admin(uid: int) -> bool:
-    return uid == ADMIN_ID
-
-def is_youtube_url(url: str) -> bool:
-    parsed = url.lower()
-    return "youtube.com" in parsed or "youtu.be" in parsed
-
-def is_drive_url(url: str) -> bool:
-    return "drive.google.com" in url or "docs.google.com" in url
-
-def extract_drive_id(url: str) -> str:
-    patterns = [
-        r"/d/([a-zA-Z0-9_-]+)",
-        r"id=([a-zA-Z0-9_-]+)",
-        r"open\?id=([a-zA-Z0-9_-]+)",
-        r"https://drive.google.com/file/d/([a-zA-Z0-9_-]+)/"
-    ]
-    for p in patterns:
-        m = re.search(p, url)
-        if m:
-            return m.group(1)
-    return None
-
-def process_dynamic_caption(uid, caption_template, is_first_setup=False):
-    if uid not in USER_COUNTERS:
-        USER_COUNTERS[uid] = {'uploads': 0, 'episode_numbers': {}, 'dynamic_counters': {}, 're_options_count': 0}
-    USER_COUNTERS[uid]['uploads'] += 1
-    quality_match = re.search(r"\[re\s*\((.*?)\)\]", caption_template)
-    if quality_match:
-        options_str = quality_match.group(1)
-        options = [opt.strip() for opt in options_str.split(',')]
-        if not USER_COUNTERS[uid]['re_options_count']:
-            USER_COUNTERS[uid]['re_options_count'] = len(options)
-        current_index = (USER_COUNTERS[uid]['uploads'] - 1) % len(options)
-        current_quality = options[current_index]
-        caption_template = caption_template.replace(quality_match.group(0), current_quality)
-        if (USER_COUNTERS[uid]['uploads'] - 1) % USER_COUNTERS[uid]['re_options_count'] == 0 and USER_COUNTERS[uid]['uploads'] > 1:
-            for key in USER_COUNTERS[uid]['dynamic_counters']:
-                USER_COUNTERS[uid]['dynamic_counters'][key]['value'] += 1
-    elif USER_COUNTERS[uid]['uploads'] > 1:
-        for key in USER_COUNTERS[uid].get('dynamic_counters', {}):
-             USER_COUNTERS[uid]['dynamic_counters'][key]['value'] += 1
-    counter_matches = re.findall(r"\[\s*(\(?\d+\)?)\s*\]", caption_template)
-    if USER_COUNTERS[uid]['uploads'] == 1:
-        for match in counter_matches:
-            has_paren = match.startswith('(') and match.endswith(')')
-            clean_match = re.sub(r'[()]', '', match)
-            USER_COUNTERS[uid]['dynamic_counters'][match] = {'value': int(clean_match), 'has_paren': has_paren}
-    for match, data in USER_COUNTERS[uid]['dynamic_counters'].items():
-        value = data['value']
-        has_paren = data['has_paren']
-        original_num_len = len(re.sub(r'[()]', '', match))
-        formatted_value = f"{value:0{original_num_len}d}"
-        final_value = f"({formatted_value})" if has_paren else formatted_value
-        caption_template = re.sub(re.escape(f"[{match}]"), final_value, caption_template)
-    current_episode_num = 0
-    if USER_COUNTERS[uid].get('dynamic_counters'):
-        current_episode_num = min(data['value'] for data in USER_COUNTERS[uid]['dynamic_counters'].values())
-    conditional_matches = re.findall(r"\[([a-zA-Z0-9\s]+)\s*\((.*?)\)\]", caption_template)
-    for match in conditional_matches:
-        text_to_add = match[0].strip()
-        target_num_str = re.sub(r'[^0-9]', '', match[1]).strip()
-        placeholder = re.escape(f"[{match[0].strip()} ({match[1].strip()})]")
-        try:
-            target_num = int(target_num_str)
-        except ValueError:
-            caption_template = re.sub(placeholder, "", caption_template)
-            continue
-        if current_episode_num == target_num:
-            caption_template = re.sub(placeholder, text_to_add, caption_template)
-        else:
-            caption_template = re.sub(placeholder, "", caption_template)
-    return caption_template
-
-def advance_dynamic_counters(uid):
-    if uid not in USER_COUNTERS:
-        USER_COUNTERS[uid] = {'uploads': 0, 'episode_numbers': {}, 'dynamic_counters': {}, 're_options_count': 0}
-    USER_COUNTERS[uid]['uploads'] += 1
-    if USER_COUNTERS[uid]['re_options_count'] > 0:
-        if (USER_COUNTERS[uid]['uploads'] - 1) % USER_COUNTERS[uid]['re_options_count'] == 0 and USER_COUNTERS[uid]['uploads'] > 1:
-            for key in USER_COUNTERS[uid]['dynamic_counters']:
-                USER_COUNTERS[uid]['dynamic_counters'][key]['value'] += 1
-    elif USER_COUNTERS[uid]['uploads'] > 1:
-        for key in USER_COUNTERS[uid].get('dynamic_counters', {}):
-             USER_COUNTERS[uid]['dynamic_counters'][key]['value'] += 1
-
-def generate_new_filename(original_name: str, uid: int = None) -> str:
-    file_path = Path(original_name)
-    file_ext = file_path.suffix.lower()
-    file_ext = "." + file_ext.lstrip('.') if file_ext else ".mp4"
-    if not file_ext or file_ext == '.':
-        file_ext = ".mp4"
-    if uid and uid in USER_FILENAMES:
-        base_name = process_dynamic_text_no_increment(uid, USER_FILENAMES[uid])
-    else:
-        base_name = "[@TA_HD_Anime] Telegram Channel"
-    return base_name + file_ext
-
-def get_video_metadata(file_path: Path) -> dict:
-    data = {'duration': 0, 'width': 0, 'height': 0}
-    try:
-        cmd = [
-            "ffprobe",
-            "-v", "quiet",
-            "-print_format", "json",
-            "-show_streams",
-            "-show_format",
-            str(file_path)
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
-        metadata = json.loads(result.stdout)
-        video_stream = None
-        for stream in metadata.get('streams', []):
-            if stream.get('codec_type') == 'video':
-                video_stream = stream
-                break
-        if video_stream:
-            data['width'] = int(video_stream.get('width', 0))
-            data['height'] = int(video_stream.get('height', 0))
-        duration_str = metadata.get('format', {}).get('duration')
-        if not duration_str and video_stream:
-            duration_str = video_stream.get('duration')
-        if duration_str:
+                    try:
+                        await status_msg.edit(f"✅ Upload queued for: `{renamed_file}`")
+                    except:
+                        pass
+                
+        except Exception as e:
+            logger.error(f"Upload Error: {e}")
+            USER_QUEUE_PAUSED.add(uid)
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Continue ▶️", callback_data="queue_continue"),
+                 InlineKeyboardButton("Delete 🗑️", callback_data="queue_delete")]
+            ])
+            err_msg = f"Upload Task Failed for `{original_name}`: {e}\n\n⚠️ **Queue is Paused.** Please select an option to resume or cancel remaining queue."
             try:
-                data['duration'] = int(float(duration_str))
-            except (ValueError, TypeError):
-                logger.warning(f"Could not parse duration string: {duration_str}")
-                data['duration'] = 0
-        if data['width'] == 0 or data['height'] == 0:
-            raise Exception("FFprobe returned 0 dimensions, trying Hachoir")
+                if status_msg:
+                    await status_msg.reply_text(err_msg, reply_markup=markup, quote=True)
+                else:
+                    await m.reply_text(err_msg, reply_markup=markup, quote=True)
+            except:
+                pass
+
+async def send_uploaded_file(message, file_path, file_name):
+    """Send an uploaded file to the user with proper processing."""
+    uid = message.from_user.id
+    cancel_event = asyncio.Event()
+    TASKS.setdefault(uid, []).append(cancel_event)
+    UPLOAD_TASKS.setdefault(uid, []).append(cancel_event)
+    try:
+        await process_file_and_upload(client, message, file_path, target_name=file_name, 
+                                     original_download_name=file_name, 
+                                     messages_to_delete=[], 
+                                     cancel_event_passed=cancel_event, 
+                                     passed_uid=uid, 
+                                     default_caption=file_name, 
+                                     original_caption_passed=file_name)
     except Exception as e:
-        logger.warning(f"FFprobe metadata extraction failed: {e}. Trying Hachoir fallback...")
-        try:
-            parser = createParser(str(file_path))
-            if not parser:
-                return data
-            with parser:
-                h_metadata = extractMetadata(parser)
-            if not h_metadata:
-                return data
-            if h_metadata.has("duration") and data['duration'] == 0:
-                data['duration'] = int(h_metadata.get("duration").total_seconds())
-            if h_metadata.has("width") and data['width'] == 0:
-                data['width'] = int(h_metadata.get("width"))
-            if h_metadata.has("height") and data['height'] == 0:
-                data['height'] = int(h_metadata.get("height"))
-            logger.info(f"Hachoir fallback successful for {file_path}")
-        except Exception as he:
-            logger.error(f"Hachoir fallback ALSO failed: {he}")
-    return data
-
-def get_detailed_metadata(file_path: Path) -> dict:
-    data = {'duration': 0, 'width': 0, 'height': 0, 'v_bitrate': 0, 'audio_streams': [], 'filesize': 0}
-    try:
-        data['filesize'] = os.path.getsize(file_path)
-        cmd = [
-            "ffprobe", "-v", "quiet", "-print_format", "json",
-            "-show_format", "-show_streams", str(file_path)
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
-        metadata = json.loads(result.stdout)
-        duration_str = metadata.get('format', {}).get('duration', '0')
-        data['duration'] = float(duration_str) if duration_str else 0
-        total_bitrate = float(metadata.get('format', {}).get('bitrate', 0))
-        if total_bitrate == 0 and data['duration'] > 0:
-            total_bitrate = (data['filesize'] * 8) / data['duration']
-        for stream in metadata.get('streams', []):
-            if stream.get('codec_type') == 'video':
-                data['width'] = int(stream.get('width', 0))
-                data['height'] = int(stream.get('height', 0))
-                vb = stream.get('bit_rate')
-                if vb:
-                    data['v_bitrate'] = int(float(vb))
-            elif stream.get('codec_type') == 'audio':
-                ab = stream.get('bit_rate')
-                ab_val = int(float(ab)) if ab else 128000
-                data['audio_streams'].append({
-                    'index': stream.get('index'),
-                    'codec': stream.get('codec_name'),
-                    'bitrate': ab_val
-                })
-        if data['v_bitrate'] == 0 and total_bitrate > 0:
-            audio_total = sum([a['bitrate'] for a in data['audio_streams']])
-            data['v_bitrate'] = max(100000, int(total_bitrate - audio_total))
-    except Exception as e:
-        logger.error(f"Detailed FFprobe error: {e}")
-    return data
-
-def calculate_estimated_size(duration, v_bitrate_kbps, a_bitrate_kbps, num_audios):
-    total_kbps = v_bitrate_kbps + (a_bitrate_kbps * num_audios)
-    size_bytes = (total_kbps * 1000 * duration) / 8
-    return size_bytes
-
-def build_convert_ui(session_id):
-    session = CONVERT_SESSIONS.get(session_id)
-    if not session: return None, None
-    meta = session['meta']
-    configs = session['configs']
-    current = session['current_config']
-    v_kbps = current['v_bitrate'] // 1000
-    a_kbps = current['a_bitrate'] // 1000
-    res = current['res']
-    est_size = calculate_estimated_size(meta['duration'], v_kbps, a_kbps, len(meta['audio_streams']))
-    orig_v_kbps = meta['v_bitrate'] // 1000
-    saved_count = len(configs)
-    text = (
-        f"**🎥 Video Convert Options**\n\n"
-        f"**File:** `{session['original_name']}`\n"
-        f"**Original Size:** `{format_size(meta['filesize'])}`\n"
-        f"**Original Video:** `{meta['width']}x{meta['height']} @ {orig_v_kbps} kbps`\n"
-        f"**Audio Tracks:** `{len(meta['audio_streams'])}`\n\n"
-        f"**--- Current Configuration ---**\n"
-        f"**Target Quality:** `{res if res else 'Original'}p`\n"
-        f"**Target Video Bitrate:** `{v_kbps} kbps`\n"
-        f"**Target Audio Bitrate (All):** `{a_kbps} kbps`\n"
-        f"**Estimated Size:** `{format_size(est_size)}`\n"
-        f"**Saved Configs:** `{saved_count}`\n\n"
-        f"*(You can also send a number like `200` to set video bitrate directly)*"
-    )
-    orig_h = meta['height']
-    res_buttons = []
-    if orig_h > 0 or True:
-        res_buttons.append(InlineKeyboardButton(f"✅ Orig" if res is None else "Orig", callback_data=f"cv_res_{session_id}_Orig"))
-        for r in [2160, 1440, 1080, 720, 480, 360, 240, 144]:
-            res_buttons.append(InlineKeyboardButton(f"✅ {r}p" if res == r else f"{r}p", callback_data=f"cv_res_{session_id}_{r}"))
-    keyboard = []
-    for i in range(0, len(res_buttons), 4):
-        keyboard.append(res_buttons[i:i+4])
-    keyboard.append([
-        InlineKeyboardButton("➖ 100 kbps", callback_data=f"cv_vb_minus_{session_id}"),
-        InlineKeyboardButton(f"🎬 Vid Bitrate: {v_kbps}k", callback_data="ignore"),
-        InlineKeyboardButton("➕ 100 kbps", callback_data=f"cv_vb_plus_{session_id}")
-    ])
-    keyboard.append([
-        InlineKeyboardButton("➖ 32 kbps", callback_data=f"cv_ab_minus_{session_id}"),
-        InlineKeyboardButton(f"🎵 All Audio: {a_kbps}k", callback_data="ignore"),
-        InlineKeyboardButton("➕ 32 kbps", callback_data=f"cv_ab_plus_{session_id}")
-    ])
-    orig_toggle_text = "✅ Original: Uploading" if session['upload_original'] else "❌ Original: Skipped"
-    keyboard.append([
-        InlineKeyboardButton(orig_toggle_text, callback_data=f"cv_orig_{session_id}")
-    ])
-    keyboard.append([
-        InlineKeyboardButton("Add Quality ➕", callback_data=f"cv_add_{session_id}"),
-        InlineKeyboardButton("Next Video ⏩", callback_data=f"cv_next_{session_id}")
-    ])
-    keyboard.append([
-        InlineKeyboardButton("Select All & Convert 🚀", callback_data=f"cv_selectall_{session_id}"),
-        InlineKeyboardButton("Cancel ❌", callback_data="cancel_single")
-    ])
-    return text, InlineKeyboardMarkup(keyboard)
-
-def parse_time(time_str: str) -> int:
-    total_seconds = 0
-    parts = time_str.lower().split()
-    for part in parts:
-        if part.endswith('s'):
-            total_seconds += int(part[:-1])
-        elif part.endswith('m'):
-            total_seconds += int(part[:-1]) * 60
-        elif part.endswith('h'):
-            total_seconds += int(part[:-1]) * 3600
-    return total_seconds
-
-def format_duration(seconds):
-    if not seconds or math.isnan(seconds): return "0s"
-    seconds = int(seconds)
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    s = seconds % 60
-    if h > 0: return f"{h}h {m}m {s}s"
-    if m > 0: return f"{m}m {s}s"
-    return f"{s}s"
-
-def progress_keyboard(task_type='download'):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Cancel ❌", callback_data="cancel_single"),
-         InlineKeyboardButton(f"All Cancel ❌", callback_data=f"cancel_all_{task_type}")]
-    ])
-
-def delete_caption_keyboard():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Delete Caption 🗑️", callback_data="delete_caption")]])
-
-def mode_check_keyboard(uid: int) -> InlineKeyboardMarkup:
-    audio_status = "✅ ON" if uid in MKV_AUDIO_CHANGE_MODE else "❌ OFF"
-    caption_status = "✅ ON" if uid in EDIT_CAPTION_MODE else "❌ OFF"
-    yt_dlp_status = "✅ ON" if uid in YT_DLP_MODE else "❌ OFF"
-    zip_status = "✅ ON" if uid in ZIP_DOWNLOAD_MODE else "❌ OFF"
-    convert_status = "✅ ON" if uid in CONVERT_MODE else "❌ OFF"
-    batch_audio_status = "✅ ON" if uid in BATCH_AUDIO_MODE else "❌ OFF"
-    dl_only_status = "✅ ON" if uid in DOWNLOAD_ONLY_MODE else "❌ OFF"
-    drive_status = "✅ ON" if uid in UPLOAD_DRIVE_MODE else "❌ OFF"
-    waiting_count = sum(1 for data in PENDING_AUDIO_ORDERS.values() if data['uid'] == uid)
-    waiting_status = f" ({waiting_count} orders pending)" if waiting_count > 0 else ""
-    keyboard = [
-        [InlineKeyboardButton(f"Convert Mode {convert_status}", callback_data="toggle_convert_mode")],
-        [InlineKeyboardButton(f"MKV Audio Change Mode {audio_status}{waiting_status}", callback_data="toggle_audio_mode")],
-        [InlineKeyboardButton(f"Batch Audio Add Mode {batch_audio_status}", callback_data="toggle_batch_audio_mode")],
-        [InlineKeyboardButton(f"Edit Caption Mode {caption_status}", callback_data="toggle_caption_mode")],
-        [InlineKeyboardButton(f"YT-DLP Mode {yt_dlp_status}", callback_data="toggle_ytdlp_mode")],
-        [InlineKeyboardButton(f"ZIP Download Mode {zip_status}", callback_data="toggle_zip_mode")],
-        [InlineKeyboardButton(f"Download Only Mode {dl_only_status}", callback_data="toggle_dl_only_mode")],
-        [InlineKeyboardButton(f"Google Drive Mode {drive_status}", callback_data="toggle_drive_mode")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-def get_audio_tracks_ffprobe(file_path: Path) -> list:
-    try:
-        cmd = [
-            "ffprobe",
-            "-v", "quiet",
-            "-print_format", "json",
-            "-show_streams",
-            str(file_path)
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
-        metadata = json.loads(result.stdout)
-        audio_tracks = []
-        for stream in metadata.get('streams', []):
-            if stream.get('codec_type') == 'audio':
-                stream_index = stream.get('index')
-                title = stream.get('tags', {}).get('title', 'N/A')
-                language = stream.get('tags', {}).get('language', 'und')
-                audio_tracks.append({
-                    'stream_index': stream_index,
-                    'title': title,
-                    'language': language
-                })
-        return audio_tracks
-    except Exception as e:
-        logger.error(f"FFprobe error: {e}")
-        return []
-
-def has_opus_audio(file_path: Path) -> bool:
-    try:
-        cmd = [
-            "ffprobe",
-            "-v", "error",
-            "-select_streams", "a",
-            "-show_entries", "stream=codec_name",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            str(file_path)
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
-        return "opus" in result.stdout.lower()
-    except Exception as e:
-        logger.error(f"Error checking OPUS audio: {e}")
-        return False
-
-def format_size(bytes_size):
-    if not bytes_size or bytes_size == 0:
-        return "N/A"
-    size_name = ("B", "KB", "MB", "GB", "TB")
-    i = int(math.floor(math.log(bytes_size, 1024)))
-    p = math.pow(1024, i)
-    s = round(bytes_size / p, 2)
-    return "%s %s" % (s, size_name[i])
-
-def make_bold(text):
-    if not text: return text
-    text_str = str(text).strip()
-    if not text_str.startswith("**"):
-        text_str = f"**{text_str}"
-    if not text_str.endswith("**"):
-        text_str = f"{text_str}**"
-    return text_str
-
-PROGRESS_CACHE = {}
-
-def make_progress_bar(percent):
-    filled = int(percent / 5)
-    return "█" * filled + "░" * (20 - filled)
-
-async def progress_callback(current, total, action, message, start_time, is_time_based=False, original_name=None):
-    if message.chat.id in HIDE_PROGRESS_BAR:
-        return
-    if total == 0: return
-    now = time.time()
-    msg_id = message.id
-    interval = USER_PROGRESS_INTERVAL.get(message.chat.id, 5)
-    if msg_id in PROGRESS_CACHE:
-        if now - PROGRESS_CACHE[msg_id] < interval:
-            return
-    PROGRESS_CACHE[msg_id] = now
-    percent = (current / total) * 100
-    if percent > 100: percent = 100
-    elapsed = now - start_time
-    if is_time_based:
-        speed = current / elapsed if elapsed > 0 else 0
-        eta = (total - current) / speed if speed > 0 else 0
-        size_str = f"{format_duration(current)} / {format_duration(total)}"
-        speed_str = f"{speed:.2f}x"
-    else:
-        speed = current / elapsed if elapsed > 0 else 0
-        eta = (total - current) / speed if speed > 0 else 0
-        size_str = f"{format_size(current)} / {format_size(total)}"
-        speed_str = f"{format_size(speed)}/s"
-    orig_name_str = f"**File:** `{original_name}`\n" if original_name else ""
-    text = (
-        f"**{action}**\n"
-        f"{orig_name_str}"
-        f"`[{make_progress_bar(percent)}]` **{percent:.2f}%**\n"
-        f"**Processed:** `{size_str}`\n"
-        f"**Speed:** `{speed_str}`\n"
-        f"**Elapsed:** `{format_duration(elapsed)}` | **ETA:** `{format_duration(eta)}`"
-    )
-    try:
-        task_type = 'download' if 'Download' in action else 'upload'
-        await message.edit_text(text, reply_markup=progress_keyboard(task_type=task_type))
-    except Exception:
-        pass
-
-async def update_batch_status(c, m, uid, status_text, reply_markup=None):
-    if uid in BATCH_STATUS_MSG:
-        try:
-            await c.edit_message_text(m.chat.id, BATCH_STATUS_MSG[uid], status_text, reply_markup=reply_markup)
-        except Exception:
-            msg = await m.reply_text(status_text, reply_markup=reply_markup)
-            BATCH_STATUS_MSG[uid] = msg.id
-            async def auto_delete(msg_obj):
-                await asyncio.sleep(15)
-                try: await msg_obj.delete()
-                except: pass
-            asyncio.ensure_future(auto_delete(msg))
-    else:
-        msg = await m.reply_text(status_text, reply_markup=reply_markup)
-        BATCH_STATUS_MSG[uid] = msg.id
-        async def auto_delete(msg_obj, u):
-            await asyncio.sleep(15)
-            try:
-                await msg_obj.delete()
-                if u in BATCH_STATUS_MSG:
-                    del BATCH_STATUS_MSG[u]
-            except: pass
-        asyncio.ensure_future(auto_delete(msg, uid))
-
-async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_dlp=False, fmt=None, title=None, res=None, original_caption=None, task_type='upload'):
-    if uid not in USER_QUEUES:
-        USER_QUEUES[uid] = asyncio.Queue()
-    try:
-        if is_yt_dlp:
-            status_msg = await m.reply_text(f"Queue item added for `{title}` ({res}p)...")
-        else:
-            status_msg = await m.reply_text(f"Queue item added for `{original_name}`...", reply_markup=progress_keyboard(task_type=task_type))
-    except:
-        status_msg = None
-    await USER_QUEUES[uid].put({
-        'message': m,
-        'original_name': original_name,
-        'status_msg': status_msg,
-        'is_url': is_url,
-        'url': url,
-        'is_yt_dlp': is_yt_dlp,
-        'fmt': fmt,
-        'title': title,
-        'res': res,
-        'original_caption': original_caption,
-        'task_type': task_type
-    })
-    if uid not in USER_WORKERS or USER_WORKERS[uid].done():
-         USER_WORKERS[uid] = asyncio.create_task(process_queue_handler(uid, c))
+        logger.error(f"Error sending uploaded file: {e}")
 
 def generate_post_caption(data: dict) -> str:
     image_name = data.get('image_name', DEFAULT_POST_DATA['image_name'])
@@ -4662,6 +3675,8 @@ async def execute_conversions(session_id, client, batch_apply=False):
     TASKS.setdefault(uid, []).append(cancel_event)
     UPLOAD_TASKS.setdefault(uid, []).append(cancel_event)
     USER_TASK_EVENTS.setdefault(uid, {})[status_msg_id] = cancel_event
+    
+    # Use semaphore for concurrent conversions
     async with CONVERT_SEMAPHORE:
         try:
             total_videos = len(videos_to_convert)
@@ -4729,6 +3744,7 @@ async def execute_conversions(session_id, client, batch_apply=False):
                         await process.wait()
                         if cancel_event.is_set(): raise Exception("Cancelled by user")
                         if out_path.exists() and out_path.stat().st_size > 0:
+                            # Add to ordered convert output queue
                             output_data = {
                                 'message': msg,
                                 'file_path': out_path,
