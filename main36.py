@@ -1,3 +1,5 @@
+[file name]: main35.py
+[file content begin]
 import os
 import re
 import aiohttp
@@ -1218,7 +1220,6 @@ async def process_download_queue_handler(uid, client):
     queue = USER_DOWNLOAD_QUEUES.get(uid)
     if not queue:
         return
-    # Use semaphore to limit concurrent downloads
     async with DOWNLOAD_SEMAPHORE:
         while not queue.empty():
             while uid in USER_QUEUE_PAUSED:
@@ -1372,7 +1373,6 @@ async def process_upload_queue_handler(uid, client):
     queue = USER_UPLOAD_QUEUES.get(uid)
     if not queue:
         return
-    # Use semaphore to limit concurrent uploads
     async with UPLOAD_SEMAPHORE:
         while not queue.empty():
             while uid in USER_QUEUE_PAUSED:
@@ -4664,7 +4664,6 @@ async def execute_conversions(session_id, client, batch_apply=False):
     TASKS.setdefault(uid, []).append(cancel_event)
     UPLOAD_TASKS.setdefault(uid, []).append(cancel_event)
     USER_TASK_EVENTS.setdefault(uid, {})[status_msg_id] = cancel_event
-    # Use semaphore to limit concurrent conversions
     async with CONVERT_SEMAPHORE:
         try:
             total_videos = len(videos_to_convert)
@@ -4732,7 +4731,6 @@ async def execute_conversions(session_id, client, batch_apply=False):
                         await process.wait()
                         if cancel_event.is_set(): raise Exception("Cancelled by user")
                         if out_path.exists() and out_path.stat().st_size > 0:
-                            # Add to ordered output queue instead of uploading directly
                             output_data = {
                                 'message': msg,
                                 'file_path': out_path,
@@ -6998,7 +6996,18 @@ async def process_file_and_upload(c: Client, m: Message, in_path: Path, target_n
 
 @flask_app.route('/')
 def home():
-    html_content = 
+    html_content = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Bot Server</title>
+</head>
+<body>
+    <h1>Bot is Running!</h1>
+    <p>Telegram bot is active.</p>
+</body>
+</html>
+    """
     return render_template_string(html_content)
 
 @flask_app.route('/dl/<path:filename>')
@@ -7134,4 +7143,3 @@ if __name__ == "__main__":
     except RuntimeError:
         pass
     app.run()
-[file content end]
