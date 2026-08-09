@@ -25,7 +25,7 @@ pytube
 flask
 gunicorn
 python-telegram-bot
-python-dotenv
+#python-dotenv
 py7zr
 unzip
 gdown
