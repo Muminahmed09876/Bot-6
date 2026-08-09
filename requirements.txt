@@ -29,7 +29,7 @@ python-dotenv
 py7zr
 unzip
 gdown
-rclone
-google-auth
-google-auth-oauthlib
-google-api-python-client
+#rclone
+#google-auth
+#google-auth-oauthlib
+#google-api-python-client
