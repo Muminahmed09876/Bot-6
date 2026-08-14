@@ -1292,218 +1292,248 @@ async def set_bot_commands():
     except Exception as e:
         logger.warning("Set commands error: %s", e)
 
+# ===== UPDATED: sequential_upload_task WITHOUT lock =====
 async def sequential_upload_task(uid, client, message, tmp_path, renamed_file, status_msg_id, cancel_event, default_caption=None, original_caption=None, original_download_name=None):
-    if uid not in USER_UPLOAD_LOCKS:
-        USER_UPLOAD_LOCKS[uid] = asyncio.Lock()
-    
-    async with USER_UPLOAD_LOCKS[uid]:
-        if cancel_event.is_set():
-            if tmp_path.exists(): tmp_path.unlink()
-            return
+    if cancel_event.is_set():
+        if tmp_path.exists(): tmp_path.unlink()
+        return
+        
+    # (Issue 4) - Check if Drive Upload mode is ON
+    if uid in UPLOAD_DRIVE_MODE:
+        ok, link = await upload_to_gdrive(tmp_path, renamed_file, message)
+        
+        # সাকসেসফুল হোক বা না হোক, স্ট্যাটাস মেসেজ ডিলিট করতে চাইলে:
+        if status_msg_id:
+            try: await client.delete_messages(message.chat.id, [status_msg_id])
+            except: pass
             
-        # (Issue 4) - Check if Drive Upload mode is ON
-        if uid in UPLOAD_DRIVE_MODE:
-            ok, link = await upload_to_gdrive(tmp_path, renamed_file, message)
-            
-            # সাকসেসফুল হোক বা না হোক, স্ট্যাটাস মেসেজ ডিলিট করতে চাইলে:
-            if status_msg_id:
-                try: await client.delete_messages(message.chat.id, [status_msg_id])
-                except: pass
-                
-            if tmp_path.exists():
-                tmp_path.unlink()
-            return
+        if tmp_path.exists():
+            tmp_path.unlink()
+        return
 
-        # ড্রাইভ মোড না থাকলে নরমাল আপলোড:
-        await process_file_and_upload(client, message, tmp_path, target_name=renamed_file, original_download_name=original_download_name, messages_to_delete=[status_msg_id] if status_msg_id else [], cancel_event_passed=cancel_event, passed_uid=uid, default_caption=default_caption, original_caption_passed=original_caption)
+    # ড্রাইভ মোড না থাকলে নরমাল আপলোড:
+    await process_file_and_upload(client, message, tmp_path, target_name=renamed_file, original_download_name=original_download_name, messages_to_delete=[status_msg_id] if status_msg_id else [], cancel_event_passed=cancel_event, passed_uid=uid, default_caption=default_caption, original_caption_passed=original_caption)
+# =============================================
 
-# --- QUEUE WORKER WITH PAUSE LOGIC ---
+# ===== UPDATED: process_queue_handler with 10 concurrent workers =====
 async def process_queue_handler(uid, client):
+    if uid not in USER_QUEUES:
+        return
+    
     queue = USER_QUEUES[uid]
-    while not queue.empty():
-        while uid in USER_QUEUE_PAUSED:
-            await asyncio.sleep(1)
-            
-        # Extension Missing Queue Pause Check
-        while uid in MISSING_EXT_QUEUE and len(MISSING_EXT_QUEUE[uid]) > 0:
-            await asyncio.sleep(1)
-            
-        task_data = await queue.get()
-        try:
-            m = task_data.get('message')
-            original_name = task_data.get('original_name')
-            status_msg = task_data.get('status_msg') 
-            is_url = task_data.get('is_url', False)
-            is_yt_dlp = task_data.get('is_yt_dlp', False)
-            original_caption = task_data.get('original_caption')
-            
-            cancel_event = asyncio.Event()
-            TASKS.setdefault(uid, []).append(cancel_event)
-            if status_msg:
-                USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
-            
-            if is_yt_dlp:
-                url = task_data.get('url')
-                fmt = task_data.get('fmt')
-                title = task_data.get('title')
-                res = task_data.get('res', 'Unknown')
+    
+    # Create 10 concurrent workers for this user
+    async def worker(worker_id):
+        while True:
+            try:
+                # Check if queue is empty or paused
+                if queue.empty():
+                    break
+                    
+                while uid in USER_QUEUE_PAUSED:
+                    await asyncio.sleep(1)
+                    
+                # Extension Missing Queue Pause Check
+                while uid in MISSING_EXT_QUEUE and len(MISSING_EXT_QUEUE[uid]) > 0:
+                    await asyncio.sleep(1)
                 
-                safe_title = re.sub(r"[\\/*?\"<>|:]", "_", title)
-                if len(safe_title) > 100: safe_title = safe_title[:100]
+                # Get next task from queue
+                task_data = await queue.get()
                 
-                out_tmpl = str(TMP / f"{safe_title}.%(ext)s")
-                
-                ydl_opts = {
-                    'format': fmt,
-                    'outtmpl': out_tmpl,
-                    'quiet': True,
-                    'no_warnings': True,
-                    'merge_output_format': 'mkv',
-                }
+                try:
+                    m = task_data.get('message')
+                    original_name = task_data.get('original_name')
+                    status_msg = task_data.get('status_msg') 
+                    is_url = task_data.get('is_url', False)
+                    is_yt_dlp = task_data.get('is_yt_dlp', False)
+                    original_caption = task_data.get('original_caption')
+                    
+                    cancel_event = asyncio.Event()
+                    TASKS.setdefault(uid, []).append(cancel_event)
+                    if status_msg:
+                        USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
+                    
+                    if is_yt_dlp:
+                        url = task_data.get('url')
+                        fmt = task_data.get('fmt')
+                        title = task_data.get('title')
+                        res = task_data.get('res', 'Unknown')
+                        
+                        safe_title = re.sub(r"[\\/*?\"<>|:]", "_", title)
+                        if len(safe_title) > 100: safe_title = safe_title[:100]
+                        
+                        out_tmpl = str(TMP / f"{safe_title}.%(ext)s")
+                        
+                        ydl_opts = {
+                            'format': fmt,
+                            'outtmpl': out_tmpl,
+                            'quiet': True,
+                            'no_warnings': True,
+                            'merge_output_format': 'mkv',
+                        }
 
-                if COOKIES_TXT and os.path.exists(COOKIES_TXT):
-                    ydl_opts['cookiefile'] = COOKIES_TXT
-                    
-                last_edit = 0
-                loop = asyncio.get_running_loop()
-                start_t = time.time()
-                def my_hook(d):
-                    nonlocal last_edit
-                    if d['status'] == 'downloading':
-                        if cancel_event.is_set():
-                            raise Exception("Operation cancelled by user.")
-                        now = time.time()
-                        interval = USER_PROGRESS_INTERVAL.get(uid, 5)
-                        if now - last_edit >= interval:
-                            last_edit = now
-                            downloaded = d.get('downloaded_bytes', 0)
-                            total = d.get('total_bytes', 0) or d.get('total_bytes_estimate', 0)
-                            if total > 0:
-                                asyncio.run_coroutine_threadsafe(
-                                    progress_callback(downloaded, total, f"Downloading YT-DLP ({res}p)...", status_msg, start_t, original_name=title),
-                                    loop
-                                )
-                ydl_opts['progress_hooks'] = [my_hook]
-                
-                try:
-                    def run_dl():
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            info = ydl.extract_info(url, download=True)
-                            if 'requested_downloads' in info:
-                                return info['requested_downloads'][0]['filepath']
-                            return ydl.prepare_filename(info)
-                    
-                    if status_msg:
-                        await status_msg.edit(f"Starting YT-DLP Download for {res}p...", reply_markup=progress_keyboard())
-                    downloaded_file = await asyncio.to_thread(run_dl)
-                    actual_path = Path(downloaded_file)
-                    
-                    if cancel_event.is_set() or not actual_path.exists():
-                         raise Exception("Cancelled or download failed.")
-                         
-                    if status_msg:
-                        await status_msg.edit_text(f"Download complete ({res}p), uploading...", reply_markup=None)
-                    
-                    original_name = actual_path.name
-                    renamed_file = get_dynamic_filename(uid, original_name)
-                    
-                    yt_caption = f"{title} - {res}p" if title else original_name
-                    
-                    asyncio.create_task(
-                        sequential_upload_task(uid, client, m, actual_path, renamed_file, status_msg.id if status_msg else None, cancel_event, default_caption=yt_caption, original_caption=original_caption, original_download_name=original_name)
-                    )
-                except Exception as e:
-                    logger.error(f"YT-DLP Queue DL Error: {e}")
-                    raise e
-                        
-            elif is_url:
-                url = task_data.get('url')
-                # Issue 5: check if no extension
-                ext = Path(original_name).suffix
-                if not ext:
-                    # Pause and ask for extension
-                    keyboard = InlineKeyboardMarkup([
-                        [InlineKeyboardButton(".zip", callback_data=f"extsel_{uid}_.zip"),
-                         InlineKeyboardButton(".mkv", callback_data=f"extsel_{uid}_.mkv")],
-                        [InlineKeyboardButton(".mp4", callback_data=f"extsel_{uid}_.mp4"),
-                         InlineKeyboardButton(".rar", callback_data=f"extsel_{uid}_.rar")]
-                    ])
-                    if uid not in MISSING_EXT_QUEUE:
-                        MISSING_EXT_QUEUE[uid] = []
-                    
-                    if status_msg:
-                        await status_msg.edit("No format found in URL. Please select format:", reply_markup=keyboard)
-                    else:
-                        status_msg = await m.reply_text("No format found in URL. Please select format:", reply_markup=keyboard)
-                        
-                    task_data['status_msg'] = status_msg
-                    MISSING_EXT_QUEUE[uid].append(task_data)
-                    
-                    # Re-add to queue, but it will be paused until user selects extension and modifies task_data['original_name']
-                    continue
-                else:
-                    await download_and_process_generic(client, m, url, status_msg, cancel_event)
-            else:
-                file_info = m.video or m.document
-                tmp_path = get_unique_path(TMP, original_name)
-                
-                try:
-                    if status_msg:
-                        try:
-                            await status_msg.edit("Downloading...", reply_markup=progress_keyboard())
-                        except: pass
-                    
-                    start_t = time.time()
-                    async def dl_prog(current, total):
-                        if cancel_event.is_set():
-                            client.stop_transmission()
-                        if status_msg:
-                            await progress_callback(current, total, "Downloading...", status_msg, start_t, original_name=original_name)
+                        if COOKIES_TXT and os.path.exists(COOKIES_TXT):
+                            ydl_opts['cookiefile'] = COOKIES_TXT
                             
-                    await m.download(file_name=str(tmp_path), progress=dl_prog)
-                    
-                    if cancel_event.is_set():
-                         if tmp_path.exists(): tmp_path.unlink()
-                         if cancel_event in TASKS.get(uid, []):
-                             TASKS[uid].remove(cancel_event)
-                         continue
+                        last_edit = 0
+                        loop = asyncio.get_running_loop()
+                        start_t = time.time()
+                        def my_hook(d):
+                            nonlocal last_edit
+                            if d['status'] == 'downloading':
+                                if cancel_event.is_set():
+                                    raise Exception("Operation cancelled by user.")
+                                now = time.time()
+                                interval = USER_PROGRESS_INTERVAL.get(uid, 5)
+                                if now - last_edit >= interval:
+                                    last_edit = now
+                                    downloaded = d.get('downloaded_bytes', 0)
+                                    total = d.get('total_bytes', 0) or d.get('total_bytes_estimate', 0)
+                                    if total > 0:
+                                        asyncio.run_coroutine_threadsafe(
+                                            progress_callback(downloaded, total, f"Downloading YT-DLP ({res}p)...", status_msg, start_t, original_name=title),
+                                            loop
+                                        )
+                        ydl_opts['progress_hooks'] = [my_hook]
+                        
+                        try:
+                            def run_dl():
+                                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                    info = ydl.extract_info(url, download=True)
+                                    if 'requested_downloads' in info:
+                                        return info['requested_downloads'][0]['filepath']
+                                    return ydl.prepare_filename(info)
+                            
+                            if status_msg:
+                                await status_msg.edit(f"Starting YT-DLP Download for {res}p...", reply_markup=progress_keyboard())
+                            downloaded_file = await asyncio.to_thread(run_dl)
+                            actual_path = Path(downloaded_file)
+                            
+                            if cancel_event.is_set() or not actual_path.exists():
+                                 raise Exception("Cancelled or download failed.")
+                                 
+                            if status_msg:
+                                await status_msg.edit_text(f"Download complete ({res}p), uploading...", reply_markup=None)
+                            
+                            original_name = actual_path.name
+                            renamed_file = get_dynamic_filename(uid, original_name)
+                            
+                            yt_caption = f"{title} - {res}p" if title else original_name
+                            
+                            asyncio.create_task(
+                                sequential_upload_task(uid, client, m, actual_path, renamed_file, status_msg.id if status_msg else None, cancel_event, default_caption=yt_caption, original_caption=original_caption, original_download_name=original_name)
+                            )
+                        except Exception as e:
+                            logger.error(f"YT-DLP Queue DL Error: {e}")
+                            raise e
+                                
+                    elif is_url:
+                        url = task_data.get('url')
+                        # Issue 5: check if no extension
+                        ext = Path(original_name).suffix
+                        if not ext:
+                            # Pause and ask for extension
+                            keyboard = InlineKeyboardMarkup([
+                                [InlineKeyboardButton(".zip", callback_data=f"extsel_{uid}_.zip"),
+                                 InlineKeyboardButton(".mkv", callback_data=f"extsel_{uid}_.mkv")],
+                                [InlineKeyboardButton(".mp4", callback_data=f"extsel_{uid}_.mp4"),
+                                 InlineKeyboardButton(".rar", callback_data=f"extsel_{uid}_.rar")]
+                            ])
+                            if uid not in MISSING_EXT_QUEUE:
+                                MISSING_EXT_QUEUE[uid] = []
+                            
+                            if status_msg:
+                                await status_msg.edit("No format found in URL. Please select format:", reply_markup=keyboard)
+                            else:
+                                status_msg = await m.reply_text("No format found in URL. Please select format:", reply_markup=keyboard)
+                                
+                            task_data['status_msg'] = status_msg
+                            MISSING_EXT_QUEUE[uid].append(task_data)
+                            
+                            # Re-add to queue, but it will be paused until user selects extension and modifies task_data['original_name']
+                            # Put it back at the end of queue
+                            await queue.put(task_data)
+                            queue.task_done()
+                            continue
+                        else:
+                            await download_and_process_generic(client, m, url, status_msg, cancel_event)
+                    else:
+                        file_info = m.video or m.document
+                        tmp_path = get_unique_path(TMP, original_name)
+                        
+                        try:
+                            if status_msg:
+                                try:
+                                    await status_msg.edit("Downloading...", reply_markup=progress_keyboard())
+                                except: pass
+                            
+                            start_t = time.time()
+                            async def dl_prog(current, total):
+                                if cancel_event.is_set():
+                                    client.stop_transmission()
+                                if status_msg:
+                                    await progress_callback(current, total, "Downloading...", status_msg, start_t, original_name=original_name)
+                                    
+                            await m.download(file_name=str(tmp_path), progress=dl_prog)
+                            
+                            if cancel_event.is_set():
+                                 if tmp_path.exists(): tmp_path.unlink()
+                                 if cancel_event in TASKS.get(uid, []):
+                                     TASKS[uid].remove(cancel_event)
+                                 queue.task_done()
+                                 continue
 
-                    try:
-                        if status_msg:
-                            await status_msg.edit("Download complete, uploading...", reply_markup=None)
-                    except Exception:
-                        pass
+                            try:
+                                if status_msg:
+                                    await status_msg.edit("Download complete, uploading...", reply_markup=None)
+                            except Exception:
+                                pass
 
-                    renamed_file = get_dynamic_filename(uid, tmp_path.name)
-                    
-                    asyncio.create_task(
-                        sequential_upload_task(uid, client, m, tmp_path, renamed_file, status_msg.id if status_msg else None, cancel_event, default_caption=original_name, original_caption=original_caption, original_download_name=original_name)
-                    )
-                
+                            renamed_file = get_dynamic_filename(uid, tmp_path.name)
+                            
+                            asyncio.create_task(
+                                sequential_upload_task(uid, client, m, tmp_path, renamed_file, status_msg.id if status_msg else None, cancel_event, default_caption=original_name, original_caption=original_caption, original_download_name=original_name)
+                            )
+                        
+                        except Exception as e:
+                            if tmp_path.exists():
+                                tmp_path.unlink()
+                            raise e
+
                 except Exception as e:
-                    if tmp_path.exists():
-                        tmp_path.unlink()
-                    raise e
-
-        except Exception as e:
-            logger.error(f"Queue Loop Error: {e}")
-            USER_QUEUE_PAUSED.add(uid)
-            markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("Continue ▶️", callback_data="queue_continue"),
-                 InlineKeyboardButton("Delete 🗑️", callback_data="queue_delete")]
-            ])
-            err_msg = f"Task Failed for `{original_name}`: {e}\n\n⚠️ **Queue is Paused.** Please select an option to resume or cancel remaining queue."
-            if status_msg:
-                try: await status_msg.reply_text(err_msg, reply_markup=markup, quote=True)
-                except: pass
-            elif m:
-                try: await m.reply_text(err_msg, reply_markup=markup, quote=True)
-                except: pass
-        finally:
-            queue.task_done()
+                    logger.error(f"Queue Worker {worker_id} Error: {e}")
+                    USER_QUEUE_PAUSED.add(uid)
+                    markup = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("Continue ▶️", callback_data="queue_continue"),
+                         InlineKeyboardButton("Delete 🗑️", callback_data="queue_delete")]
+                    ])
+                    err_msg = f"Task Failed for `{original_name}`: {e}\n\n⚠️ **Queue is Paused.** Please select an option to resume or cancel remaining queue."
+                    if status_msg:
+                        try: await status_msg.reply_text(err_msg, reply_markup=markup, quote=True)
+                        except: pass
+                    elif m:
+                        try: await m.reply_text(err_msg, reply_markup=markup, quote=True)
+                        except: pass
+                finally:
+                    queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Unexpected error in worker {worker_id}: {e}")
+                await asyncio.sleep(1)
+    
+    # Start 10 workers
+    workers = []
+    for i in range(10):
+        worker_task = asyncio.create_task(worker(i))
+        workers.append(worker_task)
+    
+    # Wait for all workers to complete
+    await asyncio.gather(*workers)
     
     if uid in USER_WORKERS: del USER_WORKERS[uid]
     if uid in USER_QUEUES: del USER_QUEUES[uid]
+# =============================================
 
 @app.on_callback_query(filters.regex(r"^extsel_"))
 async def ext_select_cb(c, cb):
