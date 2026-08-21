@@ -247,7 +247,7 @@ flask_app = Flask(__name__)
 
 MAIN_LOOP = None # Required for TG streaming
 
-# ===== NEW: Worker Bot Class for Parallel Processing =====
+# ===== NEW: Worker Bot Class for Parallel Processing (FIXED) =====
 class WorkerClient(Client):
     def __init__(self, name, bot_token, worker_id):
         super().__init__(name, api_id=API_ID, api_hash=API_HASH, bot_token=bot_token, workers=100, sleep_threshold=86400)
@@ -256,13 +256,19 @@ class WorkerClient(Client):
         self.current_task = None
         self.loop = asyncio.new_event_loop()
 
+    async def start_async(self):
+        await self.start()
+
     def start_worker(self):
         asyncio.set_event_loop(self.loop)
-        self.loop.run_until_complete(self.start())
+        self.loop.run_until_complete(self.start_async())
         logger.info(f"Worker {self.worker_id} started.")
 
+    async def stop_async(self):
+        await self.stop()
+
     def stop_worker(self):
-        self.loop.run_until_complete(self.stop())
+        self.loop.run_until_complete(self.stop_async())
         logger.info(f"Worker {self.worker_id} stopped.")
 
     async def process_task(self, task_data):
