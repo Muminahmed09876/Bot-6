@@ -207,6 +207,51 @@ app = Client("mybot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, wor
 flask_app = Flask(__name__)
 MAIN_LOOP = None 
 
+def sanitize_filename(name: str, max_len: int = 200) -> str:
+    """Sanitize a filename to be safe for filesystem and limit length."""
+    if not name:
+        return "file"
+    # Remove unsafe characters
+    name = re.sub(r'[\\/*?\"<>|:\x00-\x1f]', '_', name)
+    # Remove leading/trailing dots and spaces
+    name = name.strip('. ')
+    if not name:
+        return "file"
+    # Limit length
+    if len(name) > max_len:
+        ext = Path(name).suffix
+        if len(ext) > 20:
+            ext = ""
+        stem_len = max_len - len(ext)
+        if stem_len < 1:
+            stem_len = max_len
+            ext = ""
+        name = name[:stem_len] + ext
+    return name
+
+def make_safe_filename_from_url(url: str, max_len: int = 200) -> str:
+    """Create a safe filename from a URL when original name is not available."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        # Try to get filename from path
+        path_name = os.path.basename(parsed.path)
+        path_name = urllib.parse.unquote(path_name)
+        if path_name and len(path_name) > 1 and path_name != "/":
+            name = sanitize_filename(path_name, max_len)
+            if name and name != "file":
+                return name
+        # Fallback: use hostname + path hash
+        hostname = parsed.hostname or "download"
+        hostname = sanitize_filename(hostname, 50)
+        # Generate a short unique name
+        import hashlib
+        url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
+        return f"{hostname}_{url_hash}.mp4"
+    except Exception:
+        import hashlib
+        url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
+        return f"download_{url_hash}.mp4"
+
 def get_next_format_number(uid, format_ext):
     """Get the next available number for a given format in TMP directory."""
     existing_numbers = set()
@@ -954,8 +999,7 @@ async def process_single_download_with_semaphore(uid, client, task_data):
                 fmt = task_data.get('fmt')
                 title = task_data.get('title')
                 res = task_data.get('res', 'Unknown')
-                safe_title = re.sub(r"[\\/*?\"<>|:]", "_", title)
-                if len(safe_title) > 100: safe_title = safe_title[:100]
+                safe_title = sanitize_filename(re.sub(r"[\\/*?\"<>|:]", "_", title), 100)
                 out_tmpl = str(TMP / f"{safe_title}.%(ext)s")
                 ydl_opts = {
                     'format': fmt,
@@ -1249,6 +1293,7 @@ def generate_post_caption(data: dict) -> str:
     return final_caption
 
 async def get_filename_from_url(url):
+    """Get filename from URL, with safe fallback."""
     try:
         connector = aiohttp.TCPConnector(limit=0, family=socket.AF_INET, use_dns_cache=True, ttl_dns_cache=300)
         async with aiohttp.ClientSession(connector=connector) as sess:
@@ -1258,20 +1303,16 @@ async def get_filename_from_url(url):
                     fname_match = re.findall(r'filename\*?=(?:UTF-8\'\')?["\']?([^"\';\n]+)', cd, re.IGNORECASE)
                     if fname_match:
                         extracted_name = urllib.parse.unquote(fname_match[0])
-                        if len(extracted_name) > 200:
-                            ext = Path(extracted_name).suffix
-                            extracted_name = extracted_name[:200 - len(ext)] + ext
-                        return extracted_name
+                        return sanitize_filename(extracted_name, 200)
     except Exception:
         pass
     fname = url.split("/")[-1].split("?")[0]
     fname = urllib.parse.unquote(fname)
-    if len(fname) > 200:
-        ext = Path(fname).suffix
-        if not ext or len(ext) > 20:
-            ext = ".mp4"
-        fname = fname[:200 - len(ext)] + ext
-    return fname
+    # If fname looks like a valid filename (has extension and reasonable length)
+    if fname and len(fname) > 0 and len(fname) <= 200 and '.' in fname:
+        return sanitize_filename(fname, 200)
+    # Fallback: create safe name from URL
+    return make_safe_filename_from_url(url, 200)
 
 async def download_stream(resp, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
     total = 0
@@ -1578,8 +1619,7 @@ async def process_queue_handler(uid, client):
                 fmt = task_data.get('fmt')
                 title = task_data.get('title')
                 res = task_data.get('res', 'Unknown')
-                safe_title = re.sub(r"[\\/*?\"<>|:]", "_", title)
-                if len(safe_title) > 100: safe_title = safe_title[:100]
+                safe_title = sanitize_filename(re.sub(r"[\\/*?\"<>|:]", "_", title), 100)
                 out_tmpl = str(TMP / f"{safe_title}.%(ext)s")
                 ydl_opts = {
                     'format': fmt,
@@ -2953,8 +2993,9 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
         original_name_pass = m.video.file_name if getattr(m, 'video', None) else (m.document.file_name if getattr(m, 'document', None) else "telegram_file.zip")
     if not Path(original_name_pass).suffix:
         original_name_pass += ".zip"
-    safe_name = re.sub(r"[\\/*?\"<>|:]", "_", original_name_pass)
-    tmp_in = get_unique_path(TMP, safe_name)
+    # Sanitize and limit name
+    original_name_pass = sanitize_filename(original_name_pass, 200)
+    tmp_in = get_unique_path(TMP, original_name_pass)
     cancel_event = asyncio.Event()
     TASKS.setdefault(uid, []).append(cancel_event)
     DOWNLOAD_TASKS.setdefault(uid, []).append(cancel_event)
@@ -3494,7 +3535,7 @@ async def handle_convert_input(c, m, url=None, file_info=None, override_path=Non
             original_name = file_info.file_name if file_info.file_name else "telegram_video.mp4"
         elif override_path:
             original_name = Path(override_path).name
-        safe_name = re.sub(r"[\\/*?\"<>|:]", "_", original_name)
+        safe_name = sanitize_filename(re.sub(r"[\\/*?\"<>|:]", "_", original_name), 200)
         tmp_in = get_unique_path(TMP, safe_name)
         ok = False
         if override_path:
@@ -4598,7 +4639,7 @@ async def process_batch_audio_input(uid, c, m, url=None, file_info=None, target_
             if url: original_name = await get_filename_from_url(url)
             elif file_info: original_name = file_info.file_name or "video.mp4"
             status_msg = await m.reply_text(f"Downloading `{original_name}` to build list...", reply_markup=progress_keyboard(task_type='download'))
-            safe_name = re.sub(r"[\\/*?\"<>|:]", "_", original_name)
+            safe_name = sanitize_filename(re.sub(r"[\\/*?\"<>|:]", "_", original_name), 200)
             tmp_in = get_unique_path(TMP, safe_name)
             if url:
                 if is_drive_url(url):
@@ -4725,10 +4766,18 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
         USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
     try:
         fname = await get_filename_from_url(url)
-        safe_name = re.sub(r"[\\/*?\"<>|:]", "_", fname)
-        if len(safe_name) > 100:
-            ext = Path(safe_name).suffix
-            safe_name = safe_name[:100 - len(ext)] + ext
+        safe_name = sanitize_filename(re.sub(r"[\\/*?\"<>|:]", "_", fname), 200)
+        # Apply format rename if active
+        if uid in FORMAT_RENAME_MODE:
+            fmt_data = FORMAT_RENAME_MODE[uid]
+            if fmt_data.get('active'):
+                format_ext = fmt_data['format']
+                safe_name = get_formatted_rename(uid, format_ext)
+        elif uid in NORMAL_FORMAT_RENAME_MODE:
+            fmt_data = NORMAL_FORMAT_RENAME_MODE[uid]
+            if fmt_data.get('active'):
+                format_ext = fmt_data['format']
+                safe_name = get_formatted_rename(uid, format_ext)
         tmp_in = get_unique_path(TMP, safe_name)
         ok, err = False, None
         if is_drive_url(url):
@@ -4744,7 +4793,11 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
         if not ok:
             raise Exception(f"Download Failed: {err}")
         await status_msg.edit("Download complete. Uploading...", reply_markup=None)
-        renamed_file = get_dynamic_filename(uid, tmp_in.name)
+        # For normal format rename mode, use the formatted name but upload with normal metadata
+        if uid in NORMAL_FORMAT_RENAME_MODE and NORMAL_FORMAT_RENAME_MODE[uid].get('active'):
+            renamed_file = tmp_in.name
+        else:
+            renamed_file = get_dynamic_filename(uid, tmp_in.name)
         if uid in MKV_AUDIO_CHANGE_MODE:
             try:
                 await status_msg.edit("Checking file for audio track analysis...", reply_markup=progress_keyboard(task_type='download'))
@@ -4889,6 +4942,8 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
         return
     file_info = m.video or m.document
     original_name = file_info.file_name if file_info and file_info.file_name else f"file_{file_info.file_unique_id}"
+    # Sanitize and limit original_name
+    original_name = sanitize_filename(original_name, 200)
     if uid in DOWNLOAD_T_MODE:
         dl_link = f"{PUBLIC_BASE_URL}/dl_stream?file_id={file_info.file_id}&filename={urllib.parse.quote(original_name)}"
         st_link = f"{PUBLIC_BASE_URL}/stream?file_id={file_info.file_id}&filename={urllib.parse.quote(original_name)}"
