@@ -179,7 +179,6 @@ MAX_SIZE = 1000 * 1024 * 1024 * 1024
 FORMAT_RENAME_MODE = {}  # uid -> {'format': '.mkv', 'active': True}
 NORMAL_FORMAT_RENAME_MODE = {}  # uid -> {'format': '.mkv', 'active': True} for normal mode
 ZIP_FORMAT_RENAME_MODE = {}  # uid -> {'format': '.zip', 'active': True} for zip mode
-FORMAT_RENAME_COUNTERS = {}  # uid -> {'format': '.mkv', 'counter': 1}
 RENAME_BASE_NAME = "[@TA_HD_Anime] Telegram Channel"
 
 # ===== CONCURRENCY CONTROL SETTINGS =====
@@ -212,13 +211,10 @@ def sanitize_filename(name: str, max_len: int = 200) -> str:
     """Sanitize a filename to be safe for filesystem and limit length."""
     if not name:
         return "file"
-    # Remove unsafe characters
     name = re.sub(r'[\\/*?\"<>|:\x00-\x1f]', '_', name)
-    # Remove leading/trailing dots and spaces
     name = name.strip('. ')
     if not name:
         return "file"
-    # Limit length
     if len(name) > max_len:
         ext = Path(name).suffix
         if len(ext) > 20:
@@ -234,17 +230,14 @@ def make_safe_filename_from_url(url: str, max_len: int = 200) -> str:
     """Create a safe filename from a URL when original name is not available."""
     try:
         parsed = urllib.parse.urlparse(url)
-        # Try to get filename from path
         path_name = os.path.basename(parsed.path)
         path_name = urllib.parse.unquote(path_name)
         if path_name and len(path_name) > 1 and path_name != "/":
             name = sanitize_filename(path_name, max_len)
             if name and name != "file":
                 return name
-        # Fallback: use hostname + path hash
         hostname = parsed.hostname or "download"
         hostname = sanitize_filename(hostname, 50)
-        # Generate a short unique name
         import hashlib
         url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
         return f"{hostname}_{url_hash}.mp4"
@@ -253,39 +246,31 @@ def make_safe_filename_from_url(url: str, max_len: int = 200) -> str:
         url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
         return f"download_{url_hash}.mp4"
 
-def get_next_format_number(uid, format_ext):
+def get_next_format_number(format_ext):
     """Get the next available number for a given format in TMP directory.
-    Scans TMP for files matching pattern '[RENAME_BASE_NAME] NN.format' or 'NN.format'."""
+    Scans TMP for files matching pattern '[@TA_HD_Anime] Telegram Channel NN.ext'."""
     existing_numbers = set()
     if TMP.exists():
         for f in TMP.iterdir():
             if f.is_file():
-                fname = f.name
-                # Check if it matches the rename pattern
-                # Pattern: [@TA_HD_Anime] Telegram Channel NN.ext  OR  NN.ext
                 stem = f.stem
                 ext = f.suffix.lower()
                 if ext != format_ext.lower():
                     continue
-                # Remove base name prefix if present
+                # Check if stem matches "RENAME_BASE_NAME NN"
                 if stem.startswith(RENAME_BASE_NAME):
                     num_part = stem[len(RENAME_BASE_NAME):].strip()
                     if num_part.isdigit():
                         existing_numbers.add(int(num_part))
-                elif stem.isdigit():
-                    existing_numbers.add(int(stem))
     counter = 1
     while counter in existing_numbers:
         counter += 1
     return counter
 
-def get_formatted_rename(uid, format_ext, with_prefix=True):
-    """Generate a new rename like '[@TA_HD_Anime] Telegram Channel 01.mkv' or '1.mkv'.
-    Format: [@TA_HD_Anime] Telegram Channel NN.ext"""
-    num = get_next_format_number(uid, format_ext)
-    if with_prefix:
-        return f"{RENAME_BASE_NAME} {num:02d}{format_ext}"
-    return f"{num}{format_ext}"
+def get_formatted_rename(format_ext):
+    """Generate a new rename like '[@TA_HD_Anime] Telegram Channel 01.mkv'."""
+    num = get_next_format_number(format_ext)
+    return f"{RENAME_BASE_NAME} {num:02d}{format_ext}"
 
 def get_gdrive_service():
     if not GDRIVE_SERVICE_KEY:
@@ -366,7 +351,7 @@ async def send_mode_tutorial(c, chat_id, mode_name):
             "‣ `link` পাঠালে ডাউনলোডের পর ডাইরেক্ট ডাউনলোড লিঙ্ক দেবে।\n"
             "‣ `t` পাঠালে ডাউনলোড না করেই সরাসরি Stream/Direct Link দেবে (দুটি লিঙ্ক থাকবে: ডাউনলোড এবং প্লে করার জন্য)।\n"
             "‣ `off` লিখে নরমাল ডাউনলোড মোডে ফিরে যান।\n"
-            "‣ `mkv`, `mp4`, `zip` ইত্যাদি পাঠালে সেই ফরম্যাটে rename হবে।\n"
+            "‣ `mkv`, `mp4`, `zip` ইত্যাদি পাঠালে সেই ফরম্যাটে rename হয়ে save হবে।\n"
             "‣ `zip` পাঠালে download শেষে extract হবে।"
         ),
         "batch_audio_add": (
@@ -831,7 +816,6 @@ async def update_batch_status(c, m, uid, status_text, reply_markup=None):
 # ===== ORDERED OUTPUT HELPER FUNCTIONS =====
 
 async def add_to_output_queue(uid, output_data):
-    """Add an output item to the user's ordered output queue."""
     if uid not in USER_OUTPUT_QUEUES:
         USER_OUTPUT_QUEUES[uid] = asyncio.Queue()
         USER_OUTPUT_ORDER[uid] = 0
@@ -845,7 +829,6 @@ async def add_to_output_queue(uid, output_data):
         USER_OUTPUT_WORKERS[uid] = asyncio.create_task(process_output_queue(uid))
 
 async def process_output_queue(uid):
-    """Process the ordered output queue, sending items in the correct order."""
     if uid not in USER_OUTPUT_LOCK:
         USER_OUTPUT_LOCK[uid] = asyncio.Lock()
     async with USER_OUTPUT_LOCK[uid]:
@@ -873,7 +856,6 @@ async def process_output_queue(uid):
                 await asyncio.sleep(1)
 
 async def add_to_convert_output_queue(uid, output_data):
-    """Add a converted file to the user's ordered convert output queue."""
     if uid not in CONVERT_OUTPUT_QUEUES:
         CONVERT_OUTPUT_QUEUES[uid] = asyncio.Queue()
         CONVERT_OUTPUT_ORDER[uid] = 0
@@ -887,7 +869,6 @@ async def add_to_convert_output_queue(uid, output_data):
         CONVERT_OUTPUT_WORKERS[uid] = asyncio.create_task(process_convert_output_queue(uid))
 
 async def process_convert_output_queue(uid):
-    """Process the ordered convert output queue, sending items in the correct order."""
     if uid not in CONVERT_OUTPUT_LOCK:
         CONVERT_OUTPUT_LOCK[uid] = asyncio.Lock()
     async with CONVERT_OUTPUT_LOCK[uid]:
@@ -917,7 +898,6 @@ async def process_convert_output_queue(uid):
 # ===== QUEUE SYSTEM WITH CONCURRENCY =====
 
 async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_dlp=False, fmt=None, title=None, res=None, original_caption=None, task_type='upload'):
-    """Add item to the appropriate queue (download or upload) with concurrency support."""
     if task_type == 'download':
         if uid not in USER_DOWNLOAD_QUEUES:
             USER_DOWNLOAD_QUEUES[uid] = asyncio.Queue()
@@ -951,10 +931,9 @@ async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_d
         'res': res,
         'original_caption': original_caption,
         'task_type': task_type,
-        'order': USER_OUTPUT_ORDER.get(uid, 0)  # Capture order when added
+        'order': USER_OUTPUT_ORDER.get(uid, 0)
     })
     
-    # Start worker if not already running
     if uid not in worker_dict or worker_dict[uid].done():
         if task_type == 'download':
             worker_dict[uid] = asyncio.create_task(process_download_queue_handler(uid, c))
@@ -962,38 +941,29 @@ async def add_to_queue(uid, c, m, original_name, is_url=False, url=None, is_yt_d
             worker_dict[uid] = asyncio.create_task(process_upload_queue_handler(uid, c))
 
 async def process_download_queue_handler(uid, client):
-    """Process download queue with concurrent downloads (max 5)."""
     queue = USER_DOWNLOAD_QUEUES.get(uid)
     if not queue:
         return
-    
-    # Process items concurrently using semaphore
     tasks = []
     while not queue.empty():
         while uid in USER_QUEUE_PAUSED:
             await asyncio.sleep(1)
         while uid in MISSING_EXT_QUEUE and len(MISSING_EXT_QUEUE[uid]) > 0:
             await asyncio.sleep(1)
-        
         task_data = await queue.get()
-        # Start a download task with semaphore
         task = asyncio.create_task(
             process_single_download_with_semaphore(uid, client, task_data)
         )
         tasks.append(task)
         queue.task_done()
-    
-    # Wait for all download tasks to complete
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-    
     if uid in DOWNLOAD_WORKERS:
         del DOWNLOAD_WORKERS[uid]
     if uid in USER_DOWNLOAD_QUEUES:
         del USER_DOWNLOAD_QUEUES[uid]
 
 async def process_single_download_with_semaphore(uid, client, task_data):
-    """Process a single download with semaphore for concurrency control."""
     async with DOWNLOAD_SEMAPHORE:
         try:
             m = task_data.get('message')
@@ -1064,7 +1034,6 @@ async def process_single_download_with_semaphore(uid, client, task_data):
                     original_name = actual_path.name
                     renamed_file = get_dynamic_filename(uid, original_name)
                     yt_caption = f"{title} - {res}p" if title else original_name
-                    # Add to upload queue
                     await add_to_queue(uid, client, m, original_name, is_url=False, original_caption=yt_caption, task_type='upload')
                 except Exception as e:
                     logger.error(f"YT-DLP Download Error: {e}")
@@ -1091,7 +1060,6 @@ async def process_single_download_with_semaphore(uid, client, task_data):
                 else:
                     await download_and_process_generic(client, m, url, status_msg, cancel_event)
             else:
-                # Telegram file download
                 file_info = m.video or m.document
                 tmp_path = get_unique_path(TMP, original_name)
                 try:
@@ -1139,38 +1107,29 @@ async def process_single_download_with_semaphore(uid, client, task_data):
                 pass
 
 async def process_upload_queue_handler(uid, client):
-    """Process upload queue with concurrent uploads (max 5)."""
     queue = USER_UPLOAD_QUEUES.get(uid)
     if not queue:
         return
-    
-    # Process items concurrently using semaphore
     tasks = []
     while not queue.empty():
         while uid in USER_QUEUE_PAUSED:
             await asyncio.sleep(1)
         while uid in MISSING_EXT_QUEUE and len(MISSING_EXT_QUEUE[uid]) > 0:
             await asyncio.sleep(1)
-        
         task_data = await queue.get()
-        # Start an upload task with semaphore
         task = asyncio.create_task(
             process_single_upload_with_semaphore(uid, client, task_data)
         )
         tasks.append(task)
         queue.task_done()
-    
-    # Wait for all upload tasks to complete
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-    
     if uid in UPLOAD_WORKERS:
         del UPLOAD_WORKERS[uid]
     if uid in USER_UPLOAD_QUEUES:
         del USER_UPLOAD_QUEUES[uid]
 
 async def process_single_upload_with_semaphore(uid, client, task_data):
-    """Process a single upload with semaphore for concurrency control."""
     async with UPLOAD_SEMAPHORE:
         try:
             m = task_data.get('message')
@@ -1185,22 +1144,18 @@ async def process_single_upload_with_semaphore(uid, client, task_data):
             if status_msg:
                 USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
             
-            # Find the downloaded file in tmp directory
             downloaded_files = list(TMP.glob(f"*{original_name}*")) if original_name else []
             if not downloaded_files:
-                # Try to find by name pattern
                 name_pattern = re.sub(r'[^\w\s.-]', '_', original_name)
                 downloaded_files = list(TMP.glob(f"*{name_pattern}*"))
             
             if not downloaded_files:
-                # If file not found, maybe it's already processed or direct upload
                 logger.warning(f"No downloaded file found for: {original_name}")
                 return
             
             tmp_path = downloaded_files[0]
             renamed_file = get_dynamic_filename(uid, original_name)
             
-            # Upload the file
             if uid in UPLOAD_DRIVE_MODE:
                 ok, link = await upload_to_gdrive(tmp_path, renamed_file, m)
                 if status_msg:
@@ -1209,7 +1164,6 @@ async def process_single_upload_with_semaphore(uid, client, task_data):
                 if tmp_path.exists():
                     tmp_path.unlink()
             else:
-                # Add to ordered output queue instead of direct upload
                 output_data = {
                     'message': m,
                     'file_path': tmp_path,
@@ -1217,14 +1171,11 @@ async def process_single_upload_with_semaphore(uid, client, task_data):
                     'send_func': send_uploaded_file
                 }
                 await add_to_output_queue(uid, output_data)
-                
-                # Notify status
                 if status_msg:
                     try:
                         await status_msg.edit(f"✅ Upload queued for: `{renamed_file}`")
                     except:
                         pass
-                
         except Exception as e:
             logger.error(f"Upload Error: {e}")
             USER_QUEUE_PAUSED.add(uid)
@@ -1242,7 +1193,6 @@ async def process_single_upload_with_semaphore(uid, client, task_data):
                 pass
 
 async def send_uploaded_file(message, file_path, file_name):
-    """Send an uploaded file to the user with proper processing."""
     uid = message.from_user.id
     cancel_event = asyncio.Event()
     TASKS.setdefault(uid, []).append(cancel_event)
@@ -1309,7 +1259,6 @@ def generate_post_caption(data: dict) -> str:
     return final_caption
 
 async def get_filename_from_url(url):
-    """Get filename from URL, with safe fallback."""
     try:
         connector = aiohttp.TCPConnector(limit=0, family=socket.AF_INET, use_dns_cache=True, ttl_dns_cache=300)
         async with aiohttp.ClientSession(connector=connector) as sess:
@@ -1324,10 +1273,8 @@ async def get_filename_from_url(url):
         pass
     fname = url.split("/")[-1].split("?")[0]
     fname = urllib.parse.unquote(fname)
-    # If fname looks like a valid filename (has extension and reasonable length)
     if fname and len(fname) > 0 and len(fname) <= 200 and '.' in fname:
         return sanitize_filename(fname, 200)
-    # Fallback: create safe name from URL
     return make_safe_filename_from_url(url, 200)
 
 async def download_stream(resp, out_path: Path, message: Message = None, cancel_event: asyncio.Event = None, original_name=None):
@@ -2131,7 +2078,6 @@ async def full_reset_bot_cb(c, cb):
     FORMAT_RENAME_MODE.clear()
     NORMAL_FORMAT_RENAME_MODE.clear()
     ZIP_FORMAT_RENAME_MODE.clear()
-    FORMAT_RENAME_COUNTERS.clear()
     if uid in USER_QUEUES:
         while not USER_QUEUES[uid].empty():
             try: USER_QUEUES[uid].get_nowait(); USER_QUEUES[uid].task_done()
@@ -2932,7 +2878,6 @@ async def extract_archive_advanced(archive_path: Path, extract_dir: Path, status
     ext = archive_path.suffix.lower()
     extracted = False
     
-    # Try zip first
     if ext == '.zip':
         try:
             with zipfile.ZipFile(archive_path, 'r') as zip_ref:
@@ -2941,7 +2886,6 @@ async def extract_archive_advanced(archive_path: Path, extract_dir: Path, status
         except Exception as e:
             logger.warning(f"ZIP extraction failed: {e}")
     
-    # Try rar
     if not extracted and ext == '.rar' and 'rarfile' in globals():
         try:
             with rarfile.RarFile(archive_path, 'r') as rar_ref:
@@ -2950,7 +2894,6 @@ async def extract_archive_advanced(archive_path: Path, extract_dir: Path, status
         except Exception as e:
             logger.warning(f"RAR extraction failed: {e}")
     
-    # Try 7z
     if not extracted and ext == '.7z' and 'py7zr' in globals():
         try:
             with py7zr.SevenZipFile(archive_path, mode='r') as sz_ref:
@@ -2959,7 +2902,6 @@ async def extract_archive_advanced(archive_path: Path, extract_dir: Path, status
         except Exception as e:
             logger.warning(f"7Z extraction failed: {e}")
     
-    # Try tar
     if not extracted and ext in ['.tar', '.gz', '.bz2', '.xz']:
         try:
             with tarfile.open(archive_path, 'r:*') as tar_ref:
@@ -2968,7 +2910,6 @@ async def extract_archive_advanced(archive_path: Path, extract_dir: Path, status
         except Exception as e:
             logger.warning(f"TAR extraction failed: {e}")
     
-    # Fallback to patoolib for rar/7z and other formats
     if not extracted and 'patoolib' in globals():
         try:
             await asyncio.to_thread(patoolib.extract_archive, str(archive_path), outdir=str(extract_dir))
@@ -2976,7 +2917,6 @@ async def extract_archive_advanced(archive_path: Path, extract_dir: Path, status
         except Exception as e:
             logger.warning(f"patoolib extraction failed: {e}")
     
-    # Fallback to 7z command
     if not extracted:
         try:
             cmd = ['7z', 'x', str(archive_path), '-p-', '-aoa', f'-o{extract_dir}']
@@ -2987,7 +2927,6 @@ async def extract_archive_advanced(archive_path: Path, extract_dir: Path, status
         except Exception as e:
             logger.warning(f"7z command extraction failed: {e}")
     
-    # Final fallback to shutil
     if not extracted:
         try:
             await asyncio.to_thread(shutil.unpack_archive, str(archive_path), str(extract_dir))
@@ -3009,8 +2948,13 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
         original_name_pass = m.video.file_name if getattr(m, 'video', None) else (m.document.file_name if getattr(m, 'document', None) else "telegram_file.zip")
     if not Path(original_name_pass).suffix:
         original_name_pass += ".zip"
-    # Sanitize and limit name
     original_name_pass = sanitize_filename(original_name_pass, 200)
+    
+    # Check if ZIP format rename mode is active for URL downloads
+    if url and uid in ZIP_FORMAT_RENAME_MODE and ZIP_FORMAT_RENAME_MODE[uid].get('active'):
+        format_ext = ZIP_FORMAT_RENAME_MODE[uid]['format']
+        original_name_pass = get_formatted_rename(format_ext)
+    
     tmp_in = get_unique_path(TMP, original_name_pass)
     cancel_event = asyncio.Event()
     TASKS.setdefault(uid, []).append(cancel_event)
@@ -3065,7 +3009,6 @@ async def execute_zip_download_and_extract(c, m, url=None, local_path=None, targ
         extracted = await extract_archive_advanced(tmp_in, ext_dir, status_msg, cancel_event)
         if not extracted:
             raise Exception("All extraction methods failed. Archive may be corrupted or unsupported.")
-        # Handle nested archives
         found_zip = True
         while found_zip:
             found_zip = False
@@ -3742,7 +3685,6 @@ async def execute_conversions(session_id, client, batch_apply=False):
     UPLOAD_TASKS.setdefault(uid, []).append(cancel_event)
     USER_TASK_EVENTS.setdefault(uid, {})[status_msg_id] = cancel_event
     
-    # Use semaphore for concurrent conversions
     async with CONVERT_SEMAPHORE:
         try:
             total_videos = len(videos_to_convert)
@@ -3810,7 +3752,6 @@ async def execute_conversions(session_id, client, batch_apply=False):
                         await process.wait()
                         if cancel_event.is_set(): raise Exception("Cancelled by user")
                         if out_path.exists() and out_path.stat().st_size > 0:
-                            # Add to ordered convert output queue
                             output_data = {
                                 'message': msg,
                                 'file_path': out_path,
@@ -3843,7 +3784,6 @@ async def execute_conversions(session_id, client, batch_apply=False):
             except: pass
 
 async def send_converted_file(message, file_path, file_name):
-    """Send a converted file to the user."""
     uid = message.from_user.id
     cancel_event = asyncio.Event()
     TASKS.setdefault(uid, []).append(cancel_event)
@@ -4167,10 +4107,9 @@ async def text_handler(c, m: Message):
             return
         # Accept both .mkv and mkv (with or without dot)
         elif text_lower in [".mkv", "mkv", ".mp4", "mp4", ".zip", "zip", ".rar", "rar", ".7z", "7z", ".avi", "avi", ".mov", "mov", ".flv", "flv", ".wmv", "wmv", ".webm", "webm", ".mp3", "mp3", ".m4a", "m4a", ".flac", "flac", ".wav", "wav", ".aac", "aac"]:
-            # Normalize: ensure it starts with a dot
             fmt = text_lower if text_lower.startswith('.') else f".{text_lower}"
             FORMAT_RENAME_MODE[uid] = {'format': fmt, 'active': True}
-            await m.reply_text(f"Format Rename Mode **ON** for `{fmt}`. All downloads will be renamed sequentially as `[@TA_HD_Anime] Telegram Channel NN{fmt}`.")
+            await m.reply_text(f"Format Rename Mode **ON** for `{fmt}`. All URLs will be downloaded with name `[@TA_HD_Anime] Telegram Channel NN{fmt}`.")
             if fmt == ".zip":
                 await m.reply_text("ZIP format selected. Downloaded archives will be extracted after download.")
             return
@@ -4183,11 +4122,10 @@ async def text_handler(c, m: Message):
             return
     # Normal mode format rename (when no mode is ON) - works for LINK ONLY
     if not DOWNLOAD_ONLY_MODE and not ZIP_DOWNLOAD_MODE and not CONVERT_MODE and not BATCH_AUDIO_MODE and not MKV_AUDIO_CHANGE_MODE and not EDIT_CAPTION_MODE and not UPLOAD_DRIVE_MODE:
-        # Accept both .mkv and mkv
         if text_lower in [".mkv", "mkv", ".mp4", "mp4"]:
             fmt = text_lower if text_lower.startswith('.') else f".{text_lower}"
             NORMAL_FORMAT_RENAME_MODE[uid] = {'format': fmt, 'active': True}
-            await m.reply_text(f"Normal Format Rename Mode **ON** for `{fmt}`. URLs sent will be saved as `[@TA_HD_Anime] Telegram Channel NN{fmt}` and uploaded with normal metadata/thumbnail/caption uid.")
+            await m.reply_text(f"Normal Format Rename Mode **ON** for `{fmt}`. URLs will be downloaded as `[@TA_HD_Anime] Telegram Channel NN{fmt}` and uploaded with metadata uid `[@TA_HD_Anime] Telegram Channel{fmt}`.")
             return
         elif text_lower == "off" and uid in NORMAL_FORMAT_RENAME_MODE:
             NORMAL_FORMAT_RENAME_MODE.pop(uid, None)
@@ -4198,7 +4136,7 @@ async def text_handler(c, m: Message):
         if text_lower in [".zip", "zip", ".rar", "rar", ".7z", "7z"]:
             fmt = text_lower if text_lower.startswith('.') else f".{text_lower}"
             ZIP_FORMAT_RENAME_MODE[uid] = {'format': fmt, 'active': True}
-            await m.reply_text(f"ZIP Format Rename Mode **ON** for `{fmt}`. Archives will be renamed as `[@TA_HD_Anime] Telegram Channel NN{fmt}` and extracted.")
+            await m.reply_text(f"ZIP Format Rename Mode **ON** for `{fmt}`. Archives will be downloaded as `[@TA_HD_Anime] Telegram Channel NN{fmt}` and extracted.")
             return
         elif text_lower == "off" and uid in ZIP_FORMAT_RENAME_MODE:
             ZIP_FORMAT_RENAME_MODE.pop(uid, None)
@@ -4788,16 +4726,16 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
         USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
     try:
         fname = await get_filename_from_url(url)
-        # Check if format rename mode is active - use the format-based name
+        # Determine the download filename based on active format rename mode
         if uid in FORMAT_RENAME_MODE and FORMAT_RENAME_MODE[uid].get('active'):
             format_ext = FORMAT_RENAME_MODE[uid]['format']
-            safe_name = get_formatted_rename(uid, format_ext, with_prefix=True)
+            safe_name = get_formatted_rename(format_ext)
         elif uid in NORMAL_FORMAT_RENAME_MODE and NORMAL_FORMAT_RENAME_MODE[uid].get('active'):
             format_ext = NORMAL_FORMAT_RENAME_MODE[uid]['format']
-            safe_name = get_formatted_rename(uid, format_ext, with_prefix=True)
+            safe_name = get_formatted_rename(format_ext)
         elif uid in ZIP_FORMAT_RENAME_MODE and ZIP_FORMAT_RENAME_MODE[uid].get('active'):
             format_ext = ZIP_FORMAT_RENAME_MODE[uid]['format']
-            safe_name = get_formatted_rename(uid, format_ext, with_prefix=True)
+            safe_name = get_formatted_rename(format_ext)
         else:
             safe_name = sanitize_filename(re.sub(r"[\\/*?\"<>|:]", "_", fname), 200)
         tmp_in = get_unique_path(TMP, safe_name)
@@ -4815,12 +4753,11 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
         if not ok:
             raise Exception(f"Download Failed: {err}")
         await status_msg.edit("Download complete. Uploading...", reply_markup=None)
-        # For normal format rename mode, use the formatted name but upload with normal metadata
-        # For download only format rename, use formatted name
+        # Determine the upload renamed_file
+        # For Normal Format Rename Mode: upload uses metadata uid (no number)
         if uid in NORMAL_FORMAT_RENAME_MODE and NORMAL_FORMAT_RENAME_MODE[uid].get('active'):
-            renamed_file = tmp_in.name
-        elif uid in FORMAT_RENAME_MODE and FORMAT_RENAME_MODE[uid].get('active'):
-            renamed_file = tmp_in.name
+            format_ext = NORMAL_FORMAT_RENAME_MODE[uid]['format']
+            renamed_file = f"{RENAME_BASE_NAME}{format_ext}"
         else:
             renamed_file = get_dynamic_filename(uid, tmp_in.name)
         if uid in MKV_AUDIO_CHANGE_MODE:
@@ -4967,7 +4904,6 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
         return
     file_info = m.video or m.document
     original_name = file_info.file_name if file_info and file_info.file_name else f"file_{file_info.file_unique_id}"
-    # Sanitize and limit original_name
     original_name = sanitize_filename(original_name, 200)
     if uid in DOWNLOAD_T_MODE:
         dl_link = f"{PUBLIC_BASE_URL}/dl_stream?file_id={file_info.file_id}&filename={urllib.parse.quote(original_name)}"
@@ -5062,7 +4998,6 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
         return
     # When user sends a Telegram file/video directly, do NOT apply format rename
     # Format rename only applies to URLs
-    # Normal upload flow with metadata uid, thumbnail uid, caption uid
     await add_to_queue(uid, c, m, original_name, is_url=False, original_caption=m.caption, task_type='download')
 
 async def show_batch_audio_ui(c, chat_id, uid):
