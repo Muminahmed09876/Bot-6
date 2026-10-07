@@ -180,6 +180,7 @@ FORMAT_RENAME_MODE = {}  # uid -> {'format': '.mkv', 'active': True}
 NORMAL_FORMAT_RENAME_MODE = {}  # uid -> {'format': '.mkv', 'active': True} for normal mode
 ZIP_FORMAT_RENAME_MODE = {}  # uid -> {'format': '.zip', 'active': True} for zip mode
 FORMAT_RENAME_COUNTERS = {}  # uid -> {'format': '.mkv', 'counter': 1}
+RENAME_BASE_NAME = "[@TA_HD_Anime] Telegram Channel"
 
 # ===== CONCURRENCY CONTROL SETTINGS =====
 MAX_CONCURRENT_DOWNLOADS = 5
@@ -253,22 +254,37 @@ def make_safe_filename_from_url(url: str, max_len: int = 200) -> str:
         return f"download_{url_hash}.mp4"
 
 def get_next_format_number(uid, format_ext):
-    """Get the next available number for a given format in TMP directory."""
+    """Get the next available number for a given format in TMP directory.
+    Scans TMP for files matching pattern '[RENAME_BASE_NAME] NN.format' or 'NN.format'."""
     existing_numbers = set()
     if TMP.exists():
         for f in TMP.iterdir():
-            if f.is_file() and f.suffix.lower() == format_ext.lower():
+            if f.is_file():
+                fname = f.name
+                # Check if it matches the rename pattern
+                # Pattern: [@TA_HD_Anime] Telegram Channel NN.ext  OR  NN.ext
                 stem = f.stem
-                if stem.isdigit():
+                ext = f.suffix.lower()
+                if ext != format_ext.lower():
+                    continue
+                # Remove base name prefix if present
+                if stem.startswith(RENAME_BASE_NAME):
+                    num_part = stem[len(RENAME_BASE_NAME):].strip()
+                    if num_part.isdigit():
+                        existing_numbers.add(int(num_part))
+                elif stem.isdigit():
                     existing_numbers.add(int(stem))
     counter = 1
     while counter in existing_numbers:
         counter += 1
     return counter
 
-def get_formatted_rename(uid, format_ext):
-    """Generate a new rename like 1.mkv, 2.mkv etc."""
+def get_formatted_rename(uid, format_ext, with_prefix=True):
+    """Generate a new rename like '[@TA_HD_Anime] Telegram Channel 01.mkv' or '1.mkv'.
+    Format: [@TA_HD_Anime] Telegram Channel NN.ext"""
     num = get_next_format_number(uid, format_ext)
+    if with_prefix:
+        return f"{RENAME_BASE_NAME} {num:02d}{format_ext}"
     return f"{num}{format_ext}"
 
 def get_gdrive_service():
@@ -350,7 +366,7 @@ async def send_mode_tutorial(c, chat_id, mode_name):
             "‣ `link` পাঠালে ডাউনলোডের পর ডাইরেক্ট ডাউনলোড লিঙ্ক দেবে।\n"
             "‣ `t` পাঠালে ডাউনলোড না করেই সরাসরি Stream/Direct Link দেবে (দুটি লিঙ্ক থাকবে: ডাউনলোড এবং প্লে করার জন্য)।\n"
             "‣ `off` লিখে নরমাল ডাউনলোড মোডে ফিরে যান।\n"
-            "‣ `mkv`, `mp4`, `zip` ইত্যাদি পাঠালে সেই ফরম্যাটে rename হবে (1.mkv, 2.mkv ইত্যাদি)।\n"
+            "‣ `mkv`, `mp4`, `zip` ইত্যাদি পাঠালে সেই ফরম্যাটে rename হবে।\n"
             "‣ `zip` পাঠালে download শেষে extract হবে।"
         ),
         "batch_audio_add": (
@@ -4149,10 +4165,13 @@ async def text_handler(c, m: Message):
             DOWNLOAD_LINK_MODE.discard(uid)
             await m.reply_text("Telegram Stream Link Mode **ON**. Direct download and stream links will be provided without downloading to local storage.")
             return
-        elif text_lower in [".mkv", ".mp4", ".zip", ".rar", ".7z", ".avi", ".mov", ".flv", ".wmv", ".webm", ".mp3", ".m4a", ".flac", ".wav", ".aac"]:
-            FORMAT_RENAME_MODE[uid] = {'format': text_lower, 'active': True}
-            await m.reply_text(f"Format Rename Mode **ON** for `{text_lower}`. All downloads will be renamed sequentially (1{text_lower}, 2{text_lower}, ...).")
-            if text_lower == ".zip":
+        # Accept both .mkv and mkv (with or without dot)
+        elif text_lower in [".mkv", "mkv", ".mp4", "mp4", ".zip", "zip", ".rar", "rar", ".7z", "7z", ".avi", "avi", ".mov", "mov", ".flv", "flv", ".wmv", "wmv", ".webm", "webm", ".mp3", "mp3", ".m4a", "m4a", ".flac", "flac", ".wav", "wav", ".aac", "aac"]:
+            # Normalize: ensure it starts with a dot
+            fmt = text_lower if text_lower.startswith('.') else f".{text_lower}"
+            FORMAT_RENAME_MODE[uid] = {'format': fmt, 'active': True}
+            await m.reply_text(f"Format Rename Mode **ON** for `{fmt}`. All downloads will be renamed sequentially as `[@TA_HD_Anime] Telegram Channel NN{fmt}`.")
+            if fmt == ".zip":
                 await m.reply_text("ZIP format selected. Downloaded archives will be extracted after download.")
             return
         elif text_lower == "off":
@@ -4162,21 +4181,24 @@ async def text_handler(c, m: Message):
             FORMAT_RENAME_MODE.pop(uid, None)
             await m.reply_text("Download Only Mode **OFF**.")
             return
-    # Normal mode format rename (when no mode is ON)
+    # Normal mode format rename (when no mode is ON) - works for LINK ONLY
     if not DOWNLOAD_ONLY_MODE and not ZIP_DOWNLOAD_MODE and not CONVERT_MODE and not BATCH_AUDIO_MODE and not MKV_AUDIO_CHANGE_MODE and not EDIT_CAPTION_MODE and not UPLOAD_DRIVE_MODE:
-        if text_lower in [".mkv", ".mp4"]:
-            NORMAL_FORMAT_RENAME_MODE[uid] = {'format': text_lower, 'active': True}
-            await m.reply_text(f"Normal Format Rename Mode **ON** for `{text_lower}`. Downloads will be renamed sequentially (1{text_lower}, 2{text_lower}, ...) but upload will use normal metadata/thumbnail/caption uid.")
+        # Accept both .mkv and mkv
+        if text_lower in [".mkv", "mkv", ".mp4", "mp4"]:
+            fmt = text_lower if text_lower.startswith('.') else f".{text_lower}"
+            NORMAL_FORMAT_RENAME_MODE[uid] = {'format': fmt, 'active': True}
+            await m.reply_text(f"Normal Format Rename Mode **ON** for `{fmt}`. URLs sent will be saved as `[@TA_HD_Anime] Telegram Channel NN{fmt}` and uploaded with normal metadata/thumbnail/caption uid.")
             return
         elif text_lower == "off" and uid in NORMAL_FORMAT_RENAME_MODE:
             NORMAL_FORMAT_RENAME_MODE.pop(uid, None)
             await m.reply_text("Normal Format Rename Mode **OFF**.")
             return
-    # ZIP mode format rename
+    # ZIP mode format rename - accept both .zip and zip
     if uid in ZIP_DOWNLOAD_MODE:
-        if text_lower in [".zip", ".rar", ".7z"]:
-            ZIP_FORMAT_RENAME_MODE[uid] = {'format': text_lower, 'active': True}
-            await m.reply_text(f"ZIP Format Rename Mode **ON** for `{text_lower}`. Archives will be renamed sequentially (1{text_lower}, 2{text_lower}, ...) and extracted.")
+        if text_lower in [".zip", "zip", ".rar", "rar", ".7z", "7z"]:
+            fmt = text_lower if text_lower.startswith('.') else f".{text_lower}"
+            ZIP_FORMAT_RENAME_MODE[uid] = {'format': fmt, 'active': True}
+            await m.reply_text(f"ZIP Format Rename Mode **ON** for `{fmt}`. Archives will be renamed as `[@TA_HD_Anime] Telegram Channel NN{fmt}` and extracted.")
             return
         elif text_lower == "off" and uid in ZIP_FORMAT_RENAME_MODE:
             ZIP_FORMAT_RENAME_MODE.pop(uid, None)
@@ -4766,18 +4788,18 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
         USER_TASK_EVENTS.setdefault(uid, {})[status_msg.id] = cancel_event
     try:
         fname = await get_filename_from_url(url)
-        safe_name = sanitize_filename(re.sub(r"[\\/*?\"<>|:]", "_", fname), 200)
-        # Apply format rename if active
-        if uid in FORMAT_RENAME_MODE:
-            fmt_data = FORMAT_RENAME_MODE[uid]
-            if fmt_data.get('active'):
-                format_ext = fmt_data['format']
-                safe_name = get_formatted_rename(uid, format_ext)
-        elif uid in NORMAL_FORMAT_RENAME_MODE:
-            fmt_data = NORMAL_FORMAT_RENAME_MODE[uid]
-            if fmt_data.get('active'):
-                format_ext = fmt_data['format']
-                safe_name = get_formatted_rename(uid, format_ext)
+        # Check if format rename mode is active - use the format-based name
+        if uid in FORMAT_RENAME_MODE and FORMAT_RENAME_MODE[uid].get('active'):
+            format_ext = FORMAT_RENAME_MODE[uid]['format']
+            safe_name = get_formatted_rename(uid, format_ext, with_prefix=True)
+        elif uid in NORMAL_FORMAT_RENAME_MODE and NORMAL_FORMAT_RENAME_MODE[uid].get('active'):
+            format_ext = NORMAL_FORMAT_RENAME_MODE[uid]['format']
+            safe_name = get_formatted_rename(uid, format_ext, with_prefix=True)
+        elif uid in ZIP_FORMAT_RENAME_MODE and ZIP_FORMAT_RENAME_MODE[uid].get('active'):
+            format_ext = ZIP_FORMAT_RENAME_MODE[uid]['format']
+            safe_name = get_formatted_rename(uid, format_ext, with_prefix=True)
+        else:
+            safe_name = sanitize_filename(re.sub(r"[\\/*?\"<>|:]", "_", fname), 200)
         tmp_in = get_unique_path(TMP, safe_name)
         ok, err = False, None
         if is_drive_url(url):
@@ -4794,7 +4816,10 @@ async def download_and_process_generic(c, m, url, status_msg, cancel_event_passe
             raise Exception(f"Download Failed: {err}")
         await status_msg.edit("Download complete. Uploading...", reply_markup=None)
         # For normal format rename mode, use the formatted name but upload with normal metadata
+        # For download only format rename, use formatted name
         if uid in NORMAL_FORMAT_RENAME_MODE and NORMAL_FORMAT_RENAME_MODE[uid].get('active'):
+            renamed_file = tmp_in.name
+        elif uid in FORMAT_RENAME_MODE and FORMAT_RENAME_MODE[uid].get('active'):
             renamed_file = tmp_in.name
         else:
             renamed_file = get_dynamic_filename(uid, tmp_in.name)
@@ -5035,6 +5060,9 @@ async def forwarded_file_or_direct_file(c: Client, m: Message):
         status_text = f"{count} files saved for batch upload.\nLast: `{original_name}`"
         await update_batch_status(c, m, uid, status_text)
         return
+    # When user sends a Telegram file/video directly, do NOT apply format rename
+    # Format rename only applies to URLs
+    # Normal upload flow with metadata uid, thumbnail uid, caption uid
     await add_to_queue(uid, c, m, original_name, is_url=False, original_caption=m.caption, task_type='download')
 
 async def show_batch_audio_ui(c, chat_id, uid):
