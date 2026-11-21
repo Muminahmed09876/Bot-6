@@ -8,36 +8,29 @@ import time
 import traceback
 import urllib.request
 
-# Pyrogram ইমপোর্টের আগে event loop নিশ্চিত করা
-try:
-    asyncio.get_event_loop()
-except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
+# Render / Python 3.14-এ event loop আগে থেকেই সেট করে রাখা
+_loop = asyncio.new_event_loop()
+asyncio.set_event_loop(_loop)
 
 import aiohttp
 from flask import Flask, render_template_string
-from pyrogram import Client, filters
-from pyrogram.enums import ChatType
-from pyrogram.errors import FloodWait, RPCError
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 try:
-    from google.colab import userdata
+    from pyrofork import Client, filters
+    from pyrofork.enums import ChatType
+    from pyrofork.errors import FloodWait, RPCError
+    from pyrofork.types import InlineKeyboardButton, InlineKeyboardMarkup
 except ImportError:
-    userdata = None
+    from pyrogram import Client, filters
+    from pyrogram.enums import ChatType
+    from pyrogram.errors import FloodWait, RPCError
+    from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
-def get_secret_or_env(key: str, default: str | None = None) -> str | None:
-    if userdata is not None:
-        try:
-            val = userdata.get(key)
-            if val is not None and str(val).strip() != "":
-                return str(val).strip()
-        except Exception:
-            pass
-    env_val = os.getenv(key)
-    if env_val is not None and str(env_val).strip() != "":
-        return str(env_val).strip()
+def get_env_val(key: str, default: str | None = None) -> str | None:
+    val = os.getenv(key)
+    if val is not None and str(val).strip() != "":
+        return str(val).strip()
     return default
 
 
@@ -54,34 +47,20 @@ def parse_admin_id(raw_val: str | None) -> int | None:
         return None
 
 
-# Colab Secrets বা Environment থেকে তথ্য নিয়ে সেট করা
-_api_id_raw = get_secret_or_env("API_ID")
-_api_hash_raw = get_secret_or_env("API_HASH")
-_bot_token_raw = get_secret_or_env("BOT_TOKEN")
-_admin_id_raw = get_secret_or_env("ADMIN_ID")
-
-if _api_id_raw:
-    os.environ["API_ID"] = str(_api_id_raw).strip()
-if _api_hash_raw:
-    os.environ["API_HASH"] = str(_api_hash_raw).strip()
-if _bot_token_raw:
-    os.environ["BOT_TOKEN"] = str(_bot_token_raw).strip()
-
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+API_ID = int(get_env_val("API_ID", "0"))
+API_HASH = get_env_val("API_HASH", "")
+BOT_TOKEN = get_env_val("BOT_TOKEN", "")
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-ADMIN_ID = parse_admin_id(_admin_id_raw)
-print(f"ADMIN_ID loaded: {ADMIN_ID}")
+ADMIN_ID = parse_admin_id(get_env_val("ADMIN_ID"))
+print(f"Render Bot Starting | ADMIN_ID: {ADMIN_ID}")
 
-PORT = int(os.getenv("PORT", "10000"))
+PORT = int(get_env_val("PORT", "10000"))
 
-# ===== FIX: Define RENDER_EXTERNAL_HOSTNAME globally (like main18.py) =====
-RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+RENDER_EXTERNAL_HOSTNAME = get_env_val("RENDER_EXTERNAL_HOSTNAME")
 if not RENDER_EXTERNAL_HOSTNAME:
     try:
-        _public_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode('utf8')
+        _public_ip = urllib.request.urlopen("https://api.ipify.org", timeout=3).read().decode("utf8")
         RENDER_EXTERNAL_HOSTNAME = f"{_public_ip}:{PORT}"
     except Exception:
         try:
@@ -92,21 +71,17 @@ if not RENDER_EXTERNAL_HOSTNAME:
             RENDER_EXTERNAL_HOSTNAME = f"{_local_ip}:{PORT}"
         except Exception:
             RENDER_EXTERNAL_HOSTNAME = f"localhost:{PORT}"
-# ========================================================================
 
-# ===== Keep PUBLIC_BASE_URL for other uses (download links, etc.) =====
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
+PUBLIC_BASE_URL = get_env_val("PUBLIC_BASE_URL")
 if not PUBLIC_BASE_URL:
     PUBLIC_BASE_URL = f"http://{RENDER_EXTERNAL_HOSTNAME}"
-else:
-    if not PUBLIC_BASE_URL.startswith(('http://', 'https://')):
-        PUBLIC_BASE_URL = f"http://{PUBLIC_BASE_URL}"
-# =========================
+elif not PUBLIC_BASE_URL.startswith(("http://", "https://")):
+    PUBLIC_BASE_URL = f"http://{PUBLIC_BASE_URL}"
 
 flask_app = Flask(__name__)
 
 
-@flask_app.route('/')
+@flask_app.route("/")
 def home():
     html_content = """
     <!DOCTYPE html>
@@ -146,7 +121,7 @@ def home():
     return render_template_string(html_content)
 
 
-@flask_app.route('/ping')
+@flask_app.route("/ping")
 def ping():
     return "pong", 200
 
@@ -178,11 +153,11 @@ def is_admin(user_id: int | None) -> bool:
 
 
 app = Client(
-    "colab_cover_editor_session",
+    "render_cover_editor_bot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    in_memory=False,
+    in_memory=True,
     sleep_threshold=1,
 )
 
@@ -423,7 +398,6 @@ async def api_send_media(
             return await resp.json()
 
 
-# /start কমান্ড (normal text style)
 @app.on_message(filters.command("start") & filters.private)
 async def cmd_start(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
@@ -443,7 +417,6 @@ async def cmd_start(client, message):
     await message.reply_text(help_text, parse_mode=None)
 
 
-# /thum কমান্ড
 @app.on_message(filters.command("thum") & filters.private)
 async def cmd_thum(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
@@ -457,7 +430,6 @@ async def cmd_thum(client, message):
     )
 
 
-# /view_thum কমান্ড
 @app.on_message(filters.command("view_thum") & filters.private)
 async def cmd_view_thum(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
@@ -496,7 +468,6 @@ async def cb_delete_thumb(client, callback_query):
         await callback_query.answer("কোনো Thumbnail সেভ করা নেই।", show_alert=True)
 
 
-# /mode কমান্ড
 @app.on_message(filters.command("mode") & filters.private)
 async def cmd_mode(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
@@ -528,7 +499,6 @@ async def cb_set_mode(client, callback_query):
     await callback_query.answer(f"Mode set: {mode_names[selected]}")
 
 
-# /add কমান্ড
 @app.on_message(filters.command("add") & filters.private)
 async def cmd_add_channel(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
@@ -542,7 +512,6 @@ async def cmd_add_channel(client, message):
     )
 
 
-# /cap কমান্ড
 @app.on_message(filters.command("cap") & filters.private)
 async def cmd_cap(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
@@ -560,7 +529,6 @@ async def cmd_cap(client, message):
     )
 
 
-# /cap_view কমান্ড
 @app.on_message(filters.command("cap_view") & filters.private)
 async def cmd_cap_view(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
@@ -596,7 +564,6 @@ async def cb_delete_caption(client, callback_query):
         await callback_query.answer("কোনো Caption সেভ করা নেই।", show_alert=True)
 
 
-# /send <id বা start-end>
 @app.on_message(filters.command("send") & filters.private)
 async def cmd_send_channel_msg(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
@@ -654,7 +621,6 @@ async def cmd_send_channel_msg(client, message):
     )
 
 
-# ছবির file_id সেভ করা
 @app.on_message(filters.photo & filters.private)
 async def handle_photo(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
@@ -671,7 +637,6 @@ async def handle_photo(client, message):
         await message.reply_text("নতুন ছবি সেট করতে চাইলে আগে `/thum` কমান্ড দিন।")
 
 
-# Forward করা মেসেজ হ্যান্ডলার
 @app.on_message(filters.forwarded & filters.private)
 async def handle_forwarded(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
@@ -722,7 +687,6 @@ async def handle_forwarded(client, message):
 
     saved_ch = user_channels.get(user_id)
 
-    # সেভ করা চ্যানেলের ভিডিও হলে সাথে সাথে এডিট না করে কিউতে সেভ করবে (৫ সেকেন্ড পর মেসেজ ডিলিট হবে)
     if saved_ch and origin_chat and origin_chat.id == saved_ch["chat_id"] and origin_msg_id:
         queue = pending_edits.setdefault(user_id, {})
         queue[origin_msg_id] = {
@@ -762,7 +726,6 @@ async def handle_forwarded(client, message):
         )
 
 
-# টেক্সট মেসেজ হ্যান্ডলার (/cap ইনপুট ও 'ok' দিয়ে ব্যাচ এডিট শুরু)
 @app.on_message(
     filters.text
     & filters.private
@@ -873,7 +836,6 @@ async def handle_text_inputs(client, message):
         schedule_auto_delete(client, status_msg, delay=5)
 
 
-# সরাসরি send করা ভিডিও হ্যান্ডলার
 @app.on_message(filters.private & ~filters.forwarded)
 async def handle_direct_media(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
@@ -939,7 +901,7 @@ async def start_bot():
             print(f"FloodWait: {wait_sec} সেকেন্ড অপেক্ষা করা হচ্ছে...")
             await asyncio.sleep(wait_sec)
         except Exception as e:
-            print("Pyrogram start error:", e)
+            print("Pyrogram/Pyrofork start error:", e)
             traceback.print_exc()
             await asyncio.sleep(5)
 
@@ -950,22 +912,15 @@ async def start_bot():
     except asyncio.CancelledError:
         pass
     finally:
-        await app.stop()
+        try:
+            await app.stop()
+        except Exception:
+            pass
         print("Bot stopped cleanly.")
 
 
 if __name__ == "__main__":
     try:
-        running_loop = asyncio.get_running_loop()
-    except RuntimeError:
-        running_loop = None
-
-    if running_loop is not None:
-        running_loop.create_task(start_bot())
-    else:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(start_bot())
-        finally:
-            loop.close()
+        _loop.run_until_complete(start_bot())
+    finally:
+        _loop.close()
