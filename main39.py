@@ -47,30 +47,13 @@ def parse_admin_id(raw_val: str | None) -> int | None:
         return None
 
 
-def parse_env_channel_ids(raw_val: str | None) -> list[int]:
-    if not raw_val:
-        return []
-    tokens = re.split(r"[,\s;]+", str(raw_val).strip())
-    result = []
-    for tok in tokens:
-        t = tok.strip().strip('"').strip("'")
-        if not t:
-            continue
-        if re.fullmatch(r"-?\d+", t):
-            cid = int(t)
-            if cid not in result:
-                result.append(cid)
-    return result
-
-
 API_ID = int(get_env_val("API_ID", "0"))
 API_HASH = get_env_val("API_HASH", "")
 BOT_TOKEN = get_env_val("BOT_TOKEN", "")
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 ADMIN_ID = parse_admin_id(get_env_val("ADMIN_ID"))
-ENV_CHANNEL_IDS = parse_env_channel_ids(get_env_val("CHANNEL_ID"))
-print(f"Render Bot Starting | ADMIN_ID: {ADMIN_ID} | ENV Channels: {ENV_CHANNEL_IDS}")
+print(f"Render Bot Starting | ADMIN_ID: {ADMIN_ID}")
 
 PORT = int(get_env_val("PORT", "10000"))
 
@@ -178,72 +161,15 @@ app = Client(
     sleep_threshold=1,
 )
 
-# ইউজার স্টেট ও সেভ করা ডেটা
 user_cover_file_ids = {}     # {user_id: photo_file_id}
-user_channels_list = {}      # {user_id: {chat_id: {"chat_id": int, "title": str}}}
-user_selected_channel = {}   # {user_id: {"chat_id": int, "title": str}}
+user_channels = {}           # {user_id: {"chat_id": int, "title": str}}
 user_captions = {}           # {user_id: {"template": str, "index": int}}
 user_modes = {}              # {user_id: "cover" | "caption" | "both"}
-user_upload_delays = {}      # {user_id: float}
 pending_edits = {}           # {user_id: {msg_id: {"file_id": str, "api_type": str, "orig_caption": str}}}
 
 waiting_for_thumb = set()    # {user_id}
 waiting_for_channel = set()  # {user_id}
 waiting_for_caption = set()  # {user_id}
-
-DEFAULT_DELAY = 0.15
-
-
-def get_user_delay(user_id: int) -> float:
-    return user_upload_delays.get(user_id, DEFAULT_DELAY)
-
-
-def ensure_user_channels_loaded(user_id: int) -> dict[int, dict]:
-    ch_map = user_channels_list.setdefault(user_id, {})
-    for cid in ENV_CHANNEL_IDS:
-        if cid not in ch_map:
-            ch_map[cid] = {"chat_id": cid, "title": f"Channel {cid}"}
-    if user_id not in user_selected_channel and ch_map:
-        first_ch = next(iter(ch_map.values()))
-        user_selected_channel[user_id] = dict(first_ch)
-    return ch_map
-
-
-def save_channel_for_user(user_id: int, chat_id: int, title: str | None = None):
-    ch_map = ensure_user_channels_loaded(user_id)
-    clean_title = (title or "").strip() or (ch_map.get(chat_id, {}).get("title") or f"Channel {chat_id}")
-    entry = {"chat_id": int(chat_id), "title": clean_title}
-    ch_map[int(chat_id)] = entry
-    user_selected_channel[user_id] = dict(entry)
-    return entry
-
-
-def get_active_channel(user_id: int) -> dict | None:
-    ensure_user_channels_loaded(user_id)
-    sel = user_selected_channel.get(user_id)
-    if sel:
-        return sel
-    ch_map = user_channels_list.get(user_id, {})
-    if ch_map:
-        first_ch = next(iter(ch_map.values()))
-        user_selected_channel[user_id] = dict(first_ch)
-        return user_selected_channel[user_id]
-    return None
-
-
-def build_channel_list_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    ch_map = ensure_user_channels_loaded(user_id)
-    active = get_active_channel(user_id)
-    active_id = active["chat_id"] if active else None
-
-    rows = []
-    for cid, info in ch_map.items():
-        prefix = "✅ " if cid == active_id else ""
-        btn_text = f"{prefix}{info['title']} ({cid})"
-        if len(btn_text) > 60:
-            btn_text = f"{prefix}{info['title'][:25]}... ({cid})"
-        rows.append([InlineKeyboardButton(btn_text, callback_data=f"sel_ch:{cid}")])
-    return InlineKeyboardMarkup(rows)
 
 
 def get_user_mode(user_id: int) -> str:
@@ -489,95 +415,19 @@ def extract_retry_after(result: dict) -> int | None:
 async def cmd_start(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
-    user_id = message.from_user.id
-    cur_delay = get_user_delay(user_id)
-    active_ch = get_active_channel(user_id)
-    ch_label = f"{active_ch['title']} ({active_ch['chat_id']})" if active_ch else "সেট করা নেই"
-
     help_text = (
         "সব কমান্ডের তালিকা:\n\n"
         "/start - সব কমান্ড দেখাবে\n"
         "/thum - নতুন thumbnail বা cover ছবি সেভ করবে\n"
         "/view_thum - সেভ করা thumbnail ছবি দেখাবে এবং delete বাটন দেবে\n"
-        "/add - চ্যানেল যুক্ত করবে (টেক্সট, ইমেজ, ভিডিও বা যেকোনো forward মেসেজে কাজ করবে)\n"
-        "/list - সেভ করা সব চ্যানেল দেখাবে এবং বাটন দিয়ে চ্যানেল সিলেক্ট করা যাবে\n"
-        "/time 1.2 (বা 2, 2.5, 3) - প্রতি এডিট/আপলোডের মাঝের সময় সেট করবে\n"
+        "/add - চ্যানেল যুক্ত করবে\n"
         "/cap - কাস্টম caption সেভ করবে\n"
         "/cap_view - সেভ করা caption দেখাবে এবং delete বাটন দেবে\n"
         "/mode - covar, caption, অথবা covar and caption মোড নির্বাচন করবে\n"
-        "/send 19 অথবা /send 2-20 - সিলেক্ট করা চ্যানেলের মেসেজ বা রেঞ্জ forward করবে\n"
-        "ok - ফরোয়ার্ড করে জমা রাখা ভিডিওগুলো ছোট Post ID থেকে edit শুরু করবে\n\n"
-        f"বর্তমান চ্যানেল: {ch_label}\n"
-        f"বর্তমান Upload Delay: {cur_delay}s"
+        "/send 19 অথবা /send 2-20 - সেভ করা চ্যানেলের মেসেজ বা রেঞ্জ forward করবে\n"
+        "ok - ফরোয়ার্ড করে জমা রাখা ভিডিওগুলো ছোট Post ID থেকে edit শুরু করবে"
     )
     await message.reply_text(help_text, parse_mode=None)
-
-
-@app.on_message(filters.command("time") & filters.private)
-async def cmd_time(client, message):
-    if not is_admin(message.from_user.id if message.from_user else None):
-        return
-    user_id = message.from_user.id
-    parts = (message.text or "").split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
-        cur = get_user_delay(user_id)
-        await message.reply_text(
-            f"বর্তমান Upload Time Delay: `{cur}` সেকেন্ড।\n"
-            "পরিবর্তন করতে লিখুন: `/time 1.2`, `/time 2`, `/time 2.5` অথবা `/time 3`"
-        )
-        return
-
-    try:
-        val = float(parts[1].strip())
-        if val < 0 or val > 60:
-            await message.reply_text("দয়া করে `0` থেকে `60` সেকেন্ডের মধ্যে একটি সংখ্যা দিন। যেমন: `/time 1.2`")
-            return
-        user_upload_delays[user_id] = val
-        await message.reply_text(f"✅ Upload Time Delay সেট হয়েছে: `{val}` সেকেন্ড।")
-    except ValueError:
-        await message.reply_text("সঠিক সংখ্যা দিন। যেমন: `/time 1.2`, `/time 2`, `/time 2.5`, `/time 3`")
-
-
-@app.on_message(filters.command("list") & filters.private)
-async def cmd_list_channels(client, message):
-    if not is_admin(message.from_user.id if message.from_user else None):
-        return
-    user_id = message.from_user.id
-    ch_map = ensure_user_channels_loaded(user_id)
-    if not ch_map:
-        await message.reply_text(
-            "কোনো চ্যানেল সেভ করা নেই। `/add` দিয়ে চ্যানেল যুক্ত করুন অথবা `env`-এ `CHANNEL_ID` দিন।"
-        )
-        return
-
-    active = get_active_channel(user_id)
-    active_info = f"**বর্তমান সিলেক্ট করা চ্যানেল:** {active['title']} (`{active['chat_id']}`)" if active else ""
-    await message.reply_text(
-        f"**সেভ করা চ্যানেলসমূহ:**\n{active_info}\n\nনিচের বাটন থেকে যেকোনো একটি চ্যানেল সিলেক্ট করুন:",
-        reply_markup=build_channel_list_keyboard(user_id),
-    )
-
-
-@app.on_callback_query(filters.regex(r"^sel_ch:(-?\d+)$"))
-async def cb_select_channel(client, callback_query):
-    if not is_admin(callback_query.from_user.id if callback_query.from_user else None):
-        await callback_query.answer("Access denied.", show_alert=True)
-        return
-    user_id = callback_query.from_user.id
-    cid = int(callback_query.data.split(":", 1)[1])
-    ch_map = ensure_user_channels_loaded(user_id)
-    if cid not in ch_map:
-        await callback_query.answer("চ্যানেলটি পাওয়া যায়নি।", show_alert=True)
-        return
-
-    user_selected_channel[user_id] = dict(ch_map[cid])
-    selected = user_selected_channel[user_id]
-    await callback_query.message.edit_text(
-        f"**সেভ করা চ্যানেলসমূহ:**\n**বর্তমান সিলেক্ট করা চ্যানেল:** {selected['title']} (`{selected['chat_id']}`)\n\n"
-        "নিচের বাটন থেকে যেকোনো একটি চ্যানেল সিলেক্ট করুন:",
-        reply_markup=build_channel_list_keyboard(user_id),
-    )
-    await callback_query.answer(f"Selected: {selected['title']}")
 
 
 @app.on_message(filters.command("thum") & filters.private)
@@ -671,7 +521,7 @@ async def cmd_add_channel(client, message):
     waiting_for_caption.discard(user_id)
     waiting_for_channel.add(user_id)
     await message.reply_text(
-        "দয়া করে আপনার **Channel** থেকে যেকোনো একটি মেসেজ (টেক্সট, ইমেজ, ভিডিও বা যেকোনো পোস্ট) এই চ্যাটে **Forward** করুন।"
+        "দয়া করে আপনার **Channel** থেকে যেকোনো একটি মেসেজ এই চ্যাটে **Forward** করুন।"
     )
 
 
@@ -732,20 +582,19 @@ async def cmd_send_channel_msg(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
     user_id = message.from_user.id
-    saved_ch = get_active_channel(user_id)
+    saved_ch = user_channels.get(user_id)
     if not saved_ch:
         await message.reply_text(
-            "আগে `/add` দিয়ে চ্যানেল যুক্ত করুন, `env`-এ `CHANNEL_ID` দিন অথবা `/list` থেকে চ্যানেল সিলেক্ট করুন।"
+            "আগে `/add` দিয়ে একটি চ্যানেল যুক্ত করুন, তারপর `/send 19` অথবা `/send 2-20` দিন।"
         )
         return
 
-    parts = (message.text or "").split(maxsplit=1)
+    parts = message.text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
         await message.reply_text(
-            f"বর্তমান সিলেক্ট করা চ্যানেল: **{saved_ch['title']}** (`{saved_ch['chat_id']}`)\n"
             "ব্যবহারের নিয়ম:\n"
-            "• `/send 19` — ১৯ নম্বর মেসেজ forward করবে\n"
-            "• `/send 2-20` — ২ থেকে ২০ নম্বর মেসেজ forward করবে"
+            "• `/send 19` — চ্যানেলের ১৯ নম্বর মেসেজ forward করবে\n"
+            "• `/send 2-20` — চ্যানেলের ২ থেকে ২০ নম্বর মেসেজ forward করবে"
         )
         return
 
@@ -759,7 +608,6 @@ async def cmd_send_channel_msg(client, message):
 
     channel_id = saved_ch["chat_id"]
     channel_title = saved_ch["title"]
-    delay_sec = get_user_delay(user_id)
     status_msg = await message.reply_text(
         f"**{channel_title}** চ্যানেল থেকে `{parts[1].strip()}` মেসেজ forward করা হচ্ছে..."
     )
@@ -774,27 +622,34 @@ async def cmd_send_channel_msg(client, message):
                     message_ids=msg_id,
                 )
                 forwarded_count += 1
-                if delay_sec > 0:
-                    await asyncio.sleep(delay_sec)
+                await asyncio.sleep(0.25)
                 break
             except FloodWait as e:
-                wait_sec = int(e.value) + 1
-                try:
-                    await status_msg.edit_text(
-                        f"⏳ FloodWait: `{wait_sec}`s অপেক্ষা করা হচ্ছে... (`{forwarded_count}`টি forward হয়েছে)"
-                    )
-                except Exception:
-                    pass
-                await asyncio.sleep(wait_sec)
+                await asyncio.sleep(int(e.value) + 1)
             except RPCError:
                 break
 
     await status_msg.edit_text(
-        f"✅ সম্পন্ন হয়েছে! **{channel_title}** থেকে মোট `{forwarded_count}`টি মেসেজ forward tag সহ পাঠানো হয়েছে।"
+        f"সম্পন্ন হয়েছে! **{channel_title}** থেকে মোট `{forwarded_count}`টি মেসেজ forward tag সহ পাঠানো হয়েছে।"
     )
 
 
-# Forward করা মেসেজ হ্যান্ডলার (waiting_for_channel থাকলে মেসেজ, ইমেজ, ভিডিও বা যেকোনো কিছুতে চ্যানেল সেভ করবে)
+@app.on_message(filters.photo & filters.private)
+async def handle_photo(client, message):
+    if not is_admin(message.from_user.id if message.from_user else None):
+        return
+    user_id = message.from_user.id
+    if user_id in waiting_for_thumb or user_id not in user_cover_file_ids:
+        user_cover_file_ids[user_id] = message.photo.file_id
+        waiting_for_thumb.discard(user_id)
+        await message.reply_text(
+            "Cover ছবি সেভ হয়েছে!\n"
+            "• সেভ করা চ্যানেলের ভিডিওগুলো forward করুন (সব সেভ হবে), তারপর **`ok`** লিখলে ছোট Post ID থেকে এডিট শুরু হবে।"
+        )
+    else:
+        await message.reply_text("নতুন ছবি সেট করতে চাইলে আগে `/thum` কমান্ড দিন।")
+
+
 @app.on_message(filters.forwarded & filters.private)
 async def handle_forwarded(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
@@ -806,17 +661,16 @@ async def handle_forwarded(client, message):
     if user_id in waiting_for_channel:
         if not origin_chat or origin_chat.type != ChatType.CHANNEL:
             await message.reply_text(
-                "দয়া করে একটি **Channel** থেকে যেকোনো মেসেজ (টেক্সট, ইমেজ, ভিডিও বা পোস্ট) **Forward** করুন।"
+                "দয়া করে একটি **Channel** থেকে মেসেজ forward করুন।"
             )
             return
-        saved = save_channel_for_user(
-            user_id=user_id,
-            chat_id=origin_chat.id,
-            title=origin_chat.title or f"Channel {origin_chat.id}",
-        )
+        user_channels[user_id] = {
+            "chat_id": origin_chat.id,
+            "title": origin_chat.title or "Channel",
+        }
         waiting_for_channel.discard(user_id)
         await message.reply_text(
-            f"✅ চ্যানেল সেভ ও সিলেক্ট হয়েছে: **{saved['title']}** (`{saved['chat_id']}`)"
+            f"চ্যানেল সেভ হয়েছে: **{user_channels[user_id]['title']}** (`{user_channels[user_id]['chat_id']}`)"
         )
         return
 
@@ -844,7 +698,7 @@ async def handle_forwarded(client, message):
         await message.reply_text("আগে `/cap` কমান্ড দিয়ে একটি caption সেট করুন।")
         return
 
-    saved_ch = get_active_channel(user_id)
+    saved_ch = user_channels.get(user_id)
 
     if saved_ch and origin_chat and origin_chat.id == saved_ch["chat_id"] and origin_msg_id:
         queue = pending_edits.setdefault(user_id, {})
@@ -885,29 +739,11 @@ async def handle_forwarded(client, message):
         )
 
 
-# ছবির file_id সেভ করা
-@app.on_message(filters.photo & filters.private)
-async def handle_photo(client, message):
-    if not is_admin(message.from_user.id if message.from_user else None):
-        return
-    user_id = message.from_user.id
-    if user_id in waiting_for_thumb or user_id not in user_cover_file_ids:
-        user_cover_file_ids[user_id] = message.photo.file_id
-        waiting_for_thumb.discard(user_id)
-        await message.reply_text(
-            "Cover ছবি সেভ হয়েছে!\n"
-            "• সেভ করা চ্যানেলের ভিডিওগুলো forward করুন (সব সেভ হবে), তারপর **`ok`** লিখলে ছোট Post ID থেকে এডিট শুরু হবে।"
-        )
-    else:
-        await message.reply_text("নতুন ছবি সেট করতে চাইলে আগে `/thum` কমান্ড দিন।")
-
-
-# টেক্সট মেসেজ হ্যান্ডলার (/cap ইনপুট ও 'ok' দিয়ে ব্যাচ এডিট শুরু)
 @app.on_message(
     filters.text
     & filters.private
     & ~filters.forwarded
-    & ~filters.command(["start", "thum", "view_thum", "mode", "add", "list", "time", "cap", "cap_view", "send"])
+    & ~filters.command(["start", "thum", "view_thum", "mode", "add", "cap", "cap_view", "send"])
 )
 async def handle_text_inputs(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
@@ -929,11 +765,10 @@ async def handle_text_inputs(client, message):
 
     if text_val.lower() == "ok":
         queue = pending_edits.get(user_id)
-        saved_ch = get_active_channel(user_id)
+        saved_ch = user_channels.get(user_id)
         mode = get_user_mode(user_id)
         active_cover = user_cover_file_ids.get(user_id)
         cap_data = user_captions.get(user_id)
-        delay_sec = get_user_delay(user_id)
 
         need_cover = mode in ("cover", "both")
         need_caption = mode in ("caption", "both")
@@ -942,7 +777,7 @@ async def handle_text_inputs(client, message):
             await message.reply_text("এডিট করার জন্য কোনো ভিডিও জমা নেই। আগে চ্যানেল থেকে ভিডিও forward করুন।")
             return
         if not saved_ch:
-            await message.reply_text("কোনো চ্যানেল সেভ করা নেই। আগে `/add` দিয়ে চ্যানেল যুক্ত করুন অথবা `env`-এ `CHANNEL_ID` দিন।")
+            await message.reply_text("কোনো চ্যানেল সেভ করা নেই। আগে `/add` দিয়ে চ্যানেল যুক্ত করুন।")
             return
         if need_cover and not active_cover:
             await message.reply_text("কোনো Cover ছবি সেভ করা নেই। আগে `/thum` দিয়ে ছবি দিন।")
@@ -957,7 +792,7 @@ async def handle_text_inputs(client, message):
         pending_edits[user_id] = {}
 
         status_msg = await message.reply_text(
-            f"**{saved_ch['title']}** চ্যানেলে এডিট শুরু হচ্ছে: `0/{total_items}` (Delay: `{delay_sec}s`)"
+            f"**{saved_ch['title']}** চ্যানেলে এডিট শুরু হচ্ছে: `0/{total_items}`"
         )
 
         success_count = 0
@@ -999,8 +834,7 @@ async def handle_text_inputs(client, message):
 
                     if result.get("ok"):
                         success_count += 1
-                        if delay_sec > 0:
-                            await asyncio.sleep(delay_sec)
+                        await asyncio.sleep(0.15)
                         break
 
                     retry_after = extract_retry_after(result)
@@ -1017,6 +851,7 @@ async def handle_text_inputs(client, message):
                         fail_errors.append(f"ID {msg_id}: {result.get('description', 'Error')}")
                         break
 
+                # প্রতি ৫টি এডিট পরপর প্রোগ্রেস আপডেট (`10/80`—৮০টি post edit এর মধ্যে 10 edit হয়েছে)
                 if (
                     success_count - last_reported_count >= 5
                     or idx == total_items
