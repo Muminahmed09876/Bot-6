@@ -185,20 +185,79 @@ user_upload_delays = {}      # {user_id: float}
 user_captions = {}           # {user_id: {"template": str, "index": int}}
 user_modes = {}              # {user_id: "cover" | "caption" | "both"}
 pending_edits = {}           # {user_id: {msg_id: {"file_id": str, "api_type": str, "orig_caption": str}}}
+resolved_channel_titles = {} # {chat_id: str}
 
 waiting_for_thumb = set()    # {user_id}
 waiting_for_channel = set()  # {user_id}
 waiting_for_caption = set()  # {user_id}
 
 
+async def fetch_channel_title_from_api(client, chat_id: int) -> str | None:
+    cid = int(chat_id)
+    if cid in resolved_channel_titles and resolved_channel_titles[cid]:
+        return resolved_channel_titles[cid]
+
+    try:
+        chat_obj = await client.get_chat(cid)
+        title = getattr(chat_obj, "title", None) or getattr(chat_obj, "first_name", None)
+        if title and str(title).strip():
+            clean = str(title).strip()
+            resolved_channel_titles[cid] = clean
+            return clean
+    except Exception:
+        pass
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{API_BASE}/getChat", json={"chat_id": cid}) as resp:
+                data = await resp.json()
+                if isinstance(data, dict) and data.get("ok"):
+                    res = data.get("result") or {}
+                    title = res.get("title") or res.get("first_name")
+                    if title and str(title).strip():
+                        clean = str(title).strip()
+                        resolved_channel_titles[cid] = clean
+                        return clean
+    except Exception:
+        pass
+
+    return None
+
+
+async def resolve_all_user_channel_titles(client, user_id: int):
+    ch_list = ensure_user_channels_loaded(user_id)
+    active = get_active_user_channel(user_id)
+    for item in ch_list:
+        cid = int(item["chat_id"])
+        fetched = await fetch_channel_title_from_api(client, cid)
+        if fetched:
+            item["title"] = fetched
+            if active and int(active["chat_id"]) == cid:
+                user_channels[user_id]["title"] = fetched
+
+
 def ensure_user_channels_loaded(user_id: int) -> list[dict]:
     if user_id not in user_channel_lists:
         loaded = []
         for idx, cid in enumerate(ENV_CHANNEL_IDS, start=1):
-            loaded.append({"chat_id": cid, "title": f"Channel {idx} ({cid})"})
+            cached_title = resolved_channel_titles.get(int(cid))
+            loaded.append({
+                "chat_id": int(cid),
+                "title": cached_title if cached_title else f"Channel {idx} ({cid})",
+            })
         user_channel_lists[user_id] = loaded
+    else:
+        for idx, item in enumerate(user_channel_lists[user_id], start=1):
+            cid = int(item["chat_id"])
+            if cid in resolved_channel_titles and resolved_channel_titles[cid]:
+                item["title"] = resolved_channel_titles[cid]
+
     if user_id not in user_channels and user_channel_lists[user_id]:
         user_channels[user_id] = dict(user_channel_lists[user_id][0])
+    elif user_id in user_channels and user_channels[user_id]:
+        act_cid = int(user_channels[user_id]["chat_id"])
+        if act_cid in resolved_channel_titles and resolved_channel_titles[act_cid]:
+            user_channels[user_id]["title"] = resolved_channel_titles[act_cid]
     return user_channel_lists[user_id]
 
 
@@ -211,6 +270,11 @@ def save_user_channel_entry(user_id: int, chat_id: int, title: str | None = None
             break
 
     clean_title = (title or "").strip()
+    if clean_title:
+        resolved_channel_titles[int(chat_id)] = clean_title
+    elif int(chat_id) in resolved_channel_titles:
+        clean_title = resolved_channel_titles[int(chat_id)]
+
     if existing:
         if clean_title:
             existing["title"] = clean_title
@@ -231,6 +295,9 @@ def get_active_user_channel(user_id: int) -> dict | None:
     ensure_user_channels_loaded(user_id)
     active = user_channels.get(user_id)
     if active:
+        cid = int(active["chat_id"])
+        if cid in resolved_channel_titles and resolved_channel_titles[cid]:
+            active["title"] = resolved_channel_titles[cid]
         return active
     ch_list = user_channel_lists.get(user_id) or []
     if ch_list:
@@ -509,7 +576,7 @@ def extract_retry_after(result: dict) -> int | None:
 async def cmd_start(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
-    ensure_user_channels_loaded(message.from_user.id)
+    await resolve_all_user_channel_titles(client, message.from_user.id)
     help_text = (
         "সব কমান্ডের তালিকা:\n\n"
         "/start - সব কমান্ড দেখাবে\n"
@@ -616,6 +683,7 @@ async def cmd_list_channels(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
     user_id = message.from_user.id
+    await resolve_all_user_channel_titles(client, user_id)
     ch_list = ensure_user_channels_loaded(user_id)
     if not ch_list:
         await message.reply_text(
@@ -644,6 +712,7 @@ async def cb_set_channel(client, callback_query):
         await callback_query.answer("Access denied.", show_alert=True)
         return
     user_id = callback_query.from_user.id
+    await resolve_all_user_channel_titles(client, user_id)
     target_id = int(callback_query.data.split(":", 1)[1])
     ch_list = ensure_user_channels_loaded(user_id)
     matched = next((item for item in ch_list if int(item["chat_id"]) == target_id), None)
@@ -757,7 +826,7 @@ async def cmd_add_channel(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
     user_id = message.from_user.id
-    ensure_user_channels_loaded(user_id)
+    await resolve_all_user_channel_titles(client, user_id)
     waiting_for_thumb.discard(user_id)
     waiting_for_caption.discard(user_id)
     waiting_for_channel.add(user_id)
@@ -823,6 +892,7 @@ async def cmd_send_channel_msg(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
     user_id = message.from_user.id
+    await resolve_all_user_channel_titles(client, user_id)
     saved_ch = get_active_user_channel(user_id)
     if not saved_ch:
         await message.reply_text(
@@ -847,7 +917,7 @@ async def cmd_send_channel_msg(client, message):
         await message.reply_text("একবারে সর্বোচ্চ ২০০টি মেসেজের রেঞ্জ দেওয়া যাবে।")
         return
 
-    channel_id = saved_ch["chat_id"]
+    channel_id = int(saved_ch["chat_id"])
     channel_title = saved_ch["title"]
     status_msg = await message.reply_text(
         f"**{channel_title}** (`{channel_id}`) চ্যানেল থেকে `{parts[1].strip()}` মেসেজ forward করা হচ্ছে..."
@@ -913,6 +983,9 @@ async def handle_forwarded(client, message):
     origin_chat = message.forward_from_chat
     origin_msg_id = message.forward_from_message_id
 
+    if origin_chat and origin_chat.type == ChatType.CHANNEL and origin_chat.title:
+        resolved_channel_titles[int(origin_chat.id)] = str(origin_chat.title).strip()
+
     if user_id in waiting_for_channel:
         if not origin_chat or origin_chat.type != ChatType.CHANNEL:
             await message.reply_text(
@@ -955,9 +1028,10 @@ async def handle_forwarded(client, message):
         await message.reply_text("আগে `/cap` কমান্ড দিয়ে একটি caption সেট করুন।")
         return
 
+    await resolve_all_user_channel_titles(client, user_id)
     saved_ch = get_active_user_channel(user_id)
 
-    if saved_ch and origin_chat and origin_chat.id == saved_ch["chat_id"] and origin_msg_id:
+    if saved_ch and origin_chat and int(origin_chat.id) == int(saved_ch["chat_id"]) and origin_msg_id:
         queue = pending_edits.setdefault(user_id, {})
         queue[origin_msg_id] = {
             "file_id": info["file_id"],
@@ -1021,6 +1095,7 @@ async def handle_text_inputs(client, message):
         return
 
     if text_val.lower() == "ok":
+        await resolve_all_user_channel_titles(client, user_id)
         queue = pending_edits.get(user_id)
         saved_ch = get_active_user_channel(user_id)
         mode = get_user_mode(user_id)
@@ -1201,6 +1276,12 @@ async def start_bot():
             print("Pyrogram/Pyrofork start error:", e)
             traceback.print_exc()
             await asyncio.sleep(5)
+
+    if ENV_CHANNEL_IDS:
+        for cid in ENV_CHANNEL_IDS:
+            fetched = await fetch_channel_title_from_api(app, cid)
+            if fetched:
+                print(f"ENV Channel Resolved: {cid} -> {fetched}")
 
     print(f"Bot is running on port {PORT}! URL: {PUBLIC_BASE_URL}")
     try:
