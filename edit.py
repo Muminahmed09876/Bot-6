@@ -5,6 +5,7 @@ import re
 import socket
 import threading
 import time
+import traceback
 import urllib.request
 import aiohttp
 from flask import Flask, render_template_string
@@ -51,7 +52,7 @@ API_HASH = os.environ["API_HASH"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-ADMIN_ID = int(_admin_id_raw) if _admin_id_raw and str(_admin_id_raw).isdigit() else None
+ADMIN_ID = int(_admin_id_raw) if _admin_id_raw and str(_admin_id_raw).strip().isdigit() else None
 
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -247,7 +248,6 @@ def parse_message_range(arg_text: str):
 
 
 def format_bold_html(raw_text: str) -> str:
-    """যেকোনো সাধারণ টেক্সটকে HTML <b>...</b> বোল্ড ফরম্যাটে রূপান্তর করে"""
     stripped = (raw_text or "").strip()
     if not stripped:
         return ""
@@ -257,13 +257,6 @@ def format_bold_html(raw_text: str) -> str:
 
 
 def render_dynamic_caption(template: str, video_index: int) -> str:
-    """
-    [re (...)] এর ভেতরের আইটেমগুলো (১টি বা একাধিক, বা একই আইটেম বারবার থাকলেও)
-    ভিডিও প্রতি ১টি করে বসে; পুরো সাইকেল শেষ হলে [01] ও [(01)] ১ করে বাড়ে।
-    [End (12)] শুধুমাত্র প্রথম [01]-এর মান 12 হলে সেই জায়গায় 'End' বসায়।
-    [(01)] থেকে (01) আসে এবং এর সাথে End-এর কোনো সম্পর্ক নেই।
-    সব ক্যাপশন HTML <b>...</b> বোল্ড হবে।
-    """
     re_pattern = re.compile(r"\[re\s*\((.*?)\)\]", re.IGNORECASE | re.DOTALL)
     re_matches = list(re_pattern.finditer(template))
 
@@ -922,6 +915,10 @@ async def start_bot():
             wait_sec = int(e.value) + 1
             print(f"FloodWait: {wait_sec} সেকেন্ড অপেক্ষা করা হচ্ছে...")
             await asyncio.sleep(wait_sec)
+        except Exception as e:
+            print("Pyrogram start error:", e)
+            traceback.print_exc()
+            await asyncio.sleep(5)
 
     print(f"Bot is running on port {PORT}! URL: {PUBLIC_BASE_URL}")
     try:
@@ -935,4 +932,9 @@ async def start_bot():
 
 
 if __name__ == "__main__":
-    asyncio.run(start_bot())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(start_bot())
+    finally:
+        loop.close()
