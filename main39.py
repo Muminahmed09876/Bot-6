@@ -834,7 +834,7 @@ async def handle_text_inputs(client, message):
 
                     if result.get("ok"):
                         success_count += 1
-                        await asyncio.sleep(0.15)
+                        await asyncio.sleep(3)
                         break
 
                     retry_after = extract_retry_after(result)
