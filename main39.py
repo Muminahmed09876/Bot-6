@@ -47,13 +47,30 @@ def parse_admin_id(raw_val: str | None) -> int | None:
         return None
 
 
+def parse_channel_ids_env(raw_val: str | None) -> list[int]:
+    if not raw_val:
+        return []
+    found = []
+    for part in re.split(r"[\s,;]+", str(raw_val).strip()):
+        cleaned = part.strip().strip('"').strip("'")
+        if not cleaned:
+            continue
+        m = re.fullmatch(r"-?\d+", cleaned)
+        if m:
+            val = int(m.group(0))
+            if val not in found:
+                found.append(val)
+    return found
+
+
 API_ID = int(get_env_val("API_ID", "0"))
 API_HASH = get_env_val("API_HASH", "")
 BOT_TOKEN = get_env_val("BOT_TOKEN", "")
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 ADMIN_ID = parse_admin_id(get_env_val("ADMIN_ID"))
-print(f"Render Bot Starting | ADMIN_ID: {ADMIN_ID}")
+ENV_CHANNEL_IDS = parse_channel_ids_env(get_env_val("CHANNEL_ID"))
+print(f"Render Bot Starting | ADMIN_ID: {ADMIN_ID} | ENV_CHANNEL_IDS: {ENV_CHANNEL_IDS}")
 
 PORT = int(get_env_val("PORT", "10000"))
 
@@ -163,6 +180,8 @@ app = Client(
 
 user_cover_file_ids = {}     # {user_id: photo_file_id}
 user_channels = {}           # {user_id: {"chat_id": int, "title": str}}
+user_channel_lists = {}      # {user_id: [{"chat_id": int, "title": str}, ...]}
+user_upload_delays = {}      # {user_id: float}
 user_captions = {}           # {user_id: {"template": str, "index": int}}
 user_modes = {}              # {user_id: "cover" | "caption" | "both"}
 pending_edits = {}           # {user_id: {msg_id: {"file_id": str, "api_type": str, "orig_caption": str}}}
@@ -170,6 +189,81 @@ pending_edits = {}           # {user_id: {msg_id: {"file_id": str, "api_type": s
 waiting_for_thumb = set()    # {user_id}
 waiting_for_channel = set()  # {user_id}
 waiting_for_caption = set()  # {user_id}
+
+
+def ensure_user_channels_loaded(user_id: int) -> list[dict]:
+    if user_id not in user_channel_lists:
+        loaded = []
+        for idx, cid in enumerate(ENV_CHANNEL_IDS, start=1):
+            loaded.append({"chat_id": cid, "title": f"Channel {idx} ({cid})"})
+        user_channel_lists[user_id] = loaded
+    if user_id not in user_channels and user_channel_lists[user_id]:
+        user_channels[user_id] = dict(user_channel_lists[user_id][0])
+    return user_channel_lists[user_id]
+
+
+def save_user_channel_entry(user_id: int, chat_id: int, title: str | None = None, set_active: bool = True) -> dict:
+    ch_list = ensure_user_channels_loaded(user_id)
+    existing = None
+    for item in ch_list:
+        if int(item["chat_id"]) == int(chat_id):
+            existing = item
+            break
+
+    clean_title = (title or "").strip()
+    if existing:
+        if clean_title:
+            existing["title"] = clean_title
+        entry = existing
+    else:
+        entry = {
+            "chat_id": int(chat_id),
+            "title": clean_title if clean_title else f"Channel ({chat_id})",
+        }
+        ch_list.append(entry)
+
+    if set_active:
+        user_channels[user_id] = dict(entry)
+    return entry
+
+
+def get_active_user_channel(user_id: int) -> dict | None:
+    ensure_user_channels_loaded(user_id)
+    active = user_channels.get(user_id)
+    if active:
+        return active
+    ch_list = user_channel_lists.get(user_id) or []
+    if ch_list:
+        user_channels[user_id] = dict(ch_list[0])
+        return user_channels[user_id]
+    return None
+
+
+def get_user_upload_delay(user_id: int) -> float:
+    return float(user_upload_delays.get(user_id, 0.15))
+
+
+def build_time_keyboard(current_delay: float) -> InlineKeyboardMarkup:
+    presets = [1.2, 2, 2.5, 3]
+    rows = []
+    for val in presets:
+        is_selected = abs(float(current_delay) - float(val)) < 1e-6
+        label_txt = f"✅ {val}s" if is_selected else f"{val}s"
+        rows.append([InlineKeyboardButton(label_txt, callback_data=f"set_time:{val}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_channel_list_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    ch_list = ensure_user_channels_loaded(user_id)
+    active = get_active_user_channel(user_id)
+    active_id = active["chat_id"] if active else None
+    rows = []
+    for item in ch_list:
+        cid = int(item["chat_id"])
+        title = item.get("title") or f"Channel ({cid})"
+        prefix = "✅ " if active_id is not None and int(active_id) == cid else ""
+        rows.append([InlineKeyboardButton(f"{prefix}{title} [{cid}]", callback_data=f"set_ch:{cid}")])
+    return InlineKeyboardMarkup(rows)
 
 
 def get_user_mode(user_id: int) -> str:
@@ -415,19 +509,165 @@ def extract_retry_after(result: dict) -> int | None:
 async def cmd_start(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
+    ensure_user_channels_loaded(message.from_user.id)
     help_text = (
         "সব কমান্ডের তালিকা:\n\n"
         "/start - সব কমান্ড দেখাবে\n"
         "/thum - নতুন thumbnail বা cover ছবি সেভ করবে\n"
         "/view_thum - সেভ করা thumbnail ছবি দেখাবে এবং delete বাটন দেবে\n"
-        "/add - চ্যানেল যুক্ত করবে\n"
+        "/add - চ্যানেল যুক্ত করবে (মেসেজ, ইমেজ, ভিডিও ইত্যাদি ফরোয়ার্ড করে)\n"
+        "/list - সেভ করা সকল চ্যানেল দেখাবে এবং বাটন দিয়ে সিলেক্ট করতে দেবে\n"
+        "/time - upload/edit delay টাইম সেট করবে (যেমন: /time 1.2, 2, 2.5, 3)\n"
         "/cap - কাস্টম caption সেভ করবে\n"
         "/cap_view - সেভ করা caption দেখাবে এবং delete বাটন দেবে\n"
         "/mode - covar, caption, অথবা covar and caption মোড নির্বাচন করবে\n"
-        "/send 19 অথবা /send 2-20 - সেভ করা চ্যানেলের মেসেজ বা রেঞ্জ forward করবে\n"
+        "/send 19 অথবা /send 2-20 - সিলেক্ট করা চ্যানেলের মেসেজ বা রেঞ্জ forward করবে\n"
         "ok - ফরোয়ার্ড করে জমা রাখা ভিডিওগুলো ছোট Post ID থেকে edit শুরু করবে"
     )
     await message.reply_text(help_text, parse_mode=None)
+
+
+@app.on_message(filters.command("time") & filters.private)
+async def cmd_time(client, message):
+    if not is_admin(message.from_user.id if message.from_user else None):
+        return
+    user_id = message.from_user.id
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        current_delay = get_user_upload_delay(user_id)
+        await message.reply_text(
+            f"বর্তমান upload time delay: `{current_delay}`s\n"
+            "নিচের বাটন থেকে সিলেক্ট করুন অথবা লিখুন: `/time 1.2`, `/time 2`, `/time 2.5`, `/time 3`",
+            reply_markup=build_time_keyboard(current_delay),
+        )
+        return
+
+    raw_arg = parts[1].strip()
+    matched_nums = re.findall(r"\d+(?:\.\d+)?", raw_arg)
+    if not matched_nums:
+        await message.reply_text("সঠিক সময় দিন। যেমন: `/time 1.2`, `/time 2`, `/time 2.5`, `/time 3`")
+        return
+
+    first_val = float(matched_nums[0])
+    if first_val < 0 or first_val > 60:
+        await message.reply_text("সময় `0` থেকে `60` সেকেন্ডের মধ্যে দিন।")
+        return
+
+    clean_val = int(first_val) if first_val.is_integer() else first_val
+    user_upload_delays[user_id] = float(clean_val)
+
+    parsed_list = []
+    for n_str in matched_nums:
+        fv = float(n_str)
+        if 0 <= fv <= 60:
+            parsed_list.append(int(fv) if fv.is_integer() else fv)
+
+    if len(parsed_list) > 1:
+        rows = [
+            [
+                InlineKeyboardButton(
+                    f"✅ {v}s" if abs(float(v) - float(clean_val)) < 1e-6 else f"{v}s",
+                    callback_data=f"set_time:{v}",
+                )
+            ]
+            for v in parsed_list
+        ]
+        kb = InlineKeyboardMarkup(rows)
+    else:
+        kb = build_time_keyboard(float(clean_val))
+
+    await message.reply_text(
+        f"Upload time সেট হয়েছে: `{clean_val}`s",
+        reply_markup=kb,
+    )
+
+
+@app.on_callback_query(filters.regex("^set_time:(.+)$"))
+async def cb_set_time(client, callback_query):
+    if not is_admin(callback_query.from_user.id if callback_query.from_user else None):
+        await callback_query.answer("Access denied.", show_alert=True)
+        return
+    user_id = callback_query.from_user.id
+    raw_val = callback_query.data.split(":", 1)[1].strip()
+    try:
+        val = float(raw_val)
+        if val < 0 or val > 60:
+            await callback_query.answer("Invalid time range.", show_alert=True)
+            return
+    except ValueError:
+        await callback_query.answer("Invalid time value.", show_alert=True)
+        return
+
+    clean_val = int(val) if val.is_integer() else val
+    user_upload_delays[user_id] = float(clean_val)
+
+    try:
+        await callback_query.message.edit_text(
+            f"Upload time সেট হয়েছে: `{clean_val}`s",
+            reply_markup=build_time_keyboard(float(clean_val)),
+        )
+    except Exception:
+        pass
+    await callback_query.answer(f"Upload time set: {clean_val}s")
+
+
+@app.on_message(filters.command("list") & filters.private)
+async def cmd_list_channels(client, message):
+    if not is_admin(message.from_user.id if message.from_user else None):
+        return
+    user_id = message.from_user.id
+    ch_list = ensure_user_channels_loaded(user_id)
+    if not ch_list:
+        await message.reply_text(
+            "কোনো চ্যানেল সেভ করা নেই। ENV-এ `CHANNEL_ID` দিন অথবা `/add` দিয়ে চ্যানেল যুক্ত করুন।"
+        )
+        return
+
+    active = get_active_user_channel(user_id)
+    active_txt = f"**{active['title']}** (`{active['chat_id']}`)" if active else "নেই"
+    lines = ["**সেভ করা চ্যানেলসমূহ:**\n"]
+    for idx, item in enumerate(ch_list, start=1):
+        mark = "✅ " if active and int(active["chat_id"]) == int(item["chat_id"]) else ""
+        lines.append(f"{idx}. {mark}**{item['title']}** — `{item['chat_id']}`")
+    lines.append(f"\nবর্তমান সিলেক্টেড চ্যানেল: {active_txt}")
+    lines.append("নিচের বাটন থেকে যেকোনো একটি চ্যানেল সিলেক্ট করুন:")
+
+    await message.reply_text(
+        "\n".join(lines),
+        reply_markup=build_channel_list_keyboard(user_id),
+    )
+
+
+@app.on_callback_query(filters.regex("^set_ch:(-?\\d+)$"))
+async def cb_set_channel(client, callback_query):
+    if not is_admin(callback_query.from_user.id if callback_query.from_user else None):
+        await callback_query.answer("Access denied.", show_alert=True)
+        return
+    user_id = callback_query.from_user.id
+    target_id = int(callback_query.data.split(":", 1)[1])
+    ch_list = ensure_user_channels_loaded(user_id)
+    matched = next((item for item in ch_list if int(item["chat_id"]) == target_id), None)
+    if not matched:
+        await callback_query.answer("Channel not found in list.", show_alert=True)
+        return
+
+    user_channels[user_id] = dict(matched)
+    active_txt = f"**{matched['title']}** (`{matched['chat_id']}`)"
+    lines = ["**সেভ করা চ্যানেলসমূহ:**\n"]
+    for idx, item in enumerate(ch_list, start=1):
+        mark = "✅ " if int(item["chat_id"]) == target_id else ""
+        lines.append(f"{idx}. {mark}**{item['title']}** — `{item['chat_id']}`")
+    lines.append(f"\nবর্তমান সিলেক্টেড চ্যানেল: {active_txt}")
+    lines.append("নিচের বাটন থেকে যেকোনো একটি চ্যানেল সিলেক্ট করুন:")
+
+    try:
+        await callback_query.message.edit_text(
+            "\n".join(lines),
+            reply_markup=build_channel_list_keyboard(user_id),
+        )
+    except Exception:
+        pass
+    await callback_query.answer(f"Selected: {matched['title']}")
 
 
 @app.on_message(filters.command("thum") & filters.private)
@@ -517,11 +757,12 @@ async def cmd_add_channel(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
     user_id = message.from_user.id
+    ensure_user_channels_loaded(user_id)
     waiting_for_thumb.discard(user_id)
     waiting_for_caption.discard(user_id)
     waiting_for_channel.add(user_id)
     await message.reply_text(
-        "দয়া করে আপনার **Channel** থেকে যেকোনো একটি মেসেজ এই চ্যাটে **Forward** করুন।"
+        "দয়া করে আপনার **Channel** থেকে যেকোনো একটি মেসেজ, ইমেজ, ভিডিও বা ফাইল এই চ্যাটে **Forward** করুন।"
     )
 
 
@@ -582,10 +823,10 @@ async def cmd_send_channel_msg(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
     user_id = message.from_user.id
-    saved_ch = user_channels.get(user_id)
+    saved_ch = get_active_user_channel(user_id)
     if not saved_ch:
         await message.reply_text(
-            "আগে `/add` দিয়ে একটি চ্যানেল যুক্ত করুন, তারপর `/send 19` অথবা `/send 2-20` দিন।"
+            "আগে `/add` দিয়ে বা ENV-এ `CHANNEL_ID` দিয়ে একটি চ্যানেল যুক্ত করুন, তারপর `/send 19` অথবা `/send 2-20` দিন।"
         )
         return
 
@@ -593,8 +834,8 @@ async def cmd_send_channel_msg(client, message):
     if len(parts) < 2 or not parts[1].strip():
         await message.reply_text(
             "ব্যবহারের নিয়ম:\n"
-            "• `/send 19` — চ্যানেলের ১৯ নম্বর মেসেজ forward করবে\n"
-            "• `/send 2-20` — চ্যানেলের ২ থেকে ২০ নম্বর মেসেজ forward করবে"
+            "• `/send 19` — সিলেক্ট করা চ্যানেলের ১৯ নম্বর মেসেজ forward করবে\n"
+            "• `/send 2-20` — সিলেক্ট করা চ্যানেলের ২ থেকে ২০ নম্বর মেসেজ forward করবে"
         )
         return
 
@@ -609,7 +850,7 @@ async def cmd_send_channel_msg(client, message):
     channel_id = saved_ch["chat_id"]
     channel_title = saved_ch["title"]
     status_msg = await message.reply_text(
-        f"**{channel_title}** চ্যানেল থেকে `{parts[1].strip()}` মেসেজ forward করা হচ্ছে..."
+        f"**{channel_title}** (`{channel_id}`) চ্যানেল থেকে `{parts[1].strip()}` মেসেজ forward করা হচ্ছে..."
     )
 
     forwarded_count = 0
@@ -639,6 +880,20 @@ async def handle_photo(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
     user_id = message.from_user.id
+    if message.forward_from_chat and message.forward_from_chat.type == ChatType.CHANNEL and user_id in waiting_for_channel:
+        origin_chat = message.forward_from_chat
+        saved_entry = save_user_channel_entry(
+            user_id=user_id,
+            chat_id=origin_chat.id,
+            title=origin_chat.title or "Channel",
+            set_active=True,
+        )
+        waiting_for_channel.discard(user_id)
+        await message.reply_text(
+            f"চ্যানেল সেভ হয়েছে (ইমেজ ফরোয়ার্ড থেকে): **{saved_entry['title']}** (`{saved_entry['chat_id']}`)"
+        )
+        return
+
     if user_id in waiting_for_thumb or user_id not in user_cover_file_ids:
         user_cover_file_ids[user_id] = message.photo.file_id
         waiting_for_thumb.discard(user_id)
@@ -661,16 +916,18 @@ async def handle_forwarded(client, message):
     if user_id in waiting_for_channel:
         if not origin_chat or origin_chat.type != ChatType.CHANNEL:
             await message.reply_text(
-                "দয়া করে একটি **Channel** থেকে মেসেজ forward করুন।"
+                "দয়া করে একটি **Channel** থেকে মেসেজ, ইমেজ, ভিডিও বা ফাইল forward করুন।"
             )
             return
-        user_channels[user_id] = {
-            "chat_id": origin_chat.id,
-            "title": origin_chat.title or "Channel",
-        }
+        saved_entry = save_user_channel_entry(
+            user_id=user_id,
+            chat_id=origin_chat.id,
+            title=origin_chat.title or "Channel",
+            set_active=True,
+        )
         waiting_for_channel.discard(user_id)
         await message.reply_text(
-            f"চ্যানেল সেভ হয়েছে: **{user_channels[user_id]['title']}** (`{user_channels[user_id]['chat_id']}`)"
+            f"চ্যানেল সেভ হয়েছে: **{saved_entry['title']}** (`{saved_entry['chat_id']}`)"
         )
         return
 
@@ -698,7 +955,7 @@ async def handle_forwarded(client, message):
         await message.reply_text("আগে `/cap` কমান্ড দিয়ে একটি caption সেট করুন।")
         return
 
-    saved_ch = user_channels.get(user_id)
+    saved_ch = get_active_user_channel(user_id)
 
     if saved_ch and origin_chat and origin_chat.id == saved_ch["chat_id"] and origin_msg_id:
         queue = pending_edits.setdefault(user_id, {})
@@ -743,7 +1000,7 @@ async def handle_forwarded(client, message):
     filters.text
     & filters.private
     & ~filters.forwarded
-    & ~filters.command(["start", "thum", "view_thum", "mode", "add", "cap", "cap_view", "send"])
+    & ~filters.command(["start", "thum", "view_thum", "mode", "add", "list", "time", "cap", "cap_view", "send"])
 )
 async def handle_text_inputs(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
@@ -765,10 +1022,11 @@ async def handle_text_inputs(client, message):
 
     if text_val.lower() == "ok":
         queue = pending_edits.get(user_id)
-        saved_ch = user_channels.get(user_id)
+        saved_ch = get_active_user_channel(user_id)
         mode = get_user_mode(user_id)
         active_cover = user_cover_file_ids.get(user_id)
         cap_data = user_captions.get(user_id)
+        upload_delay = get_user_upload_delay(user_id)
 
         need_cover = mode in ("cover", "both")
         need_caption = mode in ("caption", "both")
@@ -777,7 +1035,7 @@ async def handle_text_inputs(client, message):
             await message.reply_text("এডিট করার জন্য কোনো ভিডিও জমা নেই। আগে চ্যানেল থেকে ভিডিও forward করুন।")
             return
         if not saved_ch:
-            await message.reply_text("কোনো চ্যানেল সেভ করা নেই। আগে `/add` দিয়ে চ্যানেল যুক্ত করুন।")
+            await message.reply_text("কোনো চ্যানেল সেভ করা নেই। আগে `/add` দিয়ে বা ENV-এ `CHANNEL_ID` দিয়ে চ্যানেল যুক্ত করুন।")
             return
         if need_cover and not active_cover:
             await message.reply_text("কোনো Cover ছবি সেভ করা নেই। আগে `/thum` দিয়ে ছবি দিন।")
@@ -792,7 +1050,7 @@ async def handle_text_inputs(client, message):
         pending_edits[user_id] = {}
 
         status_msg = await message.reply_text(
-            f"**{saved_ch['title']}** চ্যানেলে এডিট শুরু হচ্ছে: `0/{total_items}`"
+            f"**{saved_ch['title']}** চ্যানেলে এডিট শুরু হচ্ছে: `0/{total_items}` (Delay: `{upload_delay}`s)"
         )
 
         success_count = 0
@@ -834,7 +1092,7 @@ async def handle_text_inputs(client, message):
 
                     if result.get("ok"):
                         success_count += 1
-                        await asyncio.sleep(0.15)
+                        await asyncio.sleep(get_user_upload_delay(user_id))
                         break
 
                     retry_after = extract_retry_after(result)
