@@ -34,6 +34,19 @@ def get_secret_or_env(key: str, default: str | None = None) -> str | None:
     return default
 
 
+def parse_admin_id(raw_val: str | None) -> int | None:
+    if not raw_val:
+        return None
+    cleaned = str(raw_val).strip().strip('"').strip("'")
+    match = re.search(r"-?\d+", cleaned)
+    if not match:
+        return None
+    try:
+        return int(match.group(0))
+    except ValueError:
+        return None
+
+
 # Colab Secrets বা Environment থেকে তথ্য নিয়ে সেট করা
 _api_id_raw = get_secret_or_env("API_ID")
 _api_hash_raw = get_secret_or_env("API_HASH")
@@ -41,18 +54,19 @@ _bot_token_raw = get_secret_or_env("BOT_TOKEN")
 _admin_id_raw = get_secret_or_env("ADMIN_ID")
 
 if _api_id_raw:
-    os.environ["API_ID"] = str(_api_id_raw)
+    os.environ["API_ID"] = str(_api_id_raw).strip()
 if _api_hash_raw:
-    os.environ["API_HASH"] = str(_api_hash_raw)
+    os.environ["API_HASH"] = str(_api_hash_raw).strip()
 if _bot_token_raw:
-    os.environ["BOT_TOKEN"] = str(_bot_token_raw)
+    os.environ["BOT_TOKEN"] = str(_bot_token_raw).strip()
 
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-ADMIN_ID = int(_admin_id_raw) if _admin_id_raw and str(_admin_id_raw).strip().isdigit() else None
+ADMIN_ID = parse_admin_id(_admin_id_raw)
+print(f"ADMIN_ID loaded: {ADMIN_ID}")
 
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -151,7 +165,9 @@ def start_flask_server():
 def is_admin(user_id: int | None) -> bool:
     if ADMIN_ID is None:
         return True
-    return user_id == ADMIN_ID
+    if user_id is None:
+        return False
+    return int(user_id) == ADMIN_ID
 
 
 app = Client(
