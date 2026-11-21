@@ -316,6 +316,7 @@ def render_dynamic_caption(template: str, video_index: int) -> str:
 
 
 async def api_edit_message_caption_only(
+    session: aiohttp.ClientSession,
     chat_id: int,
     message_id: int,
     caption: str = "",
@@ -329,12 +330,12 @@ async def api_edit_message_caption_only(
     if parse_mode:
         payload["parse_mode"] = parse_mode
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(f"{API_BASE}/editMessageCaption", json=payload) as resp:
-            return await resp.json()
+    async with session.post(f"{API_BASE}/editMessageCaption", json=payload) as resp:
+        return await resp.json()
 
 
 async def api_edit_message_media_cover(
+    session: aiohttp.ClientSession,
     chat_id: int,
     message_id: int,
     api_type: str,
@@ -358,9 +359,8 @@ async def api_edit_message_media_cover(
         "message_id": message_id,
         "media": media_obj,
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(f"{API_BASE}/editMessageMedia", json=payload) as resp:
-            return await resp.json()
+    async with session.post(f"{API_BASE}/editMessageMedia", json=payload) as resp:
+        return await resp.json()
 
 
 async def api_send_media(
@@ -396,6 +396,19 @@ async def api_send_media(
     async with aiohttp.ClientSession() as session:
         async with session.post(f"{API_BASE}/{method}", json=payload) as resp:
             return await resp.json()
+
+
+def extract_retry_after(result: dict) -> int | None:
+    if not isinstance(result, dict):
+        return None
+    params = result.get("parameters") or {}
+    if params.get("retry_after") is not None:
+        return int(params["retry_after"])
+    desc = str(result.get("description") or "")
+    m = re.search(r"retry after (\d+)", desc, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    return None
 
 
 @app.on_message(filters.command("start") & filters.private)
@@ -609,7 +622,7 @@ async def cmd_send_channel_msg(client, message):
                     message_ids=msg_id,
                 )
                 forwarded_count += 1
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.25)
                 break
             except FloodWait as e:
                 await asyncio.sleep(int(e.value) + 1)
@@ -775,65 +788,91 @@ async def handle_text_inputs(client, message):
 
         sorted_ids = sorted(queue.keys())
         items_to_process = [(mid, queue[mid]) for mid in sorted_ids]
+        total_items = len(items_to_process)
         pending_edits[user_id] = {}
 
         status_msg = await message.reply_text(
-            f"**{saved_ch['title']}** চ্যানেলের `{len(items_to_process)}`টি ভিডিও ছোট ID (`{sorted_ids[0]}`) থেকে এডিট শুরু হচ্ছে..."
+            f"**{saved_ch['title']}** চ্যানেলে এডিট শুরু হচ্ছে: `0/{total_items}`"
         )
 
         success_count = 0
         fail_errors = []
+        last_reported_count = 0
 
-        for msg_id, item in items_to_process:
-            current_cap_data = user_captions.get(user_id)
-            if need_caption and current_cap_data:
-                final_caption = render_dynamic_caption(
-                    current_cap_data["template"], current_cap_data["index"]
-                )
-                current_cap_data["index"] += 1
-            else:
-                final_caption = format_bold_html(item["orig_caption"])
-
-            while True:
-                if mode == "caption":
-                    result = await api_edit_message_caption_only(
-                        chat_id=saved_ch["chat_id"],
-                        message_id=msg_id,
-                        caption=final_caption,
-                        parse_mode="HTML",
+        async with aiohttp.ClientSession() as session:
+            for idx, (msg_id, item) in enumerate(items_to_process, start=1):
+                current_cap_data = user_captions.get(user_id)
+                if need_caption and current_cap_data:
+                    final_caption = render_dynamic_caption(
+                        current_cap_data["template"], current_cap_data["index"]
                     )
+                    current_cap_data["index"] += 1
                 else:
-                    cover_to_use = active_cover if need_cover else None
-                    result = await api_edit_message_media_cover(
-                        chat_id=saved_ch["chat_id"],
-                        message_id=msg_id,
-                        api_type=item["api_type"],
-                        file_id=item["file_id"],
-                        cover_file_id=cover_to_use,
-                        caption=final_caption,
-                        parse_mode="HTML",
-                    )
+                    final_caption = format_bold_html(item["orig_caption"])
 
-                if result.get("ok"):
-                    success_count += 1
-                    await asyncio.sleep(1)
-                    break
+                while True:
+                    if mode == "caption":
+                        result = await api_edit_message_caption_only(
+                            session=session,
+                            chat_id=saved_ch["chat_id"],
+                            message_id=msg_id,
+                            caption=final_caption,
+                            parse_mode="HTML",
+                        )
+                    else:
+                        cover_to_use = active_cover if need_cover else None
+                        result = await api_edit_message_media_cover(
+                            session=session,
+                            chat_id=saved_ch["chat_id"],
+                            message_id=msg_id,
+                            api_type=item["api_type"],
+                            file_id=item["file_id"],
+                            cover_file_id=cover_to_use,
+                            caption=final_caption,
+                            parse_mode="HTML",
+                        )
 
-                retry_after = (result.get("parameters") or {}).get("retry_after")
-                if retry_after:
-                    await asyncio.sleep(int(retry_after) + 1)
-                else:
-                    fail_errors.append(f"ID {msg_id}: {result.get('description', 'Error')}")
-                    break
+                    if result.get("ok"):
+                        success_count += 1
+                        await asyncio.sleep(0.15)
+                        break
+
+                    retry_after = extract_retry_after(result)
+                    if retry_after is not None:
+                        wait_sec = retry_after + 1
+                        try:
+                            await status_msg.edit_text(
+                                f"⏳ FloodWait: `{wait_sec}`s অপেক্ষা করা হচ্ছে... (`{success_count}/{total_items}` edit হয়েছে)"
+                            )
+                        except Exception:
+                            pass
+                        await asyncio.sleep(wait_sec)
+                    else:
+                        fail_errors.append(f"ID {msg_id}: {result.get('description', 'Error')}")
+                        break
+
+                # প্রতি ৫টি এডিট পরপর প্রোগ্রেস আপডেট (`10/80`—৮০টি post edit এর মধ্যে 10 edit হয়েছে)
+                if (
+                    success_count - last_reported_count >= 5
+                    or idx == total_items
+                ) and success_count != last_reported_count:
+                    last_reported_count = success_count
+                    try:
+                        await status_msg.edit_text(
+                            f"⚡ এডিট চলছে: `{success_count}/{total_items}` (`{total_items}`টি post edit এর মধ্যে `{success_count}` edit হয়েছে)"
+                        )
+                    except Exception:
+                        pass
 
         summary = (
-            f"সম্পন্ন হয়েছে! **{saved_ch['title']}** চ্যানেলে সফলভাবে `{success_count}/{len(items_to_process)}`টি ভিডিও এডিট হয়েছে।"
+            f"✅ সম্পন্ন হয়েছে! **{saved_ch['title']}** চ্যানেলে `{success_count}/{total_items}` "
+            f"(`{total_items}`টি post edit এর মধ্যে `{success_count}` edit হয়েছে)।"
         )
         if fail_errors:
             summary += "\n\n**সমস্যা হওয়া পোস্ট:**\n" + "\n".join(fail_errors[:10])
 
         await status_msg.edit_text(summary)
-        schedule_auto_delete(client, status_msg, delay=5)
+        schedule_auto_delete(client, status_msg, delay=8)
 
 
 @app.on_message(filters.private & ~filters.forwarded)
