@@ -7,6 +7,13 @@ import threading
 import time
 import traceback
 import urllib.request
+
+# Python 3.14-এ Pyrogram ইমপোর্টের আগেই event loop নিশ্চিত করা
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 import aiohttp
 from flask import Flask, render_template_string
 from pyrogram import Client, filters
