@@ -8,7 +8,7 @@ import time
 import traceback
 import urllib.request
 
-# Python 3.14-এ Pyrogram ইমপোর্টের আগেই event loop নিশ্চিত করা
+# Pyrogram ইমপোর্টের আগে event loop নিশ্চিত করা
 try:
     asyncio.get_event_loop()
 except RuntimeError:
@@ -955,9 +955,17 @@ async def start_bot():
 
 
 if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(start_bot())
-    finally:
-        loop.close()
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    if running_loop is not None:
+        running_loop.create_task(start_bot())
+    else:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(start_bot())
+        finally:
+            loop.close()
