@@ -192,20 +192,24 @@ waiting_for_channel = set()  # {user_id}
 waiting_for_caption = set()  # {user_id}
 
 
-async def fetch_channel_title_from_api(client, chat_id: int) -> str | None:
-    cid = int(chat_id)
-    if cid in resolved_channel_titles and resolved_channel_titles[cid]:
-        return resolved_channel_titles[cid]
+def extract_forward_origin_info(message):
+    origin_chat = getattr(message, "forward_from_chat", None)
+    origin_msg_id = getattr(message, "forward_from_message_id", None)
 
-    try:
-        chat_obj = await client.get_chat(cid)
-        title = getattr(chat_obj, "title", None) or getattr(chat_obj, "first_name", None)
-        if title and str(title).strip():
-            clean = str(title).strip()
-            resolved_channel_titles[cid] = clean
-            return clean
-    except Exception:
-        pass
+    fwd_origin = getattr(message, "forward_origin", None)
+    if fwd_origin is not None:
+        if not origin_chat:
+            origin_chat = getattr(fwd_origin, "chat", None) or getattr(fwd_origin, "sender_chat", None)
+        if not origin_msg_id:
+            origin_msg_id = getattr(fwd_origin, "message_id", None)
+
+    return origin_chat, origin_msg_id
+
+
+async def fetch_channel_title_from_api(client, chat_id: int, force_refresh: bool = False) -> str | None:
+    cid = int(chat_id)
+    if not force_refresh and cid in resolved_channel_titles and resolved_channel_titles[cid]:
+        return resolved_channel_titles[cid]
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -218,18 +222,30 @@ async def fetch_channel_title_from_api(client, chat_id: int) -> str | None:
                         clean = str(title).strip()
                         resolved_channel_titles[cid] = clean
                         return clean
+                else:
+                    print(f"getChat warning for {cid}: {data}")
+    except Exception as e:
+        print(f"getChat exception for {cid}: {e}")
+
+    try:
+        chat_obj = await client.get_chat(cid)
+        title = getattr(chat_obj, "title", None) or getattr(chat_obj, "first_name", None)
+        if title and str(title).strip():
+            clean = str(title).strip()
+            resolved_channel_titles[cid] = clean
+            return clean
     except Exception:
         pass
 
-    return None
+    return resolved_channel_titles.get(cid)
 
 
-async def resolve_all_user_channel_titles(client, user_id: int):
+async def resolve_all_user_channel_titles(client, user_id: int, force_refresh: bool = False):
     ch_list = ensure_user_channels_loaded(user_id)
     active = get_active_user_channel(user_id)
     for item in ch_list:
         cid = int(item["chat_id"])
-        fetched = await fetch_channel_title_from_api(client, cid)
+        fetched = await fetch_channel_title_from_api(client, cid, force_refresh=force_refresh)
         if fetched:
             item["title"] = fetched
             if active and int(active["chat_id"]) == cid:
@@ -240,14 +256,26 @@ def ensure_user_channels_loaded(user_id: int) -> list[dict]:
     if user_id not in user_channel_lists:
         loaded = []
         for idx, cid in enumerate(ENV_CHANNEL_IDS, start=1):
-            cached_title = resolved_channel_titles.get(int(cid))
+            cid_int = int(cid)
+            cached_title = resolved_channel_titles.get(cid_int)
             loaded.append({
-                "chat_id": int(cid),
-                "title": cached_title if cached_title else f"Channel {idx} ({cid})",
+                "chat_id": cid_int,
+                "title": cached_title if cached_title else f"Channel {idx} ({cid_int})",
             })
         user_channel_lists[user_id] = loaded
     else:
-        for idx, item in enumerate(user_channel_lists[user_id], start=1):
+        existing_ids = {int(x["chat_id"]) for x in user_channel_lists[user_id]}
+        for idx, cid in enumerate(ENV_CHANNEL_IDS, start=1):
+            cid_int = int(cid)
+            if cid_int not in existing_ids:
+                cached_title = resolved_channel_titles.get(cid_int)
+                user_channel_lists[user_id].append({
+                    "chat_id": cid_int,
+                    "title": cached_title if cached_title else f"Channel {idx} ({cid_int})",
+                })
+                existing_ids.add(cid_int)
+
+        for item in user_channel_lists[user_id]:
             cid = int(item["chat_id"])
             if cid in resolved_channel_titles and resolved_channel_titles[cid]:
                 item["title"] = resolved_channel_titles[cid]
@@ -683,7 +711,7 @@ async def cmd_list_channels(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
     user_id = message.from_user.id
-    await resolve_all_user_channel_titles(client, user_id)
+    await resolve_all_user_channel_titles(client, user_id, force_refresh=True)
     ch_list = ensure_user_channels_loaded(user_id)
     if not ch_list:
         await message.reply_text(
@@ -950,12 +978,12 @@ async def handle_photo(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
     user_id = message.from_user.id
-    if message.forward_from_chat and message.forward_from_chat.type == ChatType.CHANNEL and user_id in waiting_for_channel:
-        origin_chat = message.forward_from_chat
+    origin_chat, _ = extract_forward_origin_info(message)
+    if origin_chat and getattr(origin_chat, "type", None) == ChatType.CHANNEL and user_id in waiting_for_channel:
         saved_entry = save_user_channel_entry(
             user_id=user_id,
             chat_id=origin_chat.id,
-            title=origin_chat.title or "Channel",
+            title=getattr(origin_chat, "title", None) or "Channel",
             set_active=True,
         )
         waiting_for_channel.discard(user_id)
@@ -980,14 +1008,13 @@ async def handle_forwarded(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
     user_id = message.from_user.id
-    origin_chat = message.forward_from_chat
-    origin_msg_id = message.forward_from_message_id
+    origin_chat, origin_msg_id = extract_forward_origin_info(message)
 
-    if origin_chat and origin_chat.type == ChatType.CHANNEL and origin_chat.title:
+    if origin_chat and getattr(origin_chat, "type", None) == ChatType.CHANNEL and getattr(origin_chat, "title", None):
         resolved_channel_titles[int(origin_chat.id)] = str(origin_chat.title).strip()
 
     if user_id in waiting_for_channel:
-        if not origin_chat or origin_chat.type != ChatType.CHANNEL:
+        if not origin_chat or getattr(origin_chat, "type", None) != ChatType.CHANNEL:
             await message.reply_text(
                 "দয়া করে একটি **Channel** থেকে মেসেজ, ইমেজ, ভিডিও বা ফাইল forward করুন।"
             )
@@ -995,7 +1022,7 @@ async def handle_forwarded(client, message):
         saved_entry = save_user_channel_entry(
             user_id=user_id,
             chat_id=origin_chat.id,
-            title=origin_chat.title or "Channel",
+            title=getattr(origin_chat, "title", None) or "Channel",
             set_active=True,
         )
         waiting_for_channel.discard(user_id)
@@ -1279,9 +1306,12 @@ async def start_bot():
 
     if ENV_CHANNEL_IDS:
         for cid in ENV_CHANNEL_IDS:
-            fetched = await fetch_channel_title_from_api(app, cid)
+            fetched = await fetch_channel_title_from_api(app, cid, force_refresh=True)
             if fetched:
                 print(f"ENV Channel Resolved: {cid} -> {fetched}")
+        if ADMIN_ID is not None:
+            ensure_user_channels_loaded(ADMIN_ID)
+            await resolve_all_user_channel_titles(app, ADMIN_ID)
 
     print(f"Bot is running on port {PORT}! URL: {PUBLIC_BASE_URL}")
     try:
