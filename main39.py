@@ -182,9 +182,10 @@ user_cover_file_ids = {}     # {user_id: photo_file_id}
 user_channels = {}           # {user_id: {"chat_id": int, "title": str}}
 user_channel_lists = {}      # {user_id: [{"chat_id": int, "title": str}, ...]}
 user_upload_delays = {}      # {user_id: float}
+user_forward_tags = {}       # {user_id: bool} -> True = on, False = off
 user_captions = {}           # {user_id: {"template": str, "index": int}}
 user_modes = {}              # {user_id: "cover" | "caption" | "both"}
-pending_edits = {}           # {user_id: {msg_id: {"file_id": str, "api_type": str, "orig_caption": str}}}
+pending_edits = {}           # {user_id: {sort_key: {"file_id": str, "api_type": str, "orig_caption": str, "channel_edit": bool, "msg_id": int | None}}}
 resolved_channel_titles = {} # {chat_id: str}
 
 waiting_for_thumb = set()    # {user_id}
@@ -336,6 +337,42 @@ def get_active_user_channel(user_id: int) -> dict | None:
 
 def get_user_upload_delay(user_id: int) -> float:
     return float(user_upload_delays.get(user_id, 0.15))
+
+
+def get_user_forward_tag(user_id: int) -> bool:
+    return bool(user_forward_tags.get(user_id, True))
+
+
+def queue_video_for_ok(
+    user_id: int,
+    file_id: str,
+    api_type: str = "video",
+    orig_caption: str = "",
+    channel_edit: bool = False,
+    msg_id: int | None = None,
+    fallback_order_id: int = 0,
+) -> int:
+    queue = pending_edits.setdefault(user_id, {})
+    if channel_edit and msg_id is not None:
+        sort_key = int(msg_id)
+        while sort_key in queue and queue[sort_key].get("file_id") != file_id:
+            sort_key += 1
+    else:
+        base_num = int(msg_id) if msg_id is not None else int(fallback_order_id)
+        if base_num <= 0:
+            base_num = 1
+        sort_key = base_num
+        while sort_key in queue:
+            sort_key += 1
+
+    queue[sort_key] = {
+        "file_id": file_id,
+        "api_type": api_type,
+        "orig_caption": orig_caption or "",
+        "channel_edit": bool(channel_edit),
+        "msg_id": int(msg_id) if msg_id is not None else None,
+    }
+    return sort_key
 
 
 def build_time_keyboard(current_delay: float) -> InlineKeyboardMarkup:
@@ -616,8 +653,9 @@ async def cmd_start(client, message):
         "/cap - কাস্টম caption সেভ করবে\n"
         "/cap_view - সেভ করা caption দেখাবে এবং delete বাটন দেবে\n"
         "/mode - covar, caption, অথবা covar and caption মোড নির্বাচন করবে\n"
-        "/send 19 অথবা /send 2-20 - সিলেক্ট করা চ্যানেলের মেসেজ বা রেঞ্জ forward করবে\n"
-        "ok - ফরোয়ার্ড করে জমা রাখা ভিডিওগুলো ছোট Post ID থেকে edit শুরু করবে"
+        "/send on অথবা /send off - forward tag চালু/বন্ধ করবে\n"
+        "/send 19 অথবা /send 2-20 - সিলেক্ট করা চ্যানেলের মেসেজ বা রেঞ্জ পাঠাবে\n"
+        "ok - জমা রাখা ভিডিওগুলো ছোট ID থেকে পাঠাবে/edit করবে"
     )
     await message.reply_text(help_text, parse_mode=None)
 
@@ -921,6 +959,31 @@ async def cmd_send_channel_msg(client, message):
         return
     user_id = message.from_user.id
     await resolve_all_user_channel_titles(client, user_id)
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        tag_status = "ON (forward tag সহ)" if get_user_forward_tag(user_id) else "OFF (forward tag ছাড়া)"
+        await message.reply_text(
+            f"বর্তমান forward tag স্ট্যাটাস: **{tag_status}**\n\n"
+            "ব্যবহারের নিয়ম:\n"
+            "• `/send off` — forward tag ছাড়া মেসেজ পাঠাবে\n"
+            "• `/send on` — forward tag সহ মেসেজ পাঠাবে\n"
+            "• `/send 19` — সিলেক্ট করা চ্যানেলের ১৯ নম্বর মেসেজ পাঠাবে\n"
+            "• `/send 2-20` — সিলেক্ট করা চ্যানেলের ২ থেকে ২০ নম্বর মেসেজ পাঠাবে"
+        )
+        return
+
+    arg_raw = parts[1].strip()
+    arg_lower = arg_raw.lower()
+    if arg_lower == "off":
+        user_forward_tags[user_id] = False
+        await message.reply_text("Forward tag **OFF** করা হয়েছে। এখন `/send` দিলে forward tag ছাড়া মেসেজ যাবে।")
+        return
+    if arg_lower == "on":
+        user_forward_tags[user_id] = True
+        await message.reply_text("Forward tag **ON** করা হয়েছে। এখন `/send` দিলে forward tag সহ মেসেজ যাবে।")
+        return
+
     saved_ch = get_active_user_channel(user_id)
     if not saved_ch:
         await message.reply_text(
@@ -928,18 +991,9 @@ async def cmd_send_channel_msg(client, message):
         )
         return
 
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
-        await message.reply_text(
-            "ব্যবহারের নিয়ম:\n"
-            "• `/send 19` — সিলেক্ট করা চ্যানেলের ১৯ নম্বর মেসেজ forward করবে\n"
-            "• `/send 2-20` — সিলেক্ট করা চ্যানেলের ২ থেকে ২০ নম্বর মেসেজ forward করবে"
-        )
-        return
-
-    parsed = parse_message_range(parts[1])
+    parsed = parse_message_range(arg_raw)
     if parsed is None:
-        await message.reply_text("সঠিক Message ID বা রেঞ্জ দিন। যেমন: `/send 19` অথবা `/send 2-20`")
+        await message.reply_text("সঠিক Message ID বা রেঞ্জ দিন। যেমন: `/send 19` অথবা `/send 2-20` (অথবা `/send off` / `/send on`)")
         return
     if parsed == "TOO_LARGE":
         await message.reply_text("একবারে সর্বোচ্চ ২০০টি মেসেজের রেঞ্জ দেওয়া যাবে।")
@@ -947,19 +1001,29 @@ async def cmd_send_channel_msg(client, message):
 
     channel_id = int(saved_ch["chat_id"])
     channel_title = saved_ch["title"]
+    forward_tag_enabled = get_user_forward_tag(user_id)
+    tag_label = "forward tag সহ" if forward_tag_enabled else "forward tag ছাড়া"
+
     status_msg = await message.reply_text(
-        f"**{channel_title}** (`{channel_id}`) চ্যানেল থেকে `{parts[1].strip()}` মেসেজ forward করা হচ্ছে..."
+        f"**{channel_title}** (`{channel_id}`) চ্যানেল থেকে `{arg_raw}` মেসেজ ({tag_label}) পাঠানো হচ্ছে..."
     )
 
     forwarded_count = 0
     for msg_id in parsed:
         while True:
             try:
-                await client.forward_messages(
-                    chat_id=message.chat.id,
-                    from_chat_id=channel_id,
-                    message_ids=msg_id,
-                )
+                if forward_tag_enabled:
+                    await client.forward_messages(
+                        chat_id=message.chat.id,
+                        from_chat_id=channel_id,
+                        message_ids=msg_id,
+                    )
+                else:
+                    await client.copy_message(
+                        chat_id=message.chat.id,
+                        from_chat_id=channel_id,
+                        message_id=msg_id,
+                    )
                 forwarded_count += 1
                 await asyncio.sleep(0.25)
                 break
@@ -969,7 +1033,7 @@ async def cmd_send_channel_msg(client, message):
                 break
 
     await status_msg.edit_text(
-        f"সম্পন্ন হয়েছে! **{channel_title}** থেকে মোট `{forwarded_count}`টি মেসেজ forward tag সহ পাঠানো হয়েছে।"
+        f"সম্পন্ন হয়েছে! **{channel_title}** থেকে মোট `{forwarded_count}`টি মেসেজ ({tag_label}) পাঠানো হয়েছে।"
     )
 
 
@@ -997,7 +1061,7 @@ async def handle_photo(client, message):
         waiting_for_thumb.discard(user_id)
         await message.reply_text(
             "Cover ছবি সেভ হয়েছে!\n"
-            "• সেভ করা চ্যানেলের ভিডিওগুলো forward করুন (সব সেভ হবে), তারপর **`ok`** লিখলে ছোট Post ID থেকে এডিট শুরু হবে।"
+            "• ভিডিওগুলো পাঠান/forward করুন (সব সেভ হবে), তারপর **`ok`** লিখলে ছোট ID থেকে পাঠানো/এডিট শুরু হবে।"
         )
     else:
         await message.reply_text("নতুন ছবি সেট করতে চাইলে আগে `/thum` কমান্ড দিন।")
@@ -1041,60 +1105,28 @@ async def handle_forwarded(client, message):
         )
         return
 
-    mode = get_user_mode(user_id)
-    active_cover = user_cover_file_ids.get(user_id)
-    cap_data = user_captions.get(user_id)
-
-    need_cover = mode in ("cover", "both")
-    need_caption = mode in ("caption", "both")
-
-    if need_cover and not active_cover:
-        await message.reply_text("আগে `/thum` কমান্ড দিয়ে একটি ছবি পাঠান।")
-        return
-    if need_caption and not cap_data:
-        await message.reply_text("আগে `/cap` কমান্ড দিয়ে একটি caption সেট করুন।")
-        return
-
     await resolve_all_user_channel_titles(client, user_id)
     saved_ch = get_active_user_channel(user_id)
 
-    if saved_ch and origin_chat and int(origin_chat.id) == int(saved_ch["chat_id"]) and origin_msg_id:
-        queue = pending_edits.setdefault(user_id, {})
-        queue[origin_msg_id] = {
-            "file_id": info["file_id"],
-            "api_type": "video",
-            "orig_caption": message.caption or "",
-        }
-        info_msg = await message.reply_text(
-            f"ভিডিও সেভ হয়েছে (Post ID: `{origin_msg_id}`)। মোট জমা: `{len(queue)}`টি।\n"
-            "সব ভিডিও পাঠানো শেষ হলে **`ok`** লিখুন (ছোট Post ID থেকে এডিট শুরু হবে)।"
-        )
-        schedule_auto_delete(client, info_msg, delay=5)
-        return
-
-    if need_caption and cap_data:
-        final_caption = render_dynamic_caption(cap_data["template"], cap_data["index"])
-        cap_data["index"] += 1
-    else:
-        final_caption = format_bold_html(message.caption or "")
-
-    cover_to_use = active_cover if need_cover else None
-
-    status_msg = await message.reply_text("বটে ভিডিও পাঠানো হচ্ছে...")
-    result = await api_send_media(
-        chat_id=message.chat.id,
-        api_type="video",
-        file_id=info["file_id"],
-        cover_file_id=cover_to_use,
-        caption=final_caption,
-        parse_mode="HTML",
+    is_saved_channel_post = bool(
+        saved_ch and origin_chat and int(origin_chat.id) == int(saved_ch["chat_id"]) and origin_msg_id
     )
-    if result.get("ok"):
-        await status_msg.delete()
-    else:
-        await status_msg.edit_text(
-            f"Telegram API রেসপন্স: `{result.get('description', result)}`"
-        )
+    sort_key = queue_video_for_ok(
+        user_id=user_id,
+        file_id=info["file_id"],
+        api_type="video",
+        orig_caption=message.caption or "",
+        channel_edit=is_saved_channel_post,
+        msg_id=origin_msg_id if is_saved_channel_post else None,
+        fallback_order_id=origin_msg_id or getattr(message, "id", 0) or 0,
+    )
+    queue = pending_edits.get(user_id, {})
+    id_label = f"Post ID: `{origin_msg_id}`" if is_saved_channel_post else f"Queue ID: `{sort_key}`"
+    info_msg = await message.reply_text(
+        f"ভিডিও সেভ হয়েছে ({id_label})। মোট জমা: `{len(queue)}`টি।\n"
+        "সব ভিডিও পাঠানো শেষ হলে **`ok`** লিখুন (ছোট ID থেকে পাঠানো/এডিট শুরু হবে)।"
+    )
+    schedule_auto_delete(client, info_msg, delay=5)
 
 
 @app.on_message(
@@ -1134,10 +1166,7 @@ async def handle_text_inputs(client, message):
         need_caption = mode in ("caption", "both")
 
         if not queue:
-            await message.reply_text("এডিট করার জন্য কোনো ভিডিও জমা নেই। আগে চ্যানেল থেকে ভিডিও forward করুন।")
-            return
-        if not saved_ch:
-            await message.reply_text("কোনো চ্যানেল সেভ করা নেই। আগে `/add` দিয়ে বা ENV-এ `CHANNEL_ID` দিয়ে চ্যানেল যুক্ত করুন।")
+            await message.reply_text("জমা রাখা কোনো ভিডিও নেই। আগে ভিডিও পাঠান বা forward করুন।")
             return
         if need_cover and not active_cover:
             await message.reply_text("কোনো Cover ছবি সেভ করা নেই। আগে `/thum` দিয়ে ছবি দিন।")
@@ -1151,8 +1180,14 @@ async def handle_text_inputs(client, message):
         total_items = len(items_to_process)
         pending_edits[user_id] = {}
 
+        has_channel_edits = any(item.get("channel_edit") for _, item in items_to_process)
+        if has_channel_edits and not saved_ch:
+            await message.reply_text("চ্যানেল এডিটের জন্য কোনো চ্যানেল সেভ করা নেই। আগে `/add` দিয়ে বা ENV-এ `CHANNEL_ID` দিয়ে চ্যানেল যুক্ত করুন।")
+            return
+
+        target_label = saved_ch["title"] if (has_channel_edits and saved_ch) else "Chat"
         status_msg = await message.reply_text(
-            f"**{saved_ch['title']}** চ্যানেলে এডিট শুরু হচ্ছে: `0/{total_items}` (Delay: `{upload_delay}`s)"
+            f"**{target_label}**-এ প্রসেস শুরু হচ্ছে: `0/{total_items}` (Delay: `{upload_delay}`s)"
         )
 
         success_count = 0
@@ -1160,7 +1195,7 @@ async def handle_text_inputs(client, message):
         last_reported_count = 0
 
         async with aiohttp.ClientSession() as session:
-            for idx, (msg_id, item) in enumerate(items_to_process, start=1):
+            for idx, (sort_key, item) in enumerate(items_to_process, start=1):
                 current_cap_data = user_captions.get(user_id)
                 if need_caption and current_cap_data:
                     final_caption = render_dynamic_caption(
@@ -1170,21 +1205,34 @@ async def handle_text_inputs(client, message):
                 else:
                     final_caption = format_bold_html(item["orig_caption"])
 
+                is_ch_edit = bool(item.get("channel_edit") and saved_ch and item.get("msg_id") is not None)
+                cover_to_use = active_cover if need_cover else None
+
                 while True:
-                    if mode == "caption":
-                        result = await api_edit_message_caption_only(
-                            session=session,
-                            chat_id=saved_ch["chat_id"],
-                            message_id=msg_id,
-                            caption=final_caption,
-                            parse_mode="HTML",
-                        )
+                    if is_ch_edit:
+                        msg_id = int(item["msg_id"])
+                        if mode == "caption":
+                            result = await api_edit_message_caption_only(
+                                session=session,
+                                chat_id=int(saved_ch["chat_id"]),
+                                message_id=msg_id,
+                                caption=final_caption,
+                                parse_mode="HTML",
+                            )
+                        else:
+                            result = await api_edit_message_media_cover(
+                                session=session,
+                                chat_id=int(saved_ch["chat_id"]),
+                                message_id=msg_id,
+                                api_type=item["api_type"],
+                                file_id=item["file_id"],
+                                cover_file_id=cover_to_use,
+                                caption=final_caption,
+                                parse_mode="HTML",
+                            )
                     else:
-                        cover_to_use = active_cover if need_cover else None
-                        result = await api_edit_message_media_cover(
-                            session=session,
-                            chat_id=saved_ch["chat_id"],
-                            message_id=msg_id,
+                        result = await api_send_media(
+                            chat_id=message.chat.id,
                             api_type=item["api_type"],
                             file_id=item["file_id"],
                             cover_file_id=cover_to_use,
@@ -1202,16 +1250,16 @@ async def handle_text_inputs(client, message):
                         wait_sec = retry_after + 1
                         try:
                             await status_msg.edit_text(
-                                f"⏳ FloodWait: `{wait_sec}`s অপেক্ষা করা হচ্ছে... (`{success_count}/{total_items}` edit হয়েছে)"
+                                f"⏳ FloodWait: `{wait_sec}`s অপেক্ষা করা হচ্ছে... (`{success_count}/{total_items}` সম্পন্ন হয়েছে)"
                             )
                         except Exception:
                             pass
                         await asyncio.sleep(wait_sec)
                     else:
-                        fail_errors.append(f"ID {msg_id}: {result.get('description', 'Error')}")
+                        fail_errors.append(f"ID {sort_key}: {result.get('description', 'Error')}")
                         break
 
-                # প্রতি ৫টি এডিট পরপর প্রোগ্রেস আপডেট (`10/80`—৮০টি post edit এর মধ্যে 10 edit হয়েছে)
+                # প্রতি ৫টি প্রসেস পরপর প্রোগ্রেস আপডেট (`10/80`—৮০টির মধ্যে 10 সম্পন্ন হয়েছে)
                 if (
                     success_count - last_reported_count >= 5
                     or idx == total_items
@@ -1219,17 +1267,17 @@ async def handle_text_inputs(client, message):
                     last_reported_count = success_count
                     try:
                         await status_msg.edit_text(
-                            f"⚡ এডিট চলছে: `{success_count}/{total_items}` (`{total_items}`টি post edit এর মধ্যে `{success_count}` edit হয়েছে)"
+                            f"⚡ প্রসেস চলছে: `{success_count}/{total_items}` (`{total_items}`টির মধ্যে `{success_count}` সম্পন্ন হয়েছে)"
                         )
                     except Exception:
                         pass
 
         summary = (
-            f"✅ সম্পন্ন হয়েছে! **{saved_ch['title']}** চ্যানেলে `{success_count}/{total_items}` "
-            f"(`{total_items}`টি post edit এর মধ্যে `{success_count}` edit হয়েছে)।"
+            f"✅ সম্পন্ন হয়েছে! **{target_label}**-এ `{success_count}/{total_items}` "
+            f"(`{total_items}`টির মধ্যে `{success_count}` সম্পন্ন হয়েছে)।"
         )
         if fail_errors:
-            summary += "\n\n**সমস্যা হওয়া পোস্ট:**\n" + "\n".join(fail_errors[:10])
+            summary += "\n\n**সমস্যা হওয়া আইটেম:**\n" + "\n".join(fail_errors[:10])
 
         await status_msg.edit_text(summary)
         schedule_auto_delete(client, status_msg, delay=8)
@@ -1250,43 +1298,21 @@ async def handle_direct_media(client, message):
         return
 
     user_id = message.from_user.id
-    mode = get_user_mode(user_id)
-    active_cover = user_cover_file_ids.get(user_id)
-    cap_data = user_captions.get(user_id)
-
-    need_cover = mode in ("cover", "both")
-    need_caption = mode in ("caption", "both")
-
-    if need_cover and not active_cover:
-        await message.reply_text("আগে `/thum` কমান্ড দিয়ে একটি ছবি পাঠান।")
-        return
-    if need_caption and not cap_data:
-        await message.reply_text("আগে `/cap` কমান্ড দিয়ে একটি caption সেট করুন।")
-        return
-
-    if need_caption and cap_data:
-        final_caption = render_dynamic_caption(cap_data["template"], cap_data["index"])
-        cap_data["index"] += 1
-    else:
-        final_caption = format_bold_html(message.caption or "")
-
-    cover_to_use = active_cover if need_cover else None
-
-    status_msg = await message.reply_text("বটে ভিডিও পাঠানো হচ্ছে...")
-    result = await api_send_media(
-        chat_id=message.chat.id,
-        api_type="video",
+    sort_key = queue_video_for_ok(
+        user_id=user_id,
         file_id=info["file_id"],
-        cover_file_id=cover_to_use,
-        caption=final_caption,
-        parse_mode="HTML",
+        api_type="video",
+        orig_caption=message.caption or "",
+        channel_edit=False,
+        msg_id=None,
+        fallback_order_id=getattr(message, "id", 0) or 0,
     )
-    if result.get("ok"):
-        await status_msg.delete()
-    else:
-        await status_msg.edit_text(
-            f"Telegram API রেসপন্স: `{result.get('description', result)}`"
-        )
+    queue = pending_edits.get(user_id, {})
+    info_msg = await message.reply_text(
+        f"ভিডিও সেভ হয়েছে (Queue ID: `{sort_key}`)। মোট জমা: `{len(queue)}`টি।\n"
+        "সব ভিডিও পাঠানো শেষ হলে **`ok`** লিখুন (ছোট ID থেকে পাঠানো শুরু হবে)।"
+    )
+    schedule_auto_delete(client, info_msg, delay=5)
 
 
 async def start_bot():
