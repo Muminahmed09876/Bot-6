@@ -9,6 +9,7 @@ motor
 pytz
 utils
 pymongo
+pyrofork
 dnspython
 psutil
 loggers
