@@ -879,7 +879,7 @@ async def run_batch_with_retry(coro_factory, items: list, delay_sec: float = 0.0
 
 
 # কোনো Channel বা Group-এ বটকে Admin করলে অটোমেটিক সেভ হয়ে যাবে
-@app.on_my_chat_member()
+@app.on_chat_member_updated()
 async def on_bot_chat_member_update(client, update):
     try:
         chat = getattr(update, "chat", None)
@@ -918,7 +918,7 @@ async def on_bot_chat_member_update(client, update):
                 except Exception:
                     pass
     except Exception as e:
-        print(f"on_my_chat_member error: {e}")
+        print(f"on_chat_member_updated error: {e}")
 
 
 @app.on_message(filters.command("start") & filters.private)
@@ -2128,8 +2128,9 @@ async def handle_direct_media(client, message):
         fallback_order_id=seq_order,
     )
     queue = pending_edits.get(user_id, {})
+    id_label = f"Queue ID: `{sort_key}`"
     info_msg = await message.reply_text(
-        f"ভিডিও সেভ হয়েছে (Queue ID: `{sort_key}`)। মোট জমা: `{len(queue)}`টি।\n"
+        f"ভিডিও সেভ হয়েছে ({id_label})। মোট জমা: `{len(queue)}`টি।\n"
         "সব ভিডিও পাঠানো শেষ হলে **`ok`** লিখুন (ছোট ID থেকে পাঠানো শুরু হবে)।"
     )
     schedule_auto_delete(client, info_msg, delay=5)
