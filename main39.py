@@ -192,7 +192,7 @@ user_upload_delays = {}      # {user_id: float}
 user_forward_tags = {}       # {user_id: bool} -> True = on, False = off
 user_captions = {}           # {user_id: {"template": str, "index": int}}
 user_modes = {}              # {user_id: "cover" | "caption" | "both"}
-pending_edits = {}           # {user_id: {sort_key: {"file_id": str, "api_type": str, "orig_caption": str, "channel_edit": bool, "msg_id": int | None}}}
+pending_edits = {}           # {user_id: {sort_key: {"file_id": str, "api_type": str, "orig_caption": str, "channel_edit": bool, "target_chat_id": int | None, "msg_id": int | None}}}
 resolved_channel_titles = {} # {chat_id: str}
 
 waiting_for_thumb = set()    # {user_id}
@@ -201,7 +201,7 @@ waiting_for_caption = set()  # {user_id}
 
 # /cover ফিচারের স্টেটসমূহ (command দিয়ে অফ না করা পর্যন্ত অটো অফ হবে না)
 cover_instant_mode = set()   # {user_id} -> /cover বা /cover off দিলে চালু থাকবে (ভিডিও পাঠালে/ফরোয়ার্ড করলে সাথে সাথে সেই ভিডিওর cover পাঠাবে)
-cover_batch_mode = set()     # {user_id} -> /cover on দিলে চালু থাকবে, /cover off দিলে instant mode-এ যাবে
+cover_batch_mode = set()     # {user_id} -> /cover on দিলে চালু থাকবে
 cover_batch_queue = {}       # {user_id: [{"file_id": str, "cover_file_id": str | None, "kind": str, "order": int, "chat_id": int, "msg_id": int}, ...]}
 cover_batch_counter = {}     # {user_id: int}
 
@@ -210,6 +210,25 @@ change_media_state = {}      # {user_id: {"stage": "posts" | "media", "posts": [
 
 # /create_post ফিচারের স্টেটসমূহ (command দিয়ে অফ না করা পর্যন্ত অটো অফ হবে না)
 create_post_state = {}       # {user_id: {"step": "image" | "name" | "gen" | "seasons", "photo_id": str | None, "name": str | None, "gen": str | None}}
+
+
+def clear_all_special_modes(user_id: int):
+    """
+    যেকোনো একটি mode চালু করার আগে ব্যাকগ্রাউন্ডে থাকা আগের সব mode ও তাদের অস্থায়ী ডাটা সম্পূর্ণ মুছে দেয়,
+    যাতে একটি mode বন্ধ করলে আগের কোনো mode অন হয়ে না থাকে।
+    """
+    cover_instant_mode.discard(user_id)
+    cover_batch_mode.discard(user_id)
+    cover_batch_queue.pop(user_id, None)
+    cover_batch_counter.pop(user_id, None)
+
+    change_media_state.pop(user_id, None)
+    create_post_state.pop(user_id, None)
+
+    waiting_for_thumb.discard(user_id)
+    waiting_for_channel.discard(user_id)
+    waiting_for_caption.discard(user_id)
+    pending_edits.pop(user_id, None)
 
 
 def extract_forward_origin_info(message):
@@ -309,6 +328,22 @@ def ensure_user_channels_loaded(user_id: int) -> list[dict]:
     return user_channel_lists[user_id]
 
 
+def is_saved_user_channel_or_group(user_id: int, chat_id: int | None) -> bool:
+    if chat_id is None:
+        return False
+    cid = int(chat_id)
+    if cid in [int(x) for x in ENV_CHANNEL_IDS]:
+        return True
+    ch_list = ensure_user_channels_loaded(user_id)
+    for item in ch_list:
+        if int(item["chat_id"]) == cid:
+            return True
+    active = user_channels.get(user_id)
+    if active and int(active["chat_id"]) == cid:
+        return True
+    return False
+
+
 def save_user_channel_entry(user_id: int, chat_id: int, title: str | None = None, set_active: bool = True) -> dict:
     ch_list = ensure_user_channels_loaded(user_id)
     existing = None
@@ -368,15 +403,18 @@ def queue_video_for_ok(
     api_type: str = "video",
     orig_caption: str = "",
     channel_edit: bool = False,
+    target_chat_id: int | None = None,
     msg_id: int | None = None,
     fallback_order_id: int = 0,
 ) -> int:
     queue = pending_edits.setdefault(user_id, {})
     if channel_edit and msg_id is not None:
+        # চ্যানেল বা গ্রুপের আসল পোস্ট ID অনুযায়ী ছোট থেকে বড় সিরিয়াল বজায় রাখা
         sort_key = int(msg_id)
-        while sort_key in queue and queue[sort_key].get("file_id") != file_id:
+        while sort_key in queue:
             sort_key += 1
     else:
+        # ইউজারের মেসেজ ID বা ফরোয়ার্ড পোস্ট ID অনুযায়ী ছোট থেকে বড় সিরিয়াল বজায় রাখা
         base_num = int(fallback_order_id) if fallback_order_id else (int(msg_id) if msg_id is not None else 1)
         if base_num <= 0:
             base_num = len(queue) + 1
@@ -389,6 +427,7 @@ def queue_video_for_ok(
         "api_type": api_type,
         "orig_caption": orig_caption or "",
         "channel_edit": bool(channel_edit),
+        "target_chat_id": int(target_chat_id) if target_chat_id is not None else None,
         "msg_id": int(msg_id) if msg_id is not None else None,
     }
     return sort_key
@@ -453,7 +492,6 @@ def extract_video_own_cover_file_id(message) -> str | None:
     """
     vid = getattr(message, "video", None)
     if vid:
-        # প্রথমে cover লিস্ট বা অবজেক্ট চেক করি
         cov = getattr(vid, "cover", None)
         if cov:
             if isinstance(cov, list) and len(cov) > 0:
@@ -466,7 +504,6 @@ def extract_video_own_cover_file_id(message) -> str | None:
                 if fid:
                     return fid
 
-        # এরপর thumbs / thumbnail চেক করি
         thumbs = getattr(vid, "thumbs", None)
         if thumbs and isinstance(thumbs, list) and len(thumbs) > 0:
             last_th = thumbs[-1]
@@ -800,7 +837,6 @@ async def extract_cover_from_message_via_api(client, message) -> str | None:
     if direct_cov:
         return direct_cov
 
-    # যদি Pyrogram অবজেক্টে cover না থাকে, তাহলে copyMessage / forwardMessage করে Bot API JSON রেসপন্স থেকে cover নেওয়া
     try:
         copy_res = await tg_session_post(
             "copyMessage",
@@ -844,7 +880,6 @@ async def send_video_own_cover(client, chat_id: int, message=None, own_cover_fil
         )
         if res.get("ok"):
             return res
-        # যদি photo হিসেবে না যায় তবে document হিসেবে পাঠানোর চেষ্টা
         return await tg_session_post(
             "sendDocument",
             {
@@ -956,14 +991,11 @@ async def cmd_cover(client, message):
 
     if len(parts) < 2 or not parts[1].strip():
         if user_id in cover_instant_mode or user_id in cover_batch_mode:
-            cover_instant_mode.discard(user_id)
-            cover_batch_mode.discard(user_id)
-            cover_batch_queue.pop(user_id, None)
-            cover_batch_counter.pop(user_id, None)
-            await message.reply_text("Cover mode **OFF** করা হয়েছে।")
+            clear_all_special_modes(user_id)
+            await message.reply_text("Cover mode **OFF** করা হয়েছে। বট এখন Normal mode-এ আছে।")
         else:
+            clear_all_special_modes(user_id)
             cover_instant_mode.add(user_id)
-            cover_batch_mode.discard(user_id)
             await message.reply_text(
                 "Cover instant mode **ON** করা হয়েছে। এখন যেকোনো ভিডিও send বা forward করলে সাথে সাথে সেই ভিডিওর নিজস্ব cover image পাঠাবে। আবার `/cover` দিলে এটি OFF হবে।"
             )
@@ -971,8 +1003,8 @@ async def cmd_cover(client, message):
 
     sub_cmd = parts[1].strip().lower()
     if sub_cmd == "on":
+        clear_all_special_modes(user_id)
         cover_batch_mode.add(user_id)
-        cover_instant_mode.discard(user_id)
         cover_batch_queue[user_id] = []
         cover_batch_counter[user_id] = 0
         await message.reply_text(
@@ -981,9 +1013,7 @@ async def cmd_cover(client, message):
         return
 
     if sub_cmd == "off":
-        cover_batch_mode.discard(user_id)
-        cover_batch_queue.pop(user_id, None)
-        cover_batch_counter.pop(user_id, None)
+        clear_all_special_modes(user_id)
         cover_instant_mode.add(user_id)
         await message.reply_text(
             "Cover batch mode **OFF** করা হয়েছে। এখন ভিডিও পাঠানোর সাথে সাথে সেই ভিডিওর cover image পাঠাবে। (সম্পূর্ণ বন্ধ করতে `/cover` দিন)"
@@ -1000,8 +1030,8 @@ async def cmd_change_media(client, message):
     user_id = message.from_user.id
 
     if user_id in change_media_state:
-        del change_media_state[user_id]
-        await message.reply_text("Change media mode **OFF** করা হয়েছে।")
+        clear_all_special_modes(user_id)
+        await message.reply_text("Change media mode **OFF** করা হয়েছে। বট এখন Normal mode-এ আছে।")
         return
 
     await resolve_all_user_channel_titles(client, user_id)
@@ -1012,6 +1042,7 @@ async def cmd_change_media(client, message):
         )
         return
 
+    clear_all_special_modes(user_id)
     change_media_state[user_id] = {
         "stage": "posts",
         "posts": [],
@@ -1031,10 +1062,11 @@ async def cmd_create_post(client, message):
     user_id = message.from_user.id
 
     if user_id in create_post_state:
-        del create_post_state[user_id]
-        await message.reply_text("Create post mode **OFF** (বন্ধ) করা হয়েছে।")
+        clear_all_special_modes(user_id)
+        await message.reply_text("Create post mode **OFF** (বন্ধ) করা হয়েছে। বট এখন Normal mode-এ আছে।")
         return
 
+    clear_all_special_modes(user_id)
     create_post_state[user_id] = {
         "step": "image",
         "photo_id": None,
@@ -1196,8 +1228,7 @@ async def cmd_thum(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
     user_id = message.from_user.id
-    waiting_for_channel.discard(user_id)
-    waiting_for_caption.discard(user_id)
+    clear_all_special_modes(user_id)
     waiting_for_thumb.add(user_id)
     await message.reply_text(
         "দয়া করে Cover/Thumbnail-এর জন্য একটি ছবি **send** অথবা **forward** করুন।"
@@ -1279,8 +1310,7 @@ async def cmd_add_channel(client, message):
         return
     user_id = message.from_user.id
     await resolve_all_user_channel_titles(client, user_id)
-    waiting_for_thumb.discard(user_id)
-    waiting_for_caption.discard(user_id)
+    clear_all_special_modes(user_id)
 
     # সরাসরি /add -1001234567890 দিলে ম্যানুয়ালি সেভ করবে
     parts = (message.text or "").split(maxsplit=1)
@@ -1313,8 +1343,7 @@ async def cmd_cap(client, message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
     user_id = message.from_user.id
-    waiting_for_thumb.discard(user_id)
-    waiting_for_channel.discard(user_id)
+    clear_all_special_modes(user_id)
     waiting_for_caption.add(user_id)
     await message.reply_text(
         "দয়া করে আপনার কাস্টম **Caption** টেমপ্লেটটি পাঠান।\n\n"
@@ -1450,7 +1479,7 @@ async def handle_photo(client, message):
         return
     user_id = message.from_user.id
     origin_chat, _ = extract_forward_origin_info(message)
-    if origin_chat and getattr(origin_chat, "type", None) == ChatType.CHANNEL and user_id in waiting_for_channel:
+    if origin_chat and getattr(origin_chat, "type", None) in (ChatType.CHANNEL, ChatType.GROUP, ChatType.SUPERGROUP) and user_id in waiting_for_channel:
         saved_entry = save_user_channel_entry(
             user_id=user_id,
             chat_id=origin_chat.id,
@@ -1476,7 +1505,7 @@ async def handle_photo(client, message):
     if cm and cm.get("stage") == "media":
         cm["counter"] += 1
         cm["media"].append({
-            "order": cm["counter"],
+            "order": int(getattr(message, "id", 0) or cm["counter"]),
             "api_type": "photo",
             "file_id": message.photo.file_id,
             "orig_caption": message.caption or "",
@@ -1484,7 +1513,7 @@ async def handle_photo(client, message):
             "source_msg_id": message.id,
         })
         info_msg = await message.reply_text(
-            f"ইমেজ সেভ হয়েছে (Serial: `{cm['counter']}`)। মোট মিডিয়া: `{len(cm['media'])}`টি। শেষ হলে **`ok`** লিখুন।"
+            f"ইমেজ সেভ হয়েছে (ID: `{message.id}`)। মোট মিডিয়া: `{len(cm['media'])}`টি। শেষ হলে **`ok`** লিখুন।"
         )
         schedule_auto_delete(client, info_msg, delay=5)
         return
@@ -1507,13 +1536,13 @@ async def handle_forwarded(client, message):
     user_id = message.from_user.id
     origin_chat, origin_msg_id = extract_forward_origin_info(message)
 
-    if origin_chat and getattr(origin_chat, "type", None) == ChatType.CHANNEL and getattr(origin_chat, "title", None):
+    if origin_chat and getattr(origin_chat, "type", None) in (ChatType.CHANNEL, ChatType.GROUP, ChatType.SUPERGROUP) and getattr(origin_chat, "title", None):
         resolved_channel_titles[int(origin_chat.id)] = str(origin_chat.title).strip()
 
     if user_id in waiting_for_channel:
-        if not origin_chat or getattr(origin_chat, "type", None) != ChatType.CHANNEL:
+        if not origin_chat or getattr(origin_chat, "type", None) not in (ChatType.CHANNEL, ChatType.GROUP, ChatType.SUPERGROUP):
             await message.reply_text(
-                "দয়া করে একটি **Channel** থেকে মেসেজ, ইমেজ, ভিডিও বা ফাইল forward করুন অথবা চ্যানেল ID লিখুন।"
+                "দয়া করে একটি **Channel** বা **Group** থেকে মেসেজ, ইমেজ, ভিডিও বা ফাইল forward করুন অথবা চ্যানেল ID লিখুন।"
             )
             return
         saved_entry = save_user_channel_entry(
@@ -1528,7 +1557,7 @@ async def handle_forwarded(client, message):
         )
         return
 
-    # /change_media ফরোয়ার্ড হ্যান্ডলিং
+    # /change_media ফরোয়ার্ড হ্যান্ডলিং (যখন change_media mode চালু আছে)
     cm = change_media_state.get(user_id)
     if cm:
         if cm.get("stage") == "posts":
@@ -1538,14 +1567,14 @@ async def handle_forwarded(client, message):
             has_media_now = bool(getattr(message, "photo", None) or getattr(message, "video", None) or getattr(message, "document", None))
             cm["counter"] += 1
             cm["posts"].append({
-                "serial": cm["counter"],
+                "serial": int(post_msg_id) if post_msg_id > 0 else cm["counter"],
                 "chat_id": post_chat_id,
                 "msg_id": post_msg_id,
                 "has_media": has_media_now,
                 "orig_caption": message.caption or message.text or "",
             })
             info_msg = await message.reply_text(
-                f"চ্যানেল পোস্ট সেভ হয়েছে (Serial: `{cm['counter']}`, Msg ID: `{post_msg_id}`)। মোট পোস্ট: `{len(cm['posts'])}`টি। শেষ হলে **`ok`** লিখুন।"
+                f"চ্যানেল পোস্ট সেভ হয়েছে (Post ID: `{post_msg_id}`)। মোট পোস্ট: `{len(cm['posts'])}`টি। শেষ হলে **`ok`** লিখুন।"
             )
             schedule_auto_delete(client, info_msg, delay=5)
             return
@@ -1555,7 +1584,7 @@ async def handle_forwarded(client, message):
             if p_or_v and p_or_v.get("kind") != "document":
                 cm["counter"] += 1
                 cm["media"].append({
-                    "order": cm["counter"],
+                    "order": int(getattr(message, "id", 0) or cm["counter"]),
                     "api_type": p_or_v["api_type"],
                     "file_id": p_or_v["file_id"],
                     "orig_caption": message.caption or "",
@@ -1563,10 +1592,14 @@ async def handle_forwarded(client, message):
                     "source_msg_id": message.id,
                 })
                 info_msg = await message.reply_text(
-                    f"মিডিয়া সেভ হয়েছে (Serial: `{cm['counter']}`)। মোট মিডিয়া: `{len(cm['media'])}`টি। শেষ হলে **`ok`** লিখুন।"
+                    f"মিডিয়া সেভ হয়েছে (ID: `{message.id}`)। মোট মিডিয়া: `{len(cm['media'])}`টি। শেষ হলে **`ok`** লিখুন।"
                 )
                 schedule_auto_delete(client, info_msg, delay=5)
                 return
+
+    # /create_post mode চালু থাকলে ভিডিও এডিট/সেভ হবে না
+    if user_id in create_post_state:
+        return
 
     info = extract_media_info(message)
     if not info:
@@ -1593,7 +1626,7 @@ async def handle_forwarded(client, message):
     # /cover on (batch mode) চালু থাকলে সিরিয়াল অনুযায়ী সেভ করবে (অটো অফ হবে না)
     if user_id in cover_batch_mode:
         cover_batch_counter[user_id] = cover_batch_counter.get(user_id, 0) + 1
-        seq_num = cover_batch_counter[user_id]
+        seq_num = int(getattr(message, "id", 0) or cover_batch_counter[user_id])
         cover_batch_queue.setdefault(user_id, []).append({
             "order": seq_num,
             "file_id": info["file_id"],
@@ -1603,24 +1636,38 @@ async def handle_forwarded(client, message):
             "msg_id": message.id,
         })
         info_msg = await message.reply_text(
-            f"Cover batch-এ ভিডিও সেভ হয়েছে (Serial: `{seq_num}`)। মোট: `{len(cover_batch_queue[user_id])}`টি। শেষ হলে **`ok`** লিখুন।"
+            f"Cover batch-এ ভিডিও সেভ হয়েছে (ID: `{seq_num}`)। মোট: `{len(cover_batch_queue[user_id])}`টি। শেষ হলে **`ok`** লিখুন।"
         )
         schedule_auto_delete(client, info_msg, delay=5)
         return
 
-    # Forward video-ও send video-এর মতো করে file_id save করবে যাতে একাধিক চ্যানেল থাকলেও সিরিয়াল ঠিক থাকে
-    seq_order = (len(pending_edits.get(user_id, {})) + 1)
+    # Normal mode: সেভ করা বা অটো-সেভ হওয়া চ্যানেল/গ্রুপের পোস্ট হলে সরাসরি চ্যানেল/গ্রুপের পোস্ট এডিট করবে
+    await resolve_all_user_channel_titles(client, user_id)
+    origin_cid = int(origin_chat.id) if origin_chat else None
+    is_saved_channel_post = bool(
+        origin_cid is not None
+        and origin_msg_id is not None
+        and is_saved_user_channel_or_group(user_id, origin_cid)
+    )
+
+    msg_order_id = int(getattr(message, "id", 0) or (len(pending_edits.get(user_id, {})) + 1))
     sort_key = queue_video_for_ok(
         user_id=user_id,
         file_id=info["file_id"],
         api_type="video",
         orig_caption=message.caption or "",
-        channel_edit=False,
-        msg_id=None,
-        fallback_order_id=seq_order,
+        channel_edit=is_saved_channel_post,
+        target_chat_id=origin_cid if is_saved_channel_post else None,
+        msg_id=int(origin_msg_id) if is_saved_channel_post else None,
+        fallback_order_id=msg_order_id,
     )
     queue = pending_edits.get(user_id, {})
-    id_label = f"Queue ID: `{sort_key}`"
+    if is_saved_channel_post:
+        ch_title = resolved_channel_titles.get(origin_cid, f"Channel ({origin_cid})")
+        id_label = f"Channel Post ID: `{origin_msg_id}` ({ch_title})"
+    else:
+        id_label = f"Queue ID: `{sort_key}`"
+
     info_msg = await message.reply_text(
         f"ভিডিও সেভ হয়েছে ({id_label})। মোট জমা: `{len(queue)}`টি।\n"
         "সব ভিডিও পাঠানো শেষ হলে **`ok`** লিখুন (ছোট ID থেকে পাঠানো/এডিট শুরু হবে)।"
@@ -1800,7 +1847,6 @@ async def handle_text_inputs(client, message):
                             m_type = assigned_media["api_type"]
                             m_fid = assigned_media["file_id"]
 
-                            # copyMessage কল করে মিডিয়া রেফারেন্স ভেরিফাই/কপি করা (ইউজারকে না পাঠিয়ে চ্যানেলে এডিট)
                             src_chat = assigned_media.get("source_chat_id")
                             src_mid = assigned_media.get("source_msg_id")
                             if src_chat and src_mid and m_type == "video":
@@ -1884,20 +1930,28 @@ async def handle_text_inputs(client, message):
                 f"ভিডিওগুলোর Cover পাঠানো শুরু হচ্ছে: `0/{len(batch_items)}`..."
             )
 
-            async def _send_batch_cover(b_item):
-                return await send_video_own_cover(
+            ok_cnt = 0
+            for b_item in batch_items:
+                res = await send_video_own_cover(
                     client=client,
                     chat_id=message.chat.id,
                     message=None,
                     own_cover_file_id=b_item.get("cover_file_id"),
                 )
+                if isinstance(res, dict) and not res.get("ok"):
+                    retry_after = extract_retry_after(res)
+                    if retry_after is not None:
+                        await asyncio.sleep(retry_after + 1)
+                        res = await send_video_own_cover(
+                            client=client,
+                            chat_id=message.chat.id,
+                            message=None,
+                            own_cover_file_id=b_item.get("cover_file_id"),
+                        )
+                if isinstance(res, dict) and res.get("ok"):
+                    ok_cnt += 1
+                await asyncio.sleep(get_user_upload_delay(user_id))
 
-            results = await run_batch_with_retry(
-                _send_batch_cover,
-                batch_items,
-                delay_sec=get_user_upload_delay(user_id),
-            )
-            ok_cnt = sum(1 for _, r in results if isinstance(r, dict) and r.get("ok"))
             await status_msg.edit_text(
                 f"✅ Cover batch সম্পন্ন হয়েছে! `{ok_cnt}/{len(batch_items)}`টি ভিডিওর cover পাঠানো হয়েছে।\n"
                 "(Cover batch mode এখনো ON আছে—বন্ধ করতে `/cover` বা `/cover off` দিন)"
@@ -1905,6 +1959,7 @@ async def handle_text_inputs(client, message):
             schedule_auto_delete(client, status_msg, delay=8)
             return
 
+        # Normal mode: ছোট ID থেকে বড় ID সিরিয়াল অনুযায়ী এডিট ও সেন্ড
         await resolve_all_user_channel_titles(client, user_id)
         queue = pending_edits.get(user_id)
         saved_ch = get_active_user_channel(user_id)
@@ -1932,13 +1987,9 @@ async def handle_text_inputs(client, message):
         pending_edits[user_id] = {}
 
         has_channel_edits = any(item.get("channel_edit") for _, item in items_to_process)
-        if has_channel_edits and not saved_ch:
-            await message.reply_text("চ্যানেল এডিটের জন্য কোনো চ্যানেল সেভ করা নেই। আগে `/add` দিয়ে বা ENV-এ `CHANNEL_ID` দিয়ে চ্যানেল যুক্ত করুন।")
-            return
-
-        target_label = saved_ch["title"] if (has_channel_edits and saved_ch) else "Chat"
+        target_label = "Channel/Group" if has_channel_edits else "Chat"
         status_msg = await message.reply_text(
-            f"**{target_label}**-এ প্রসেস শুরু হচ্ছে: `0/{total_items}` (Delay: `{upload_delay}`s)"
+            f"**{target_label}**-এ ছোট ID থেকে প্রসেস শুরু হচ্ছে: `0/{total_items}` (IDs: `{sorted_ids[0]}` → `{sorted_ids[-1]}`)"
         )
 
         success_count = 0
@@ -1946,7 +1997,6 @@ async def handle_text_inputs(client, message):
         last_reported_count = 0
 
         async with aiohttp.ClientSession() as session:
-            prepared_tasks = []
             for idx, (sort_key, item) in enumerate(items_to_process, start=1):
                 current_cap_data = user_captions.get(user_id)
                 if need_caption and current_cap_data:
@@ -1957,46 +2007,45 @@ async def handle_text_inputs(client, message):
                 else:
                     final_caption = format_bold_html(item["orig_caption"])
 
-                is_ch_edit = bool(item.get("channel_edit") and saved_ch and item.get("msg_id") is not None)
+                target_cid = item.get("target_chat_id") or (int(saved_ch["chat_id"]) if saved_ch else None)
+                is_ch_edit = bool(item.get("channel_edit") and target_cid is not None and item.get("msg_id") is not None)
                 cover_to_use = active_cover if need_cover else None
-                prepared_tasks.append((sort_key, item, final_caption, is_ch_edit, cover_to_use))
 
-            async def _execute_single(entry):
-                s_key, itm, f_cap, is_c_edit, cov_id = entry
                 while True:
-                    if is_c_edit:
-                        msg_id = int(itm["msg_id"])
+                    if is_ch_edit:
+                        msg_id = int(item["msg_id"])
                         if mode == "caption":
                             res = await api_edit_message_caption_only(
                                 session=session,
-                                chat_id=int(saved_ch["chat_id"]),
+                                chat_id=int(target_cid),
                                 message_id=msg_id,
-                                caption=f_cap,
+                                caption=final_caption,
                                 parse_mode="HTML",
                             )
                         else:
                             res = await api_edit_message_media_cover(
                                 session=session,
-                                chat_id=int(saved_ch["chat_id"]),
+                                chat_id=int(target_cid),
                                 message_id=msg_id,
-                                api_type=itm["api_type"],
-                                file_id=itm["file_id"],
-                                cover_file_id=cov_id,
-                                caption=f_cap,
+                                api_type=item["api_type"],
+                                file_id=item["file_id"],
+                                cover_file_id=cover_to_use,
+                                caption=final_caption,
                                 parse_mode="HTML",
                             )
                     else:
                         res = await api_send_media(
                             chat_id=message.chat.id,
-                            api_type=itm["api_type"],
-                            file_id=itm["file_id"],
-                            cover_file_id=cov_id,
-                            caption=f_cap,
+                            api_type=item["api_type"],
+                            file_id=item["file_id"],
+                            cover_file_id=cover_to_use,
+                            caption=final_caption,
                             parse_mode="HTML",
                         )
 
                     if res.get("ok"):
-                        return s_key, res
+                        success_count += 1
+                        break
 
                     retry_after = extract_retry_after(res)
                     if retry_after is not None:
@@ -2009,29 +2058,15 @@ async def handle_text_inputs(client, message):
                             pass
                         await asyncio.sleep(wait_sec)
                     else:
-                        return s_key, res
+                        fail_errors.append(f"ID {sort_key}: {res.get('description', 'Error')}")
+                        break
 
-            batch_size = 4
-            for b_start in range(0, len(prepared_tasks), batch_size):
-                batch_chunk = prepared_tasks[b_start : b_start + batch_size]
-                chunk_outcomes = await asyncio.gather(
-                    *[_execute_single(e) for e in batch_chunk],
-                    return_exceptions=False,
-                )
-                for s_key, res in chunk_outcomes:
-                    if isinstance(res, dict) and res.get("ok"):
-                        success_count += 1
-                    else:
-                        err_desc = res.get("description", "Error") if isinstance(res, dict) else str(res)
-                        fail_errors.append(f"ID {s_key}: {err_desc}")
-
-                if upload_delay > 0 and b_start + batch_size < len(prepared_tasks):
+                if upload_delay > 0 and idx < total_items:
                     await asyncio.sleep(upload_delay)
 
-                processed_so_far = min(b_start + batch_size, total_items)
                 if (
                     success_count - last_reported_count >= 5
-                    or processed_so_far == total_items
+                    or idx == total_items
                 ) and success_count != last_reported_count:
                     last_reported_count = success_count
                     try:
@@ -2064,7 +2099,7 @@ async def handle_direct_media(client, message):
         if p_or_v and p_or_v.get("kind") != "document":
             cm["counter"] += 1
             cm["media"].append({
-                "order": cm["counter"],
+                "order": int(getattr(message, "id", 0) or cm["counter"]),
                 "api_type": p_or_v["api_type"],
                 "file_id": p_or_v["file_id"],
                 "orig_caption": message.caption or "",
@@ -2072,10 +2107,14 @@ async def handle_direct_media(client, message):
                 "source_msg_id": message.id,
             })
             info_msg = await message.reply_text(
-                f"মিডিয়া সেভ হয়েছে (Serial: `{cm['counter']}`)। মোট মিডিয়া: `{len(cm['media'])}`টি। শেষ হলে **`ok`** লিখুন।"
+                f"মিডিয়া সেভ হয়েছে (ID: `{message.id}`)। মোট মিডিয়া: `{len(cm['media'])}`টি। শেষ হলে **`ok`** লিখুন।"
             )
             schedule_auto_delete(client, info_msg, delay=5)
             return
+
+    # /create_post mode চালু থাকলে ভিডিও এডিট/সেভ হবে না
+    if user_id in create_post_state:
+        return
 
     info = extract_media_info(message)
     if not info:
@@ -2102,7 +2141,7 @@ async def handle_direct_media(client, message):
     # /cover on (batch mode) চালু থাকলে সিরিয়াল অনুযায়ী সেভ করবে (অটো অফ হবে না)
     if user_id in cover_batch_mode:
         cover_batch_counter[user_id] = cover_batch_counter.get(user_id, 0) + 1
-        seq_num = cover_batch_counter[user_id]
+        seq_num = int(getattr(message, "id", 0) or cover_batch_counter[user_id])
         cover_batch_queue.setdefault(user_id, []).append({
             "order": seq_num,
             "file_id": info["file_id"],
@@ -2112,25 +2151,25 @@ async def handle_direct_media(client, message):
             "msg_id": message.id,
         })
         info_msg = await message.reply_text(
-            f"Cover batch-এ ভিডিও সেভ হয়েছে (Serial: `{seq_num}`)। মোট: `{len(cover_batch_queue[user_id])}`টি। শেষ হলে **`ok`** লিখুন।"
+            f"Cover batch-এ ভিডিও সেভ হয়েছে (ID: `{seq_num}`)। মোট: `{len(cover_batch_queue[user_id])}`টি। শেষ হলে **`ok`** লিখুন।"
         )
         schedule_auto_delete(client, info_msg, delay=5)
         return
 
-    seq_order = (len(pending_edits.get(user_id, {})) + 1)
+    msg_order_id = int(getattr(message, "id", 0) or (len(pending_edits.get(user_id, {})) + 1))
     sort_key = queue_video_for_ok(
         user_id=user_id,
         file_id=info["file_id"],
         api_type="video",
         orig_caption=message.caption or "",
         channel_edit=False,
+        target_chat_id=None,
         msg_id=None,
-        fallback_order_id=seq_order,
+        fallback_order_id=msg_order_id,
     )
     queue = pending_edits.get(user_id, {})
-    id_label = f"Queue ID: `{sort_key}`"
     info_msg = await message.reply_text(
-        f"ভিডিও সেভ হয়েছে ({id_label})। মোট জমা: `{len(queue)}`টি।\n"
+        f"ভিডিও সেভ হয়েছে (Queue ID: `{sort_key}`)। মোট জমা: `{len(queue)}`টি।\n"
         "সব ভিডিও পাঠানো শেষ হলে **`ok`** লিখুন (ছোট ID থেকে পাঠানো শুরু হবে)।"
     )
     schedule_auto_delete(client, info_msg, delay=5)
